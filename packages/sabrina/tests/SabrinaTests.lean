@@ -7,3 +7,4 @@ import SabrinaTests.OWL2
 import SabrinaTests.OWL2Datatypes
 import SabrinaTests.SROIQD
 import SabrinaTests.OFN
+import SabrinaTests.StrictAndRegex

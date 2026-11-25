@@ -26,6 +26,9 @@ HEADLINE_THEOREMS = [
     "Sabrina.OWL2.RoleHierarchy.GrammarBoundary.grammarOntology_writtenRegular",
     "Sabrina.OWL2.RoleHierarchy.GrammarBoundary.grammarSubclass_entails_iff",
     "Sabrina.OWL2.RoleHierarchy.Unified.decideRegularOWL2DLReal_ontology_iff",
+    "Sabrina.OWL2.StrictOWL2DL.checkStrictOWL2DL_iff",
+    "Sabrina.OWL2.StrictOWL2DL.diagnoseStrictOWL2DL_isNone_iff",
+    "Sabrina.OWL2.StrictOWL2DL.decideStrictOWL2DLReal_iff",
 ]
 
 

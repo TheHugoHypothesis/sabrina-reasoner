@@ -1,6 +1,7 @@
 import Sabrina.OWL2.Datatypes.Lexical
 import Sabrina.OWL2.Datatypes.DecimalSpace
 import Sabrina.OWL2.Datatypes.XMLNames
+import Sabrina.OWL2.Datatypes.UnicodeCategories
 
 /-! Value representations, lexical decoders, and facet relations for the
 remaining standard OWL 2 DL datatype families: floating-point (`xsd:float`,
@@ -1076,8 +1077,10 @@ structural equality. -/
 inductive PatternClass where
   | empty
   | interval (lo hi : Char)
+  | ranges (rs : List (Nat × Nat))
   | nameStart | nameChar | space | word
   | union (a b : PatternClass)
+  | diff (a b : PatternClass)
   | neg (a : PatternClass)
   | lowerASCII (a : PatternClass)
   deriving DecidableEq
@@ -1086,11 +1089,13 @@ def PatternClass.accepts (p : PatternClass) (c : Char) : Bool :=
   match p with
   | .empty => false
   | .interval lo hi => lo ≤ c && c ≤ hi
+  | .ranges rs => XMLNames.inRanges rs c.toNat
   | .nameStart => isNameStartChar c
   | .nameChar => isNameChar c
   | .space => c == ' ' || c == '\t' || c == '\n' || c == '\r'
   | .word => c.isAlphanum || c == '_'
   | .union a b => a.accepts c || b.accepts c
+  | .diff a b => a.accepts c && !b.accepts c
   | .neg a => !a.accepts c
   | .lowerASCII a => a.accepts (toLowerAscii c)
 
@@ -1134,36 +1139,129 @@ def Regex.deriv (c : Char) : Regex → Regex
   | .alt a b => Regex.mkAlt (a.deriv c) (b.deriv c)
   | .star r => Regex.mkSeq (r.deriv c) (.star r)
 
-private def parseEscape (c : Char) : PatternClass :=
-  match c with
-  | 'i' => .nameStart
-  | 'I' => .neg .nameStart
-  | 'c' => .nameChar
-  | 'C' => .neg .nameChar
-  | 'd' => .interval '0' '9'
-  | 'D' => .neg (.interval '0' '9')
-  | 'w' => .word
-  | 'W' => .neg .word
-  | 's' => .space
-  | 'S' => .neg .space
-  | 'n' => .interval '\n' '\n'
-  | 'r' => .interval '\r' '\r'
-  | 't' => .interval '\t' '\t'
-  | ch => .interval ch ch
+/-- W3C XSD 1.1 Part 2 Appendix G `SingleCharEsc`. -/
+private def parseSingleCharEsc : Char → Option Char
+  | 'n' => some '\n'
+  | 'r' => some '\r'
+  | 't' => some '\t'
+  | '\\' => some '\\'
+  | '|' => some '|'
+  | '.' => some '.'
+  | '-' => some '-'
+  | '^' => some '^'
+  | '?' => some '?'
+  | '*' => some '*'
+  | '+' => some '+'
+  | '{' => some '{'
+  | '}' => some '}'
+  | '(' => some '('
+  | ')' => some ')'
+  | '[' => some '['
+  | ']' => some ']'
+  | _ => none
 
-private def parseCharClass (cs : List Char) : Option (PatternClass × List Char) :=
-  let (neg, rest) := match cs with | '^' :: t => (true, t) | t => (false, t)
-  let rec go (acc : PatternClass) : List Char → Option (PatternClass × List Char)
-    | [] => none
-    | ']' :: t => some (if neg then .neg acc else acc, t)
-    | '\\' :: c :: t => go (.union acc (parseEscape c)) t
-    | c1 :: '-' :: c2 :: t =>
-      if c2 == ']' then
+/-- Parse `{Name}` after `\p` or `\P` for W3C XSD 1.1 Unicode General Categories and `Is...` blocks. -/
+private def parseCategoryEscape (neg : Bool) : List Char → Option (PatternClass × List Char)
+  | '{' :: rest =>
+    let (nameCs, tail) := rest.span (· != '}')
+    match tail with
+    | '}' :: rem =>
+      match UnicodeCategories.lookupCategoryOrBlock (String.ofList nameCs) with
+      | some rs => some (if neg then .neg (.ranges rs) else .ranges rs, rem)
+      | none => none
+    | _ => none
+  | _ => none
+
+/-- Parse a W3C XSD 1.1 escape sequence after `\` (single-char, multi-char, or category/block).
+    Per XSD 1.1 Appendix G:
+    - `\d` / `\D` is Unicode category `Nd` (all decimal digits, not just ASCII `0-9`)
+    - `\w` / `\W` is `[#x0000-#x10FFFF]-[\p{P}\p{Z}\p{C}]`
+    - `\s` / `\S` is `[#x20\t\n\r]`
+    - `\i` / `\I` and `\c` / `\C` are XML 1.0 `NameStartChar` and `NameChar`
+    - `\p{...}` / `\P{...}` select Unicode General Categories and `Is...` blocks. -/
+private def parseEscapeSeq : List Char → Option (PatternClass × List Char)
+  | 'i' :: t => some (.nameStart, t)
+  | 'I' :: t => some (.neg .nameStart, t)
+  | 'c' :: t => some (.nameChar, t)
+  | 'C' :: t => some (.neg .nameChar, t)
+  | 'd' :: t => some (.ranges UnicodeCategories.catNd, t)
+  | 'D' :: t => some (.neg (.ranges UnicodeCategories.catNd), t)
+  | 'w' :: t => some (.ranges UnicodeCategories.xsdWordRanges, t)
+  | 'W' :: t => some (.neg (.ranges UnicodeCategories.xsdWordRanges), t)
+  | 's' :: t => some (.space, t)
+  | 'S' :: t => some (.neg .space, t)
+  | 'p' :: t => parseCategoryEscape false t
+  | 'P' :: t => parseCategoryEscape true t
+  | ch :: t => (parseSingleCharEsc ch).map fun c => (.interval c c, t)
+  | [] => none
+
+/-- Parse one single character (literal or `SingleCharEsc`) valid as a range endpoint inside `[...]`. -/
+private def parseCharClassSingle : List Char → Option (Char × List Char)
+  | '\\' :: ch :: t => (parseSingleCharEsc ch).map fun c => (c, t)
+  | '[' :: _ | ']' :: _ | '\\' :: [] | [] => none
+  | c :: t => some (c, t)
+
+/-- Parse a W3C XSD 1.1 character class expression after `[`, supporting:
+    - Positive `[...]` and negative `[^...]` groups
+    - Ranges `c1-c2` (including escaped endpoints, requiring `c1 ≤ c2`)
+    - Multi-char and Unicode category/block escapes (`\d`, `\w`, `\p{...}`, `\P{...}`, ...)
+    - Character class subtraction `[base-[sub]]` (arbitrarily nested). -/
+private def parseCharClassFuel : Nat → List Char → Option (PatternClass × List Char)
+  | 0, _ => none
+  | fuel + 1, cs =>
+    let (neg, rest) := match cs with | '^' :: t => (true, t) | t => (false, t)
+    let rec go (acc : PatternClass) (hasItem : Bool) :
+        Nat → List Char → Option (PatternClass × List Char)
+      | 0, _ => none
+      | _, [] => none
+      | _, ']' :: t =>
+        if !hasItem then none
+        else some (if neg then .neg acc else acc, t)
+      | _, '-' :: '[' :: t =>
+        if !hasItem then none
+        else
+          let base := if neg then .neg acc else acc
+          match parseCharClassFuel fuel t with
+          | some (sub, ']' :: t2) => some (.diff base sub, t2)
+          | _ => none
+      | _, '[' :: _ => none
+      | f + 1, '\\' :: ch :: t =>
+        match parseSingleCharEsc ch with
+        | some c1 =>
+          match t with
+          | '-' :: '[' :: _ => go (.union acc (.interval c1 c1)) true f t
+          | '-' :: ']' :: t2 =>
+            let acc' := .union (.union acc (.interval c1 c1)) (.interval '-' '-')
+            some (if neg then .neg acc' else acc', t2)
+          | '-' :: t2 =>
+            match parseCharClassSingle t2 with
+            | some (c2, t3) =>
+              if c1 ≤ c2 then go (.union acc (.interval c1 c2)) true f t3
+              else none
+            | none => none
+          | _ => go (.union acc (.interval c1 c1)) true f t
+        | none =>
+          match parseEscapeSeq (ch :: t) with
+          | some (pc, t2) => go (.union acc pc) true f t2
+          | none => none
+      | f + 1, c1 :: '-' :: '[' :: t =>
+        go (.union acc (.interval c1 c1)) true f ('-' :: '[' :: t)
+      | _, c1 :: '-' :: ']' :: t =>
         let acc' := .union (.union acc (.interval c1 c1)) (.interval '-' '-')
         some (if neg then .neg acc' else acc', t)
-      else go (.union acc (.interval c1 c2)) t
-    | c :: t => go (.union acc (.interval c c)) t
-  go .empty rest
+      | f + 1, c1 :: '-' :: t2 =>
+        match parseCharClassSingle t2 with
+        | some (c2, t3) =>
+          if c1 ≤ c2 then go (.union acc (.interval c1 c2)) true f t3
+          else none
+        | none => none
+      | f + 1, c :: t => go (.union acc (.interval c c)) true f t
+    go .empty false (rest.length + 2) rest
+
+private def isRegexMetaChar (c : Char) : Bool :=
+  c == '.' || c == '\\' || c == '?' || c == '*' || c == '+' ||
+  c == '{' || c == '}' || c == '(' || c == ')' || c == '|' ||
+  c == '[' || c == ']'
 
 private def repeatRegex (r : Regex) : Nat → Regex
   | 0 => .eps
@@ -1194,12 +1292,17 @@ private def parseRegexFuel : Nat → List Char → Option (Regex × List Char)
               | some (inner, ')' :: t2) => some (inner, t2)
               | _ => none
             | '[' :: t =>
-              match parseCharClass t with
+              match parseCharClassFuel (fuel + 1) t with
               | some (p, rem) => some (.pred p, rem)
               | none => none
-            | '\\' :: c :: t => some (.pred (parseEscape c), t)
+            | '\\' :: t =>
+              match parseEscapeSeq t with
+              | some (p, rem) => some (.pred p, rem)
+              | none => none
             | '.' :: t => some (.any, t)
-            | c :: t => some (.pred (.interval c c), t)
+            | c :: t =>
+              if isRegexMetaChar c then none
+              else some (.pred (.interval c c), t)
             | [] => none
           match step0 with
           | none => none

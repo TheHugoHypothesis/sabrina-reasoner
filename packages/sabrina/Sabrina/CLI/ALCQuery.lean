@@ -309,13 +309,13 @@ private def solve (req : Request Inclusion) : UInt32 × Json := Id.run do
     else fields
   return (0, response (verdictName evidence.verdict) true fields)
 
-private def solveJSON (j : Json) : UInt32 × Json :=
+private def solveJSON (j : Json) (cliStrict : Bool := false) : UInt32 × Json :=
   let version : Option Json := j.getArr?.toOption.bind fun fields => fields[0]?
   match version with
   | some (.str format) =>
     if format == DataQuery.requestFormat then DataQuery.run j
     else if format == SROIQDQuery.requestFormat then SROIQDQuery.run j
-    else if format == OFNQuery.requestFormat then OFNQuery.run j
+    else if format == OFNQuery.requestFormat then OFNQuery.run j cliStrict
     else solveInclusion j
   | _ => solveInclusion j
 where
@@ -324,10 +324,17 @@ where
     | .ok (.ordinary request) => solve request
     | .ok (.graded request) => solveGraded request
 
-def run : IO UInt32 := do
+def run (args : List String) : IO UInt32 := do
+  let mut strictOwl2DL := false
+  for arg in args do
+    if arg == "--strict-owl2dl" then
+      strictOwl2DL := true
+    else
+      IO.println (response "UNSUPPORTED" false [("reason", toJson s!"unknown CLI flag: {arg}")]).compress
+      return 2
   let input ← (← IO.getStdin).readToEnd
   let (code, result) := match Json.parse input with
-    | .ok j => solveJSON j
+    | .ok j => solveJSON j strictOwl2DL
     | .error reason => (2, response "UNSUPPORTED" false [("reason", toJson reason)])
   IO.println result.compress
   return code

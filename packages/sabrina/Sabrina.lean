@@ -14,6 +14,7 @@ import Sabrina.OWL2.Normalize
 import Sabrina.OWL2.DecisionProcedure
 import Sabrina.OWL2.FunctionalSyntax
 import Sabrina.OWL2.WellFormed
+import Sabrina.OWL2.StrictOWL2DL
 import Sabrina.OWL2.Profile
 import Sabrina.OWL2.EL
 import Sabrina.OWL2.IncrementalABox

@@ -1,6 +1,7 @@
 import Lean.Data.Json
 import Sabrina.OWL2.FunctionalSyntax
 import Sabrina.OWL2.Normalize
+import Sabrina.OWL2.StrictOWL2DL
 import Sabrina.OWL2.Profile
 import Sabrina.OWL2.EL
 import Sabrina.OWL2.SROIQD.Termination.SourceImportConformance
@@ -93,18 +94,32 @@ private def parseImportsObj (j : Json) : Except String (List (IRI × String)) :=
     out := (k, text) :: out
   return out.reverse
 
-private def parseLimitsObj (j : Json) : Except String Limits := do
+private structure QueryOptions where
+  limits : Limits := {}
+  hasCustomLimits : Bool := false
+  strictOwl2DL : Bool := false
+
+private def parseOptionsObj (j : Json) (cliStrict : Bool := false) : Except String QueryOptions := do
   let obj ← j.getObj?
   let mut limits : Limits := {}
+  let mut hasCustomLimits := false
+  let mut strictOwl2DL := cliStrict
   if let some v := obj.get? "max_worlds" then
     limits := { limits with worlds := ← v.getNat? }
+    hasCustomLimits := true
   if let some v := obj.get? "max_depth" then
     limits := { limits with depth := ← v.getNat? }
+    hasCustomLimits := true
   if let some v := obj.get? "max_visits" then
     limits := { limits with visits := ← v.getNat? }
+    hasCustomLimits := true
   else if let some v := obj.get? "max_steps" then
     limits := { limits with visits := ← v.getNat? }
-  return limits
+    hasCustomLimits := true
+  if let some v := obj.get? "strict_owl2dl" then
+    let b ← v.getBool?
+    strictOwl2DL := strictOwl2DL || b
+  return { limits, hasCustomLimits, strictOwl2DL }
 
 private def encodeLimits (limits : Limits) : Json :=
   Json.mkObj [
@@ -116,7 +131,8 @@ private def isOptionsObj (j : Json) : Bool :=
   match j.getObj? with
   | .ok obj =>
     obj.contains "max_worlds" || obj.contains "max_depth" ||
-    obj.contains "max_visits" || obj.contains "max_steps"
+    obj.contains "max_visits" || obj.contains "max_steps" ||
+    obj.contains "strict_owl2dl"
   | .error _ => false
 
 private def encodeProfile (qp : QueryProfile) (engine : String) : Json :=
@@ -190,19 +206,28 @@ private def usesReal (p : Problem) : Bool :=
     | _ => false
 
 private def runConsistency (id ofnText : String) (lib : List (IRI × String))
-    (limits : Limits := {}) (allowExact : Bool := true) : UInt32 × Json := Id.run do
+    (limits : Limits := {}) (allowExact : Bool := true)
+    (strictOwl2DL : Bool := false) : UInt32 × Json := Id.run do
   if id.isEmpty then return (2, response "UNSUPPORTED" false [("reason", toJson "empty ontology ID")])
   let scope := Json.mkObj [("semantics", toJson "owl2-ofn-sroiqd"), ("id", toJson id)]
-  let context := [("scope", scope)]
+  let baseContext := [("scope", scope)]
   let (_, ont) ← match resolveImports ofnText lib with
     | .ok r => pure r
-    | .error err => return (2, response "UNSUPPORTED" false (("reason", toJson s!"OFN parse/import error: {err}") :: context))
+    | .error err => return (2, response "UNSUPPORTED" false (("reason", toJson s!"OFN parse/import error: {err}") :: baseContext))
+  if strictOwl2DL then
+    if let some err := StrictOWL2DL.diagnoseStrictOWL2DL ont then
+      return (2, response "UNSUPPORTED" false
+        (("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson false) :: ("reason", toJson err) :: baseContext))
+  let context := if strictOwl2DL then
+      ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: baseContext
+    else baseContext
   let qp := profileQuery ont none
   -- Fast path: polynomial EL++ consequence-based classifier
   if qp.moduleFragment == .el then
     if let some elAxs := normalizeEL ont then
       if let some err := checkELRoleRegularity elAxs then
-        if let some verdict := tryObjectConsistency ofnText lib qp context then return verdict
+        if !strictOwl2DL then
+          if let some verdict := tryObjectConsistency ofnText lib qp context then return verdict
         return (2, response "UNSUPPORTED" false (("reason", toJson err) :: ("profile", encodeProfile qp "el-polynomial") :: context))
       if let some res := decideELConsistency elAxs then
         let ctx := ("profile", encodeProfile qp "el-polynomial") :: context
@@ -228,11 +253,19 @@ private def runConsistency (id ofnText : String) (lib : List (IRI × String))
         (("decision_basis", toJson (basis ++ "-v1")) ::
           ("profile", encodeProfile qp basis) :: context))
   if let some err := checkRoleRestrictions p then
-    if let some verdict := tryObjectConsistency ofnText lib qp context then return verdict
+    if !strictOwl2DL then
+      if let some verdict := tryObjectConsistency ofnText lib qp context then return verdict
     return (2, response "UNSUPPORTED" false (("reason", toJson err) :: ctx))
-  let some ev := propose p limits | return (2, response "UNKNOWN" false
-    (("reason", toJson "SROIQ(D) search could not certify consistency within interactive limits") ::
-     ("limits", encodeLimits limits) :: ctx))
+  let some ev := propose p limits | do
+    if allowExact then
+      if let some (_, sat) := SROIQD.Termination.SourceImport.decideRealSourceClosure? ofnText lib then
+        let verdict := if sat then "SATISFIABLE" else "INCONSISTENT_ONTOLOGY"
+        return (0, response verdict true
+          (("decision_basis", toJson "sroiqd-exact-consistency-v1") ::
+            ("profile", encodeProfile qp "sroiqd-exact-consistency") :: context))
+    return (2, response "UNKNOWN" false
+      (("reason", toJson "SROIQ(D) search could not certify consistency within interactive limits") ::
+       ("limits", encodeLimits limits) :: ctx))
   if !checkConsistency p limits.worlds ev then
     return (1, response "REJECTED" false (("reason", toJson "SROIQ(D) evidence failed checking") :: ctx))
   let verdict := if ev.isModel then "SATISFIABLE" else "INCONSISTENT_ONTOLOGY"
@@ -276,18 +309,27 @@ private def tryExactQuery (ofnText queryText : String) (lib : List (IRI × Strin
       ("profile", encodeProfile qp basis) :: context))
 
 private def runQuery (id ofnText queryText : String) (lib : List (IRI × String))
-    (limits : Limits := {}) (allowExact : Bool := true) : UInt32 × Json := Id.run do
+    (limits : Limits := {}) (allowExact : Bool := true)
+    (strictOwl2DL : Bool := false) : UInt32 × Json := Id.run do
   if id.isEmpty then return (2, response "UNSUPPORTED" false [("reason", toJson "empty ontology ID")])
   let scope := Json.mkObj [("semantics", toJson "owl2-ofn-sroiqd"), ("id", toJson id)]
-  let context := [("scope", scope), ("query", toJson queryText)]
+  let baseContext := [("scope", scope), ("query", toJson queryText)]
   let (prefixes, ont) ← match resolveImports ofnText lib with
     | .ok r => pure r
-    | .error err => return (2, response "UNSUPPORTED" false (("reason", toJson s!"OFN parse/import error: {err}") :: context))
+    | .error err => return (2, response "UNSUPPORTED" false (("reason", toJson s!"OFN parse/import error: {err}") :: baseContext))
   let qAx ← match parseQueryAxiom prefixes queryText with
     | .ok a => pure a
-    | .error err => return (2, response "UNSUPPORTED" false (("reason", toJson s!"OFN query parse error: {err}") :: context))
+    | .error err => return (2, response "UNSUPPORTED" false (("reason", toJson s!"OFN query parse error: {err}") :: baseContext))
+  if strictOwl2DL then
+    if let some err := StrictOWL2DL.diagnoseStrictOWL2DLQuery ont qAx then
+      return (2, response "UNSUPPORTED" false
+        (("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson false) :: ("reason", toJson err) :: baseContext))
+  let context := if strictOwl2DL then
+      ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: baseContext
+    else baseContext
   let qp := profileQuery ont (some qAx)
-  let tryGrounding := fun () => tryObjectSubclass ofnText queryText lib qp context
+  let tryGrounding := fun () =>
+    if strictOwl2DL then none else tryObjectSubclass ofnText queryText lib qp context
   -- Validate global OWL 2 DL structural/role restrictions on the full ontology
   -- (skipped only when full ontology is pure EL++, where regularity is checked directly in O(|RBox|))
   let fullCheck : Option (DatatypeDefs × Problem) ←
@@ -392,40 +434,40 @@ private def runQuery (id ofnText queryText : String) (lib : List (IRI × String)
     return (0, response verdict true (("certificate", cert) :: ctx))
   | _ => return (2, response "UNSUPPORTED" false (("reason", toJson "unsupported query reduction arity") :: ctx))
 
-def run (j : Json) : UInt32 × Json := Id.run do
+def run (j : Json) (cliStrict : Bool := false) : UInt32 × Json := Id.run do
   let .ok fields := j.getArr? | return (2, response "UNSUPPORTED" false
     [("reason", toJson "expected JSON array [\"sabrina-ofn-query-v1\", ontologyID, ofnText, (optional queryOfn), (optional importsObj), (optional optionsObj)]")])
   match fields.toList with
   | [.str _, .str id, .str ofnText] =>
-    return runConsistency id ofnText []
+    return runConsistency id ofnText [] {} true cliStrict
   | [.str _, .str id, .str ofnText, .str queryText] =>
-    return runQuery id ofnText queryText []
+    return runQuery id ofnText queryText [] {} true cliStrict
   | [.str _, .str id, .str ofnText, obj@(.obj _)] =>
     if isOptionsObj obj then
-      match parseLimitsObj obj with
-      | .ok lim => return runConsistency id ofnText [] lim false
+      match parseOptionsObj obj cliStrict with
+      | .ok opts => return runConsistency id ofnText [] opts.limits (!opts.hasCustomLimits) opts.strictOwl2DL
       | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson s!"invalid options: {err}")])
     else
       match parseImportsObj obj with
-      | .ok lib => return runConsistency id ofnText lib
+      | .ok lib => return runConsistency id ofnText lib {} true cliStrict
       | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson s!"invalid imports map: {err}")])
   | [.str _, .str id, .str ofnText, impJson@(.obj _), optJson@(.obj _)] =>
-    match parseImportsObj impJson, parseLimitsObj optJson with
-    | .ok lib, .ok lim => return runConsistency id ofnText lib lim false
+    match parseImportsObj impJson, parseOptionsObj optJson cliStrict with
+    | .ok lib, .ok opts => return runConsistency id ofnText lib opts.limits (!opts.hasCustomLimits) opts.strictOwl2DL
     | .error err, _ => return (2, response "UNSUPPORTED" false [("reason", toJson s!"invalid imports map: {err}")])
     | _, .error err => return (2, response "UNSUPPORTED" false [("reason", toJson s!"invalid options: {err}")])
   | [.str _, .str id, .str ofnText, .str queryText, obj@(.obj _)] =>
     if isOptionsObj obj then
-      match parseLimitsObj obj with
-      | .ok lim => return runQuery id ofnText queryText [] lim false
+      match parseOptionsObj obj cliStrict with
+      | .ok opts => return runQuery id ofnText queryText [] opts.limits (!opts.hasCustomLimits) opts.strictOwl2DL
       | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson s!"invalid options: {err}")])
     else
       match parseImportsObj obj with
-      | .ok lib => return runQuery id ofnText queryText lib
+      | .ok lib => return runQuery id ofnText queryText lib {} true cliStrict
       | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson s!"invalid imports map: {err}")])
   | [.str _, .str id, .str ofnText, .str queryText, impJson@(.obj _), optJson@(.obj _)] =>
-    match parseImportsObj impJson, parseLimitsObj optJson with
-    | .ok lib, .ok lim => return runQuery id ofnText queryText lib lim false
+    match parseImportsObj impJson, parseOptionsObj optJson cliStrict with
+    | .ok lib, .ok opts => return runQuery id ofnText queryText lib opts.limits (!opts.hasCustomLimits) opts.strictOwl2DL
     | .error err, _ => return (2, response "UNSUPPORTED" false [("reason", toJson s!"invalid imports map: {err}")])
     | _, .error err => return (2, response "UNSUPPORTED" false [("reason", toJson s!"invalid options: {err}")])
   | _ => return (2, response "UNSUPPORTED" false

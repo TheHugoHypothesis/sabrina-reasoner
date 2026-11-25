@@ -150,12 +150,14 @@ private theorem inRanges_const_of_no_cut (rs : List (Nat × Nat)) {a b : Nat} (h
 private def classCuts : PatternClass → List Nat
   | .empty => []
   | .interval lo hi => [lo.toNat, hi.toNat + 1]
+  | .ranges rs => rangeCuts rs
   | .space => [9, 11, 13, 14, 32, 33]
   | .word => [48, 58, 65, 91, 95, 96, 97, 123]
   | .nameStart => [58, 59, 65, 91, 95, 96, 97, 123] ++ rangeCuts XMLNames.highStarts
   | .nameChar => [45, 47, 48, 59, 65, 91, 95, 96, 97, 123] ++
       rangeCuts XMLNames.highStarts ++ rangeCuts XMLNames.highExtras
   | .union a b => classCuts a ++ classCuts b
+  | .diff a b => classCuts a ++ classCuts b
   | .neg a => classCuts a
   | .lowerASCII a =>
     [65, 91] ++ classCuts a ++
@@ -210,6 +212,8 @@ private theorem patternClass_const_of_no_cut (p : PatternClass) {a b : Char}
     apply Bool.eq_iff_iff.mpr
     simp only [PatternClass.accepts, Bool.and_eq_true, decide_eq_true_eq, char_le_iff_toNat]
     omega
+  | ranges rs =>
+    exact inRanges_const_of_no_cut rs hle hno
   | space =>
     have h9 := hno 9 (by simp [classCuts])
     have h11 := hno 11 (by simp [classCuts])
@@ -286,6 +290,10 @@ private theorem patternClass_const_of_no_cut (p : PatternClass) {a b : Char}
         (97 ≤ b.toNat ∧ b.toNat ≤ 122)) := by omega
     rw [hlow]
   | union p q ihp ihq =>
+    simp only [PatternClass.accepts]
+    rw [ihp hle fun x hx => hno x (List.mem_append_left _ hx),
+        ihq hle fun x hx => hno x (List.mem_append_right _ hx)]
+  | diff p q ihp ihq =>
     simp only [PatternClass.accepts]
     rw [ihp hle fun x hx => hno x (List.mem_append_left _ hx),
         ihq hle fun x hx => hno x (List.mem_append_right _ hx)]
