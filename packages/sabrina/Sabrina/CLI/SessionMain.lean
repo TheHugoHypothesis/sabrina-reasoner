@@ -8,6 +8,7 @@ import Sabrina.OWL2.EL
 import Sabrina.OWL2.IncrementalABox
 import Sabrina.OWL2.Classification
 import Sabrina.OWL2.FastClassification
+import Sabrina.OWL2.Justification
 import Sabrina.OWL2.SROIQD.Termination.ExtendedQueryDecision
 
 /-! Persistent JSON-lines session server (`sabrina-session`) for incremental
@@ -435,6 +436,46 @@ private def handleRealize (st : SessionState) : Json :=
       Json.mkObj [("ok", toJson false), ("cmd", toJson "realize"), ("lean_verified", toJson false),
         ("error", toJson "active ontology outside exact realization fragment")]
 
+private def handleExplain (st : SessionState) (obj : Std.TreeMap.Raw String Json compare) : Json := Id.run do
+  if !st.loaded then
+    return Json.mkObj [("ok", toJson false), ("error", toJson "no TBox loaded; call load_tbox first")]
+  let maxJ := match obj.get? "max_justifications" with
+    | some (.num n) => if n.mantissa > 0 && n.exponent == 0 then n.mantissa.toNat else 5
+    | _ => 5
+  let ont := activeOnt st
+  match obj.get? "ofn" with
+  | none | some .null =>
+    match Justification.explainInconsistencyRuntime ont maxJ with
+    | some res =>
+      let verdict := if res.inconsistent then "EXPLAINED" else "SATISFIABLE"
+      return Json.mkObj [
+        ("ok", toJson true), ("cmd", toJson "explain"), ("kind", toJson "inconsistency"),
+        ("verdict", toJson verdict), ("lean_verified", toJson true),
+        ("inconsistent", toJson res.inconsistent),
+        ("justification_count", toJson res.justifications.length),
+        ("justifications", toJson (res.justifications.map fun J => toJson (J.map renderAxiom)))]
+    | none =>
+      return Json.mkObj [("ok", toJson false), ("cmd", toJson "explain"), ("lean_verified", toJson false),
+        ("error", toJson "active ontology outside exact justification fragment")]
+  | some (.str qText) =>
+    let qAx ← match parseQueryAxiom st.prefixes qText with
+      | .ok a => pure a
+      | .error err => return Json.mkObj [("ok", toJson false), ("error", toJson s!"OFN query parse error: {err}")]
+    match Justification.explainEntailmentRuntime ont qAx maxJ with
+    | some res =>
+      let verdict := if res.entailed then "EXPLAINED" else "NOT_ENTAILED"
+      return Json.mkObj [
+        ("ok", toJson true), ("cmd", toJson "explain"), ("kind", toJson "entailment"),
+        ("query", toJson qText), ("verdict", toJson verdict), ("lean_verified", toJson true),
+        ("entailed", toJson res.entailed),
+        ("justification_count", toJson res.justifications.length),
+        ("justifications", toJson (res.justifications.map fun J => toJson (J.map renderAxiom)))]
+    | none =>
+      return Json.mkObj [("ok", toJson false), ("cmd", toJson "explain"), ("lean_verified", toJson false),
+        ("error", toJson "query/ontology outside exact justification fragment")]
+  | some _ =>
+    return Json.mkObj [("ok", toJson false), ("error", toJson "explain field 'ofn' must be a string")]
+
 private def handleStatus (st : SessionState) : Json :=
   let (dCls, dRel) := match st.elState with
     | some inc => (inc.derivedCls.size, inc.derivedRel.size)
@@ -503,6 +544,9 @@ def run (_args : List String) : IO UInt32 := do
       stdout.flush
     | "realize" =>
       stdout.putStrLn (handleRealize st).compress
+      stdout.flush
+    | "explain" =>
+      stdout.putStrLn (handleExplain st obj).compress
       stdout.flush
     | "status" =>
       stdout.putStrLn (handleStatus st).compress

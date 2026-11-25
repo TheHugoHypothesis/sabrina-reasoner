@@ -10,6 +10,7 @@ import Sabrina.OWL2.EL
 import Sabrina.OWL2.Classification
 import Sabrina.OWL2.FastClassification
 import Sabrina.OWL2.Materialize
+import Sabrina.OWL2.Justification
 import Sabrina.OWL2.SROIQD.Termination.SourceImportConformance
 import Sabrina.OWL2.SROIQD.Termination.ExactQueryDecision
 import Sabrina.OWL2.SROIQD.Termination.ExtendedQueryDecision
@@ -35,6 +36,7 @@ def requestFormat     := "sabrina-ofn-query-v1"
 def classifyFormat    := "sabrina-classify-v1"
 def realizeFormat     := "sabrina-realize-v1"
 def materializeFormat := "sabrina-materialize-v1"
+def explainFormat     := "sabrina-explain-v1"
 
 private def encodeFloatVal : FloatVal → Json
   | .negInf => toJson "-INF"
@@ -695,5 +697,117 @@ def runMaterialize (j : Json) (cliStrict : Bool := false)
     | some txt, .ok obj =>
       return (code, Json.mkObj (("output", toJson txt) :: obj.toList))
     | _, _ => return (code, metaJson)
+
+private def encodeJustifications (justs : List Ontology) : Json :=
+  toJson (justs.map fun J => toJson (J.map renderAxiom))
+
+/-- Explain inconsistency (`queryText? = none`) or entailment (`queryText? = some q`)
+    with kernel-verified minimal justifications (Horridge–Kalyanpur–Parsia + Reiter HST). -/
+def runExplainDocument (id docText : String) (queryText? : Option String)
+    (lib : List (IRI × String)) (strict : Bool) (maxJusts : Nat := 5) : UInt32 × Json := Id.run do
+  let baseScope := [("semantics", toJson "owl2-explain-v1"), ("id", toJson id)]
+  let scope := Json.mkObj baseScope
+  let closure ← match RDF.OWLMapping.resolveImportClosureAuto docText lib strict with
+    | .ok r => pure r
+    | .error err =>
+      return (2, response "UNSUPPORTED" false [("reason", toJson s!"parse/import error: {err}"), ("scope", scope)])
+  match queryText? with
+  | none =>
+    if strict then
+      if let some err := StrictTyping.diagnoseStrictTypedOWL2DL closure.declarations closure.annotationAxioms closure.ontology then
+        return (2, response "UNSUPPORTED" false [
+          ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
+          ("reason", toJson err), ("scope", scope)])
+    match Justification.explainInconsistencyRuntime closure.ontology maxJusts with
+    | none =>
+      return (2, response "UNSUPPORTED" false [("reason", toJson "ontology outside exact justification fragment"), ("scope", scope)])
+    | some res =>
+      let verdict := if res.inconsistent then "EXPLAINED" else "SATISFIABLE"
+      let base := [
+        ("kind", toJson "inconsistency"),
+        ("inconsistent", toJson res.inconsistent),
+        ("justification_count", toJson res.justifications.length),
+        ("justifications", encodeJustifications res.justifications),
+        ("scope", scope)]
+      let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: base else base
+      return (0, response verdict true fields)
+  | some qText =>
+    let qAx ← match parseQueryAxiom closure.prefixes qText with
+      | .ok a => pure a
+      | .error err =>
+        return (2, response "UNSUPPORTED" false [("reason", toJson s!"OFN query parse error: {err}"), ("query", toJson qText), ("scope", scope)])
+    if strict then
+      if let some err := StrictTyping.diagnoseStrictTypedOWL2DLQuery closure.declarations closure.annotationAxioms closure.ontology qAx then
+        return (2, response "UNSUPPORTED" false [
+          ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
+          ("reason", toJson err), ("query", toJson qText), ("scope", scope)])
+    match Justification.explainEntailmentRuntime closure.ontology qAx maxJusts with
+    | none =>
+      return (2, response "UNSUPPORTED" false [("reason", toJson "query/ontology outside exact justification fragment"), ("query", toJson qText), ("scope", scope)])
+    | some res =>
+      let verdict := if res.entailed then "EXPLAINED" else "NOT_ENTAILED"
+      let base := [
+        ("kind", toJson "entailment"),
+        ("query", toJson qText),
+        ("entailed", toJson res.entailed),
+        ("justification_count", toJson res.justifications.length),
+        ("justifications", encodeJustifications res.justifications),
+        ("scope", scope)]
+      let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: base else base
+      return (0, response verdict true fields)
+
+private def isExplainOptionsObj (j : Json) : Bool :=
+  match j.getObj? with
+  | .ok obj => isOptionsObj j || obj.contains "max_justifications"
+  | .error _ => false
+
+private def parseExplainOptsObj (j : Json) (cliStrict : Bool) : Except String (Nat × Bool) := do
+  let obj ← j.getObj?
+  let mut maxJ : Nat := 5
+  let mut strict := cliStrict
+  if let some v := obj.get? "strict_owl2dl" then
+    strict := strict || (← v.getBool?)
+  if let some v := obj.get? "max_justifications" then
+    maxJ ← v.getNat?
+  return (maxJ, strict)
+
+/-- Certified minimal justification CLI handler (`sabrina-explain-v1`). -/
+def runExplain (j : Json) (cliStrict : Bool := false)
+    (extraLib : List (IRI × String) := []) : UInt32 × Json := Id.run do
+  let .ok fields := j.getArr? | return (2, response "UNSUPPORTED" false
+    [("reason", toJson "expected [\"sabrina-explain-v1\", id, ontologyText, (optional queryOfn), (optional importsObj), (optional optionsObj)]")])
+  match fields.toList with
+  | [.str _, .str id, .str docText] =>
+    return runExplainDocument id docText none extraLib cliStrict 5
+  | [.str _, .str id, .str docText, .str qText] =>
+    return runExplainDocument id docText (some qText) extraLib cliStrict 5
+  | [.str _, .str id, .str docText, obj@(.obj _)] =>
+    if isExplainOptionsObj obj then
+      match parseExplainOptsObj obj cliStrict with
+      | .ok (maxJ, strict) => return runExplainDocument id docText none extraLib strict maxJ
+      | .error e => return (2, response "UNSUPPORTED" false [("reason", toJson e)])
+    else
+      match parseImportsObj obj with
+      | .ok lib => return runExplainDocument id docText none (lib ++ extraLib) cliStrict 5
+      | .error e => return (2, response "UNSUPPORTED" false [("reason", toJson e)])
+  | [.str _, .str id, .str docText, impJson@(.obj _), optJson@(.obj _)] =>
+    match parseImportsObj impJson, parseExplainOptsObj optJson cliStrict with
+    | .ok lib, .ok (maxJ, strict) => return runExplainDocument id docText none (lib ++ extraLib) strict maxJ
+    | .error e, _ | _, .error e => return (2, response "UNSUPPORTED" false [("reason", toJson e)])
+  | [.str _, .str id, .str docText, .str qText, obj@(.obj _)] =>
+    if isExplainOptionsObj obj then
+      match parseExplainOptsObj obj cliStrict with
+      | .ok (maxJ, strict) => return runExplainDocument id docText (some qText) extraLib strict maxJ
+      | .error e => return (2, response "UNSUPPORTED" false [("reason", toJson e)])
+    else
+      match parseImportsObj obj with
+      | .ok lib => return runExplainDocument id docText (some qText) (lib ++ extraLib) cliStrict 5
+      | .error e => return (2, response "UNSUPPORTED" false [("reason", toJson e)])
+  | [.str _, .str id, .str docText, .str qText, impJson@(.obj _), optJson@(.obj _)] =>
+    match parseImportsObj impJson, parseExplainOptsObj optJson cliStrict with
+    | .ok lib, .ok (maxJ, strict) => return runExplainDocument id docText (some qText) (lib ++ extraLib) strict maxJ
+    | .error e, _ | _, .error e => return (2, response "UNSUPPORTED" false [("reason", toJson e)])
+  | _ => return (2, response "UNSUPPORTED" false
+    [("reason", toJson "expected [\"sabrina-explain-v1\", id, ontologyText, (optional queryOfn), (optional importsObj), (optional optionsObj)]")])
 
 end Sabrina.CLI.OFNQuery

@@ -321,6 +321,7 @@ private def solveJSON (j : Json) (cliStrict : Bool := false)
     else if format == OFNQuery.classifyFormat then OFNQuery.runClassify j cliStrict extraLib
     else if format == OFNQuery.realizeFormat then OFNQuery.runRealize j cliStrict extraLib
     else if format == OFNQuery.materializeFormat then OFNQuery.runMaterialize j cliStrict extraLib
+    else if format == OFNQuery.explainFormat then OFNQuery.runExplain j cliStrict extraLib
     else solveInclusion j
   | _ => solveInclusion j
 where
@@ -333,6 +334,9 @@ private structure CliConfig where
   strictOwl2DL : Bool := false
   extraLib : List (Sabrina.OWL2.IRI × String) := []
   materializeInput : Option String := none
+  explainInput : Option String := none
+  explainQuery : Option String := none
+  maxJustifications : Nat := 5
   outputPath : Option String := none
   outputFormat : Option Sabrina.OWL2.Materialize.OutputFormat := none
   matOpts : Sabrina.OWL2.Materialize.MaterializeOptions := {}
@@ -358,6 +362,17 @@ private def parseCliArgs (args : List String) : IO (Except String CliConfig) := 
     | "--materialize" :: path :: tail =>
       cfg := { cfg with materializeInput := some path }
       rest := tail
+    | "--explain" :: path :: tail =>
+      cfg := { cfg with explainInput := some path }
+      rest := tail
+    | "--query" :: qText :: tail =>
+      cfg := { cfg with explainQuery := some qText }
+      rest := tail
+    | "--max-justifications" :: nStr :: tail =>
+      match nStr.toNat? with
+      | some n => cfg := { cfg with maxJustifications := n }
+      | none => return .error s!"expected natural number for --max-justifications, got '{nStr}'"
+      rest := tail
     | "-o" :: path :: tail | "--output" :: path :: tail =>
       cfg := { cfg with outputPath := some path }
       rest := tail
@@ -373,7 +388,7 @@ private def parseCliArgs (args : List String) : IO (Except String CliConfig) := 
       cfg := { cfg with matOpts := { cfg.matOpts with includeAllSubClass := true, includeAllTypes := true } }
       rest := tail
     | flag :: _ =>
-      return .error s!"unknown or incomplete CLI flag: {flag} (supported: --strict-owl2dl, --catalog <path>, --import-dir <dir>, --materialize <in>, -o <out>, --format <ofn|ttl|rdfxml>, --inferred-only, --all-inferred)"
+      return .error s!"unknown or incomplete CLI flag: {flag} (supported: --strict-owl2dl, --catalog <path>, --import-dir <dir>, --materialize <in>, --explain <in>, --query <ofn>, --max-justifications <n>, -o <out>, --format <ofn|ttl|rdfxml>, --inferred-only, --all-inferred)"
     | [] => break
   return .ok cfg
 
@@ -383,6 +398,16 @@ def run (args : List String) : IO UInt32 := do
     | .error err =>
       IO.println (response "UNSUPPORTED" false [("reason", toJson err)]).compress
       return 2
+  if let some inPath := cfg.explainInput then
+    let docText ← try
+        IO.FS.readFile (System.FilePath.mk inPath)
+      catch e =>
+        IO.println (response "UNSUPPORTED" false [("reason", toJson s!"failed to read '{inPath}': {e}")]).compress
+        return 2
+    let (code, outJson) := OFNQuery.runExplainDocument inPath docText cfg.explainQuery
+      cfg.extraLib cfg.strictOwl2DL cfg.maxJustifications
+    IO.println outJson.compress
+    return code
   if let some inPath := cfg.materializeInput then
     let docText ← try
         IO.FS.readFile (System.FilePath.mk inPath)

@@ -14,3 +14,4 @@ import SabrinaTests.MilestoneDTests
 import SabrinaTests.FastLocalityTests
 import SabrinaTests.MaterializeTests
 import SabrinaTests.FastClassificationTests
+import SabrinaTests.JustificationTests

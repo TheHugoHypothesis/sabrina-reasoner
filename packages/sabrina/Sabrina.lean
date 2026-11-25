@@ -23,3 +23,4 @@ import Sabrina.OWL2.IncrementalABox
 import Sabrina.OWL2.RDF.Serialize
 import Sabrina.OWL2.Materialize
 import Sabrina.OWL2.FastClassification
+import Sabrina.OWL2.Justification
