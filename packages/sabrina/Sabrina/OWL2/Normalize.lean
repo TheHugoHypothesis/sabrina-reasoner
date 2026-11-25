@@ -2171,7 +2171,7 @@ private theorem dataHolds_withAnonymous_eq (i : Interpretation datatypeMap)
   | intersection a b iha ihb => exact propext (and_congr (iff_of_eq iha) (iff_of_eq ihb))
   | union a b iha ihb => exact propext (or_congr (iff_of_eq iha) (iff_of_eq ihb))
 
-private theorem query_entails_iff_inclusions {o : Ontology} {defs : DatatypeDefs} {p : Problem}
+theorem query_entails_iff_inclusions {o : Ontology} {defs : DatatypeDefs} {p : Problem}
     {qAx : Axiom} {qs : List Inclusion}
     (hnorm : normalizeWithDefs o = some (defs, p))
     (hq : queryToInclusions defs qAx = some qs)

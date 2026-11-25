@@ -848,6 +848,8 @@ def resolveImportClosureAuto (rootText : String) (library : List (IRI × String)
     declarations := allDecls
     annotationAxioms := allAnnots
     ontology := allAxioms
+    ontologyIRI := rootDoc.ontologyIRI
+    versionIRI := rootDoc.versionIRI
   }
 
 /-! ### 5. Forward Structural-to-RDF Mapping (W3C Table 1) & Correspondence Proofs -/

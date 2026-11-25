@@ -179,7 +179,7 @@ private theorem pairwise_iff {α : Type} {P Q : α → α → Prop} :
     exact ⟨fun hx y hy => (h x (List.mem_cons_self ..) y (List.mem_cons_of_mem _ hy)).mp (hx y hy),
            fun hx y hy => (h x (List.mem_cons_self ..) y (List.mem_cons_of_mem _ hy)).mpr (hx y hy)⟩
 
-private theorem axiomHolds_withAnonymous_agree {dm : DatatypeMap} (i : Interpretation dm)
+theorem axiomHolds_withAnonymous_agree {dm : DatatypeMap} (i : Interpretation dm)
     {a1 a2 : String → String → i.Object} {ax : Axiom}
     (hag : ∀ d ∈ axiomAnonDocs ax, ∀ loc, a1 d loc = a2 d loc) :
     axiomHolds (i.withAnonymous a1) ax ↔ axiomHolds (i.withAnonymous a2) ax := by

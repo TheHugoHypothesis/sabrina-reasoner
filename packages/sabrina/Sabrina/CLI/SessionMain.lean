@@ -7,6 +7,7 @@ import Sabrina.OWL2.FastLocality
 import Sabrina.OWL2.EL
 import Sabrina.OWL2.IncrementalABox
 import Sabrina.OWL2.Classification
+import Sabrina.OWL2.FastClassification
 import Sabrina.OWL2.SROIQD.Termination.ExtendedQueryDecision
 
 /-! Persistent JSON-lines session server (`sabrina-session`) for incremental
@@ -399,7 +400,7 @@ private def handleClassify (st : SessionState) : Json :=
     Json.mkObj [("ok", toJson false), ("error", toJson "no TBox loaded; call load_tbox first")]
   else
     let ont := activeOnt st
-    match Classification.classifyOntologyRuntime ont st.declarations with
+    match FastClassification.classifyOntologyFastRuntime ont st.declarations with
     | some h =>
       Json.mkObj [
         ("ok", toJson true), ("cmd", toJson "classify"),
@@ -419,7 +420,7 @@ private def handleRealize (st : SessionState) : Json :=
     Json.mkObj [("ok", toJson false), ("error", toJson "no TBox loaded; call load_tbox first")]
   else
     let ont := activeOnt st
-    match Classification.realizeOntologyRuntime ont st.declarations with
+    match FastClassification.realizeOntologyFastRuntime ont st.declarations with
     | some r =>
       Json.mkObj [
         ("ok", toJson true), ("cmd", toJson "realize"),

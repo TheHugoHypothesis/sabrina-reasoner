@@ -12,3 +12,5 @@ import SabrinaTests.TypingAndCatalog
 import SabrinaTests.StandardsTests
 import SabrinaTests.MilestoneDTests
 import SabrinaTests.FastLocalityTests
+import SabrinaTests.MaterializeTests
+import SabrinaTests.FastClassificationTests

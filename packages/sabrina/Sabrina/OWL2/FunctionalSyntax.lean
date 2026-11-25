@@ -716,6 +716,8 @@ structure ResolvedOFNClosure where
   declarations : List EntityDecl
   annotationAxioms : List AnnotationAxiom
   ontology : Ontology
+  ontologyIRI : Option IRI := none
+  versionIRI : Option IRI := none
   deriving Repr
 
 /-- Resolve the transitive `Import(...)` closure of `rootOFN` against a library
@@ -771,6 +773,8 @@ def resolveImportClosure (rootOFN : String) (library : List (IRI × String)) :
     declarations := allDecls
     annotationAxioms := allAnnots
     ontology := allAxioms
+    ontologyIRI := rootDoc.ontologyIRI
+    versionIRI := rootDoc.versionIRI
   }
 
 /-- Resolve the transitive `Import(...)` closure of `rootOFN` against a library
@@ -894,6 +898,38 @@ def renderAxiom : Axiom → String
   | .negativeDataAssertion dp a l =>
     s!"NegativeDataPropertyAssertion({renderIRI dp} {renderIndividual a} {renderLiteral l})"
 
+/-- Render an `EntityDecl` as a W3C Functional-Style Syntax `Declaration(...)` axiom. -/
+def renderEntityDecl (d : EntityDecl) : String :=
+  match d.kind with
+  | .cls => s!"Declaration(Class({renderIRI d.iri}))"
+  | .datatype => s!"Declaration(Datatype({renderIRI d.iri}))"
+  | .objectProperty => s!"Declaration(ObjectProperty({renderIRI d.iri}))"
+  | .dataProperty => s!"Declaration(DataProperty({renderIRI d.iri}))"
+  | .annotationProperty => s!"Declaration(AnnotationProperty({renderIRI d.iri}))"
+  | .namedIndividual => s!"Declaration(NamedIndividual({renderIRI d.iri}))"
+
+/-- Render an `AnnotationSubject` in W3C Functional-Style Syntax. -/
+def renderAnnotationSubject : AnnotationSubject → String
+  | .iri v => renderIRI v
+  | .anonymous _ loc => s!"_:{loc}"
+
+/-- Render an `AnnotationValue` in W3C Functional-Style Syntax. -/
+def renderAnnotationValue : AnnotationValue → String
+  | .iri v => renderIRI v
+  | .anonymous _ loc => s!"_:{loc}"
+  | .literal l => renderLiteral l
+
+/-- Render an `AnnotationAxiom` in W3C Functional-Style Syntax. -/
+def renderAnnotationAxiom : AnnotationAxiom → String
+  | .assertion p s v =>
+    s!"AnnotationAssertion({renderIRI p} {renderAnnotationSubject s} {renderAnnotationValue v})"
+  | .subProperty sub sup =>
+    s!"SubAnnotationPropertyOf({renderIRI sub} {renderIRI sup})"
+  | .domain p dom =>
+    s!"AnnotationPropertyDomain({renderIRI p} {renderIRI dom})"
+  | .range p rng =>
+    s!"AnnotationPropertyRange({renderIRI p} {renderIRI rng})"
+
 /-- Render an `Ontology` as a complete W3C Functional-Style Syntax document. -/
 def renderOntology (ont : Ontology) (ontIRI : Option IRI := none) (verIRI : Option IRI := none)
     (imports : List IRI := []) : String :=
@@ -904,6 +940,22 @@ def renderOntology (ont : Ontology) (ontIRI : Option IRI := none) (verIRI : Opti
   let impLines := imports.map fun imp => s!"  Import({renderIRI imp})\n"
   let axLines := ont.map fun ax => s!"  {renderAxiom ax}\n"
   s!"Ontology({header}\n{"".intercalate impLines}{"".intercalate axLines})"
+
+/-- Render a full W3C Functional-Style Syntax document including `Prefix(...)`
+    declarations, `Declaration(...)` entity axioms, annotation axioms, and logical axioms. -/
+def renderDocumentOFN (decls : List EntityDecl) (annots : List AnnotationAxiom) (ont : Ontology)
+    (prefixes : PrefixMap := []) (ontIRI : Option IRI := none) (verIRI : Option IRI := none)
+    (imports : List IRI := []) : String :=
+  let pfxLines := prefixes.map fun (p, ns) => s!"Prefix({p}:={renderIRI ns})\n"
+  let header := match ontIRI, verIRI with
+    | some o, some v => s!" {renderIRI o} {renderIRI v}"
+    | some o, none => s!" {renderIRI o}"
+    | none, _ => ""
+  let impLines := imports.map fun imp => s!"  Import({renderIRI imp})\n"
+  let declLines := decls.map fun d => s!"  {renderEntityDecl d}\n"
+  let annotLines := annots.map fun a => s!"  {renderAnnotationAxiom a}\n"
+  let axLines := ont.map fun ax => s!"  {renderAxiom ax}\n"
+  s!"{"".intercalate pfxLines}Ontology({header}\n{"".intercalate impLines}{"".intercalate declLines}{"".intercalate annotLines}{"".intercalate axLines})\n"
 
 /-- Explicit tag for every OWL 2 DL AST constructor in canonical S-expression form. -/
 inductive ASTTag where

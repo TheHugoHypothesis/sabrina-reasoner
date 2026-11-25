@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Kernel-verified inferred OWL file materialization (`Materialize.lean`, `RDF/Serialize.lean`) exporting asserted and entailed axioms (class hierarchy, object property hierarchy, class and object-property realization, `SameIndividual`) to `.ofn`, `.ttl`, and `.owl` (RDF/XML) via `sabrina-query --materialize <in> -o <out>` and `"sabrina-materialize-v1"`, proved sound and model-preserving (`materializeWith_entailed`, `materializeReal_entailed`).
+- Kernel-verified fast classification (`FastClassification.lean`): single-pass polynomial $\mathcal{EL}^{++}$ classification (`classifyELSinglePass_sound_complete`, `classifyDirectEL_sound_complete`), Enhanced Traversal with pre-indexed `FastLocality.LocalityIndex` (`classifyEnhancedWith_sound_complete`, `classifyEnhancedReal_sound_complete`), and verified `SROIQDModel` countermodel seeding (`harvestModelPairs_sound`, `classifyEnhancedStd_sound_complete`).
+
 ## 1.0.0 (2026-11-25)
 
 ### Added

@@ -8,6 +8,8 @@ import Sabrina.OWL2.Profile
 import Sabrina.OWL2.FastLocality
 import Sabrina.OWL2.EL
 import Sabrina.OWL2.Classification
+import Sabrina.OWL2.FastClassification
+import Sabrina.OWL2.Materialize
 import Sabrina.OWL2.SROIQD.Termination.SourceImportConformance
 import Sabrina.OWL2.SROIQD.Termination.ExactQueryDecision
 import Sabrina.OWL2.SROIQD.Termination.ExtendedQueryDecision
@@ -29,9 +31,10 @@ open Lean Sabrina.OWL2 Sabrina.OWL2.FunctionalSyntax Sabrina.OWL2.Normalize
 open Sabrina.OWL2.SROIQD Sabrina.OWL2.Datatypes Sabrina.OWL2.Profile Sabrina.OWL2.EL
 open Sabrina.ALC (InclusionVerdict roleClosure)
 
-def requestFormat  := "sabrina-ofn-query-v1"
-def classifyFormat := "sabrina-classify-v1"
-def realizeFormat  := "sabrina-realize-v1"
+def requestFormat     := "sabrina-ofn-query-v1"
+def classifyFormat    := "sabrina-classify-v1"
+def realizeFormat     := "sabrina-realize-v1"
+def materializeFormat := "sabrina-materialize-v1"
 
 private def encodeFloatVal : FloatVal → Json
   | .negInf => toJson "-INF"
@@ -551,7 +554,7 @@ def runClassify (j : Json) (cliStrict : Bool := false)
       return (2, response "UNSUPPORTED" false [
         ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
         ("reason", toJson err), ("scope", scope)])
-  match Classification.classifyOntologyRuntime closure.ontology closure.declarations with
+  match FastClassification.classifyOntologyFastRuntime closure.ontology closure.declarations with
   | some hier =>
     let verdict := if hier.consistent then "CLASSIFIED" else "INCONSISTENT_ONTOLOGY"
     let base := [("classification", encodeClassHierarchy hier), ("scope", scope)]
@@ -575,7 +578,7 @@ def runRealize (j : Json) (cliStrict : Bool := false)
       return (2, response "UNSUPPORTED" false [
         ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
         ("reason", toJson err), ("scope", scope)])
-  match Classification.realizeOntologyRuntime closure.ontology closure.declarations with
+  match FastClassification.realizeOntologyFastRuntime closure.ontology closure.declarations with
   | some real =>
     let verdict := if real.consistent then "REALIZED" else "INCONSISTENT_ONTOLOGY"
     let base := [("realization", encodeRealization real), ("scope", scope)]
@@ -583,5 +586,114 @@ def runRealize (j : Json) (cliStrict : Bool := false)
     return (0, response verdict true fields)
   | none =>
     return (2, response "UNSUPPORTED" false [("reason", toJson "ontology outside exact realization fragment"), ("scope", scope)])
+
+/-- Materialize an OWL 2 document (FSS, RDF/XML, or Turtle) and render the
+    inferred ontology in `.ofn`, `.ttl`, or `.owl` (RDF/XML). -/
+def runMaterializeDocument (id docText : String) (lib : List (IRI × String))
+    (strict : Bool) (fmt : Materialize.OutputFormat)
+    (opts : Materialize.MaterializeOptions := {}) : UInt32 × Json × Option String := Id.run do
+  let scope := Json.mkObj [("semantics", toJson "owl2-materialize-v1"), ("id", toJson id)]
+  let closure ← match RDF.OWLMapping.resolveImportClosureAuto docText lib strict with
+    | .ok r => pure r
+    | .error err =>
+      return (2, response "UNSUPPORTED" false [("reason", toJson s!"parse/import error: {err}"), ("scope", scope)], none)
+  if strict then
+    if let some err := StrictTyping.diagnoseStrictTypedOWL2DL closure.declarations closure.annotationAxioms closure.ontology then
+      return (2, response "UNSUPPORTED" false [
+        ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
+        ("reason", toJson err), ("scope", scope)], none)
+  match Materialize.materializeOntologyRuntime closure.ontology closure.declarations opts with
+  | none =>
+    return (2, response "UNSUPPORTED" false [
+      ("reason", toJson "ontology outside exact materialization fragment"), ("scope", scope)], none)
+  | some res =>
+    if !res.consistent then
+      let base := [("consistent", toJson false), ("scope", scope)]
+      let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: base else base
+      return (1, response "INCONSISTENT_ONTOLOGY" true fields, none)
+    let rendered := Materialize.renderMaterialized fmt closure.declarations
+      closure.annotationAxioms res.materializedOntology closure.prefixes
+      closure.ontologyIRI closure.versionIRI
+    let base := [
+      ("consistent", toJson true),
+      ("output_format", toJson fmt.name),
+      ("asserted_axioms", toJson res.assertedAxioms.length),
+      ("inferred_axioms", toJson res.inferredAxioms.length),
+      ("total_axioms", toJson res.materializedOntology.length),
+      ("scope", scope)]
+    let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: base else base
+    return (0, response "MATERIALIZED" true fields, some rendered)
+
+private def isMaterializeOptionsObj (j : Json) : Bool :=
+  match j.getObj? with
+  | .ok obj =>
+    isOptionsObj j || obj.contains "format" || obj.contains "include_asserted" ||
+    obj.contains "all_subclasses" || obj.contains "all_types" || obj.contains "all_inferred" ||
+    obj.contains "include_sub_object_properties" ||
+    obj.contains "include_object_property_assertions" ||
+    obj.contains "include_same_individuals"
+  | .error _ => false
+
+private def parseMaterializeOptsObj (j : Json) (cliStrict : Bool) :
+    Except String (Materialize.OutputFormat × Materialize.MaterializeOptions × Bool) := do
+  let obj ← j.getObj?
+  let mut fmt : Materialize.OutputFormat := .ofn
+  let mut opts : Materialize.MaterializeOptions := {}
+  let mut strict := cliStrict
+  if let some v := obj.get? "strict_owl2dl" then
+    strict := strict || (← v.getBool?)
+  if let some v := obj.get? "format" then
+    let s ← v.getStr?
+    match Materialize.OutputFormat.ofString? s with
+    | some f => fmt := f
+    | none => throw s!"unsupported output format '{s}' (expected ofn, ttl, or rdfxml)"
+  if let some v := obj.get? "include_asserted" then
+    opts := { opts with includeAsserted := ← v.getBool? }
+  if let some v := obj.get? "all_inferred" then
+    if ← v.getBool? then
+      opts := { opts with includeAllSubClass := true, includeAllTypes := true }
+  if let some v := obj.get? "all_subclasses" then
+    opts := { opts with includeAllSubClass := ← v.getBool? }
+  if let some v := obj.get? "all_types" then
+    opts := { opts with includeAllTypes := ← v.getBool? }
+  if let some v := obj.get? "include_sub_object_properties" then
+    opts := { opts with includeSubObjectProperties := ← v.getBool? }
+  if let some v := obj.get? "include_object_property_assertions" then
+    opts := { opts with includeObjectPropertyAssertions := ← v.getBool? }
+  if let some v := obj.get? "include_same_individuals" then
+    opts := { opts with includeSameIndividuals := ← v.getBool? }
+  return (fmt, opts, strict)
+
+/-- Certified OWL 2 materialization CLI handler (`sabrina-materialize-v1`). -/
+def runMaterialize (j : Json) (cliStrict : Bool := false)
+    (extraLib : List (IRI × String) := []) : UInt32 × Json := Id.run do
+  let .ok fields := j.getArr? | return (2, response "UNSUPPORTED" false
+    [("reason", toJson "expected [\"sabrina-materialize-v1\", id, ontologyText, (optional importsObj), (optional optionsObj)]")])
+  let parsed : Except String (String × String × List (IRI × String) × Materialize.OutputFormat × Materialize.MaterializeOptions × Bool) :=
+    match fields.toList with
+    | [.str _, .str id, .str docText] => .ok (id, docText, extraLib, .ofn, {}, cliStrict)
+    | [.str _, .str id, .str docText, obj@(.obj _)] =>
+      if isMaterializeOptionsObj obj then
+        match parseMaterializeOptsObj obj cliStrict with
+        | .ok (fmt, opts, strict) => .ok (id, docText, extraLib, fmt, opts, strict)
+        | .error e => .error e
+      else
+        match parseImportsObj obj with
+        | .ok lib => .ok (id, docText, lib ++ extraLib, .ofn, {}, cliStrict)
+        | .error e => .error e
+    | [.str _, .str id, .str docText, impJson@(.obj _), optJson@(.obj _)] =>
+      match parseImportsObj impJson, parseMaterializeOptsObj optJson cliStrict with
+      | .ok lib, .ok (fmt, opts, strict) => .ok (id, docText, lib ++ extraLib, fmt, opts, strict)
+      | .error e, _ => .error e
+      | _, .error e => .error e
+    | _ => .error "expected [\"sabrina-materialize-v1\", id, ontologyText, (optional importsObj), (optional optionsObj)]"
+  match parsed with
+  | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson err)])
+  | .ok (id, docText, lib, fmt, opts, strict) =>
+    let (code, metaJson, rendered?) := runMaterializeDocument id docText lib strict fmt opts
+    match rendered?, metaJson.getObj? with
+    | some txt, .ok obj =>
+      return (code, Json.mkObj (("output", toJson txt) :: obj.toList))
+    | _, _ => return (code, metaJson)
 
 end Sabrina.CLI.OFNQuery

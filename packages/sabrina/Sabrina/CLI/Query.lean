@@ -320,6 +320,7 @@ private def solveJSON (j : Json) (cliStrict : Bool := false)
     else if format == OFNQuery.requestFormat then OFNQuery.run j cliStrict extraLib
     else if format == OFNQuery.classifyFormat then OFNQuery.runClassify j cliStrict extraLib
     else if format == OFNQuery.realizeFormat then OFNQuery.runRealize j cliStrict extraLib
+    else if format == OFNQuery.materializeFormat then OFNQuery.runMaterialize j cliStrict extraLib
     else solveInclusion j
   | _ => solveInclusion j
 where
@@ -328,40 +329,93 @@ where
     | .ok (.ordinary request) => solve request
     | .ok (.graded request) => solveGraded request
 
-private def parseCliArgs (args : List String) :
-    IO (Except String (Bool × List (Sabrina.OWL2.IRI × String))) := do
-  let mut strictOwl2DL := false
-  let mut extraLib : List (Sabrina.OWL2.IRI × String) := []
+private structure CliConfig where
+  strictOwl2DL : Bool := false
+  extraLib : List (Sabrina.OWL2.IRI × String) := []
+  materializeInput : Option String := none
+  outputPath : Option String := none
+  outputFormat : Option Sabrina.OWL2.Materialize.OutputFormat := none
+  matOpts : Sabrina.OWL2.Materialize.MaterializeOptions := {}
+
+private def parseCliArgs (args : List String) : IO (Except String CliConfig) := do
+  let mut cfg : CliConfig := {}
   let mut rest := args
   while !rest.isEmpty do
     match rest with
     | "--strict-owl2dl" :: tail =>
-      strictOwl2DL := true
+      cfg := { cfg with strictOwl2DL := true }
       rest := tail
     | "--catalog" :: path :: tail =>
       match ← ImportCatalog.loadOasisCatalog (System.FilePath.mk path) with
-      | .ok lib => extraLib := extraLib ++ lib
+      | .ok lib => cfg := { cfg with extraLib := cfg.extraLib ++ lib }
       | .error err => return .error err
       rest := tail
     | "--import-dir" :: dir :: tail =>
       match ← ImportCatalog.loadImportDir (System.FilePath.mk dir) with
-      | .ok lib => extraLib := extraLib ++ lib
+      | .ok lib => cfg := { cfg with extraLib := cfg.extraLib ++ lib }
       | .error err => return .error err
       rest := tail
+    | "--materialize" :: path :: tail =>
+      cfg := { cfg with materializeInput := some path }
+      rest := tail
+    | "-o" :: path :: tail | "--output" :: path :: tail =>
+      cfg := { cfg with outputPath := some path }
+      rest := tail
+    | "--format" :: fmtStr :: tail =>
+      match Sabrina.OWL2.Materialize.OutputFormat.ofString? fmtStr with
+      | some f => cfg := { cfg with outputFormat := some f }
+      | none => return .error s!"unsupported --format '{fmtStr}' (expected: ofn, ttl, rdfxml)"
+      rest := tail
+    | "--inferred-only" :: tail =>
+      cfg := { cfg with matOpts := { cfg.matOpts with includeAsserted := false } }
+      rest := tail
+    | "--all-inferred" :: tail =>
+      cfg := { cfg with matOpts := { cfg.matOpts with includeAllSubClass := true, includeAllTypes := true } }
+      rest := tail
     | flag :: _ =>
-      return .error s!"unknown or incomplete CLI flag: {flag} (supported: --strict-owl2dl, --catalog <path>, --import-dir <dir>)"
+      return .error s!"unknown or incomplete CLI flag: {flag} (supported: --strict-owl2dl, --catalog <path>, --import-dir <dir>, --materialize <in>, -o <out>, --format <ofn|ttl|rdfxml>, --inferred-only, --all-inferred)"
     | [] => break
-  return .ok (strictOwl2DL, extraLib)
+  return .ok cfg
 
 def run (args : List String) : IO UInt32 := do
-  let (strictOwl2DL, extraLib) ← match ← parseCliArgs args with
+  let cfg ← match ← parseCliArgs args with
     | .ok res => pure res
     | .error err =>
       IO.println (response "UNSUPPORTED" false [("reason", toJson err)]).compress
       return 2
+  if let some inPath := cfg.materializeInput then
+    let docText ← try
+        IO.FS.readFile (System.FilePath.mk inPath)
+      catch e =>
+        IO.println (response "UNSUPPORTED" false [("reason", toJson s!"failed to read '{inPath}': {e}")]).compress
+        return 2
+    let fmt := match cfg.outputFormat, cfg.outputPath with
+      | some f, _ => f
+      | none, some outP => Sabrina.OWL2.Materialize.OutputFormat.fromPath outP
+      | none, none => Sabrina.OWL2.Materialize.OutputFormat.fromPath inPath
+    let (code, metaJson, rendered?) :=
+      OFNQuery.runMaterializeDocument inPath docText cfg.extraLib cfg.strictOwl2DL fmt cfg.matOpts
+    match rendered?, cfg.outputPath with
+    | some txt, some outP =>
+      try
+        IO.FS.writeFile (System.FilePath.mk outP) txt
+      catch e =>
+        IO.println (response "UNSUPPORTED" false [("reason", toJson s!"failed to write '{outP}': {e}")]).compress
+        return 2
+      let outJson := match metaJson.getObj? with
+        | .ok obj => Json.mkObj (("output_path", toJson outP) :: obj.toList)
+        | .error _ => metaJson
+      IO.println outJson.compress
+      return code
+    | some txt, none =>
+      IO.print txt
+      return code
+    | none, _ =>
+      IO.println metaJson.compress
+      return code
   let input ← (← IO.getStdin).readToEnd
   let (code, result) := match Json.parse input with
-    | .ok j => solveJSON j strictOwl2DL extraLib
+    | .ok j => solveJSON j cfg.strictOwl2DL cfg.extraLib
     | .error reason => (2, response "UNSUPPORTED" false [("reason", toJson reason)])
   IO.println result.compress
   return code
