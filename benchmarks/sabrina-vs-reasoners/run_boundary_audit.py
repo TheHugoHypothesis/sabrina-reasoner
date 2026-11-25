@@ -276,7 +276,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cp = ensure_harness()
-    sabrina_bin = Path(find_sabrina_binary("sabrina-alc-query"))
+    sabrina_bin = Path(find_sabrina_binary("sabrina-query"))
     rows = []
 
     with tempfile.TemporaryDirectory() as td:

@@ -12,8 +12,8 @@ lean_lib Verification where
   roots := #[`Verification]
 
 @[default_target]
-lean_exe "sabrina-alc-query" where
-  root := `WorkspaceCLI.SabrinaAlcQuery
+lean_exe "sabrina-query" where
+  root := `WorkspaceCLI.SabrinaQuery
 
 @[default_target]
 lean_exe "sabrina-session" where

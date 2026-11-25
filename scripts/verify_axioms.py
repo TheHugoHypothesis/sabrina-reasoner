@@ -14,6 +14,9 @@ ALLOWED_AXIOMS = {"propext", "Classical.choice", "Quot.sound"}
 HEADLINE_MODULES = [
     "Logic",
     "Sabrina",
+    "Sabrina.OWL2.Datatypes.StandardsCorrespondence",
+    "Sabrina.OWL2.Datatypes.XMLCorrespondence",
+    "Sabrina.OWL2.Datatypes.RegexGrammarCorrespondence",
     "Sabrina.OWL2.SROIQD.Termination.ObjectHierarchyBoundary",
     "Sabrina.OWL2.SROIQD.Termination.RegularObjectDecision",
     "Sabrina.OWL2.SROIQD.Termination.RegularOWL2DLDecision",
@@ -34,6 +37,15 @@ HEADLINE_THEOREMS = [
     "Sabrina.OWL2.StrictTyping.checkStrictTypedOWL2DL_iff",
     "Sabrina.OWL2.StrictTyping.diagnoseStrictTypedOWL2DL_isNone_iff",
     "Sabrina.OWL2.StrictTyping.decideStrictTypedOWL2DLReal_iff",
+    "Sabrina.OWL2.Datatypes.StandardsCorrespondence.parseHexBinary_iff",
+    "Sabrina.OWL2.Datatypes.StandardsCorrespondence.parseHexBinary_encodeHex",
+    "Sabrina.OWL2.Datatypes.StandardsCorrespondence.roundTiesEven_iff",
+    "Sabrina.OWL2.Datatypes.StandardsCorrespondence.parseDateTime_valid",
+    "Sabrina.OWL2.Datatypes.StandardsCorrespondence.matchesLangRange_iff",
+    "Sabrina.OWL2.Datatypes.XMLCorrespondence.renderExcC14N_simpleText_canonical",
+    "Sabrina.OWL2.Datatypes.XMLCorrespondence.excC14N_normative_correspondence",
+    "Sabrina.OWL2.Datatypes.RegexGrammarCorrespondence.GrammarRegExp.compile_matches_iff",
+    "Sabrina.OWL2.Datatypes.RegexGrammarCorrespondence.matchesPattern_denotes_iff",
 ]
 
 

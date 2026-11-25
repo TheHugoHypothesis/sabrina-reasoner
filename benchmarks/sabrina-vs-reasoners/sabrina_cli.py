@@ -32,12 +32,12 @@ def run_ofn_query(
     scope_id: str = "query",
     timeout: float = 30.0,
 ) -> Tuple[bool, Dict[str, Any]]:
-    """Invoke `sabrina-alc-query` on an OFN file or string and return `(ok, result_dict)`."""
+    """Invoke `sabrina-query` on an OFN file or string and return `(ok, result_dict)`."""
     if ofn_text is None:
         if ofn_path is None:
             raise ValueError("Either ofn_path or ofn_text must be provided")
         ofn_text = Path(ofn_path).read_text(encoding="utf-8")
-    bin_path = find_sabrina_binary("sabrina-alc-query")
+    bin_path = find_sabrina_binary("sabrina-query")
     payload = ["sabrina-ofn-query-v1", scope_id, ofn_text, query_ofn]
     proc = subprocess.run(
         [str(bin_path)],

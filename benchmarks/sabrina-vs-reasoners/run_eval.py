@@ -2,7 +2,7 @@
 """SABRINA vs. HermiT 1.4.5 & ELK 0.6.0 Controlled Runtime Benchmark Suite.
 
 Runs four reproducible benchmark tracks comparing:
-  - SABRINA (Lean 4 compiled native binaries: cold `sabrina-alc-query` & warm `sabrina-session`)
+  - SABRINA (Lean 4 compiled native binaries: cold `sabrina-query` & warm `sabrina-session`)
   - HermiT 1.4.5.519 (OWL API 5.1.20: cold JVM & warm JVM)
   - ELK 0.6.0 (OWL API 5.1.20: cold JVM & warm JVM; EL++ profile)
 
@@ -138,7 +138,7 @@ def run_sabrina_cold_3val(
     *,
     mode: str = "3val",
 ) -> Dict[str, Any]:
-    """Run SABRINA single-shot native Lean binary (`sabrina-alc-query`)."""
+    """Run SABRINA single-shot native Lean binary (`sabrina-query`)."""
     t0 = time.perf_counter()
     sub_q = f"SubClassOf(<{source_iri}> <{target_iri}>)"
     _, res_sub = run_ofn_query(ofn_text=ofn_text, query_ofn=sub_q)
@@ -421,7 +421,7 @@ def main() -> None:
     bfo_text = BFO_CORE_OFN_PATH.read_text(encoding="utf-8")
 
     # Verify Lean binaries exist
-    find_sabrina_binary("sabrina-alc-query")
+    find_sabrina_binary("sabrina-query")
     find_sabrina_binary("sabrina-session")
 
     print("[1/5] Starting warm Java harness (HermiT 1.4.5 + ELK 0.6.0) & warming up JVM...")

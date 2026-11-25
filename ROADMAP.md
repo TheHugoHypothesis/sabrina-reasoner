@@ -15,7 +15,8 @@ All Lean 4 proofs in this repository are required to build with **zero `sorry`**
 | **33-Datatype Exact Solver** | Done | Mechanized 33-datatype map: Dedekind-cut `owl:real`, IEEE-754 `xsd:float`/`xsd:double` order facets, 14h-shift `xsd:dateTime`/`xsd:dateTimeStamp`, length facets, `DataOneOf`, `rdf:langRange`, and `rdf:XMLLiteral`. |
 | **Milestone C.1: W3C XSD 1.1 Unicode Regex** | Done (`8e8a679`) | Exact Unicode 17.0.0 General Category tables (`UnicodeCategories.lean`), `\d`/`\D` = `\p{Nd}`, `\w`/`\W` = `[^\p{P}\p{Z}\p{C}]`, `\p{...}`/`\P{...}` (30 subcategories, 7 major categories, 91 `Is...` blocks), nested character-class subtraction `[base-[sub]]`, and exact full-Unicode boundary sampling (`UnicodeStringSampling.sample_exact`). |
 | **Milestone A: Strict W3C §11.2 Validator** | Done (`8e8a679`) | `StrictOWL2DL.lean` + `--strict-owl2dl` CLI flag / `"strict_owl2dl": true` JSON option: enforces `owl:topDataProperty` placement, anonymous-individual prohibitions & simple-forest/single-named-root rules, XSD 1.1 pattern syntax, and strict regular/acyclic role hierarchies (`checkStrictOWL2DL_iff`, `diagnoseStrictOWL2DL_isNone_iff`, `decideStrictOWL2DLReal_iff`). |
-| **Milestone B: Declarations, Punning & FSS** | Done (`v0.2.0` ready) | `FunctionalSyntax.lean` + `StrictTyping.lean` + `ImportCatalog.lean`: full `Declaration(...)` and annotation-axiom parsing, prefixed ontology/version IRIs, Unicode & `PN_LOCAL_ESC` tokens, W3C §5.8.1–§5.8.2 typing completeness & punning disjointness (`checkTyping_iff`, `diagnoseTyping_isNone_iff`, `decideStrictTypedOWL2DLReal_iff`), and OASIS `catalog-v001.xml` / `--import-dir` CLI resolution. |
+| **Milestone B: Declarations, Punning & FSS** | Done (`426516b`) | `FunctionalSyntax.lean` + `StrictTyping.lean` + `ImportCatalog.lean`: full `Declaration(...)` and annotation-axiom parsing, prefixed ontology/version IRIs, Unicode & `PN_LOCAL_ESC` tokens, W3C §5.8.1–§5.8.2 typing completeness & punning disjointness (`checkTyping_iff`, `diagnoseTyping_isNone_iff`, `decideStrictTypedOWL2DLReal_iff`), and OASIS `catalog-v001.xml` / `--import-dir` CLI resolution. |
+| **Milestone C.2: Datatype, Exc-C14N & Regex Correspondence** | Done (`v0.3.0` ready) | `StandardsCorrespondence.lean`, `XMLCorrespondence.lean`, and `RegexGrammarCorrespondence.lean`: independent declarative W3C XSD 1.1 / IEEE-754 / RFC 4647 / Exc-C14N / Appendix G BNF specifications with kernel-checked correspondence theorems (`parseHexBinary_iff`, `roundTiesEven_iff`, `parseDateTime_valid`, `matchesLangRange_iff`, `renderExcC14N_simpleText_canonical`, `excC14N_normative_correspondence`, `GrammarRegExp.compile_matches_iff`). |
 | **Performance & Incremental Stack** | Done | Syntactic $\bot$-locality module extraction (`extractBotModule_entails_iff`), polynomial $\mathcal{EL}^{++}$ classifier + canonical models, and provenance-tracked DRed incremental ABox sessions (`IncrementalABox.lean`). |
 
 ---
@@ -25,26 +26,14 @@ All Lean 4 proofs in this repository are required to build with **zero `sorry`**
 ### Milestone B — Entity Declarations, Punning & Complete Functional-Style Syntax (`v0.2.0`) — COMPLETED
 - [x] **B.1 Entity Declaration Parsing & Typing Closure (`FunctionalSyntax.lean`, `StrictTyping.lean`)**
 - [x] **B.2 Complete Functional-Style Syntax Grammar (`FunctionalSyntax.lean`)**
-- [x] **B.3 OASIS XML Catalog & Directory Import Resolution (`CLI/ImportCatalog.lean`, `CLI/ALCQuery.lean`)**
+- [x] **B.3 OASIS XML Catalog & Directory Import Resolution (`CLI/ImportCatalog.lean`, `CLI/Query.lean`)**
 
 ---
 
-### Milestone C.2 — Datatype, Lexical-Decoder & `rdf:XMLLiteral` Standards Correspondence (`v0.3.0`)
-**Goal:** Close the remaining datatype trust boundaries between SABRINA's internal 33-datatype model and the external W3C XSD 1.1 / RDF 2004 specifications.
-
-- [ ] **C.2.1 Lexical Decoder Edge-Case Audit & Independent Reference Proofs (`Datatypes/`)**
-  - Audit and formalize edge-case lexical forms across all 33 datatypes:
-    - `xsd:anyURI` RFC 3987 IRI syntax validation.
-    - `xsd:language` & `rdf:langRange` full BCP 47 / RFC 4647 syntax.
-    - `xsd:float` / `xsd:double` exact IEEE-754 round-to-nearest-even lexical parsing for arbitrary decimal mantissas/exponents.
-    - `xsd:dateTime` / `xsd:dateTimeStamp` proleptic Gregorian boundary cases (year `0000` in XSD 1.1 vs XSD 1.0, `24:00:00` normalization, leap years).
-  - Prove round-trip / correspondence theorems relating executable decoders to declarative W3C lexical-space predicates.
-- [ ] **C.2.2 Independent `rdf:XMLLiteral` / Exclusive XML Canonicalization Correspondence**
-  - Relate `XMLLiteralValidation.lean` to an independent formalization of XML 1.0 Fifth Edition well-formedness, Namespaces in XML 1.0, and Exclusive XML Canonicalization (Exc-C14N: attribute sorting, namespace rendering, empty-element expansion, comment/PI handling).
-- [ ] **C.2.3 Independent XSD 1.1 Regex Grammar Correspondence**
-  - Formalize the W3C XSD 1.1 Part 2 Appendix G BNF grammar directly and prove `parseCompleteRegex` sound and complete with respect to that grammar (including full edge cases of `-`, `^`, escapes inside `[...]`, and quantifier precedence).
-
-**Exit criteria:** Pass all W3C OWL 2 datatype/facet/XML conformance tests with kernel-checked correspondence theorems for lexical decoding, XSD 1.1 regex parsing, and Exc-C14N.
+### Milestone C.2 — Datatype, Lexical-Decoder & `rdf:XMLLiteral` Standards Correspondence (`v0.3.0`) — COMPLETED
+- [x] **C.2.1 Lexical Decoder Edge-Case Audit & Independent Reference Proofs (`StandardsCorrespondence.lean`)**
+- [x] **C.2.2 Independent `rdf:XMLLiteral` / Exclusive XML Canonicalization Correspondence (`XMLCorrespondence.lean`)**
+- [x] **C.2.3 Independent XSD 1.1 Regex Grammar Correspondence (`RegexGrammarCorrespondence.lean`)**
 
 ---
 
@@ -59,7 +48,7 @@ All Lean 4 proofs in this repository are required to build with **zero `sorry`**
   - **Arbitrary Axiom Entailment:** Extend `ExactQueryDecision.lean` beyond the current 10 anonymous-free query axiom forms to support:
     - Object/data property queries (`SubObjectPropertyOf`, `SubObjectPropertyOf(ObjectPropertyChain ...)`, `EquivalentObjectProperties`, `DisjointObjectProperties`, `InverseObjectProperties`, `ObjectPropertyDomain/Range`, all role characteristics, `SubDataPropertyOf`, `EquivalentDataProperties`, `DisjointDataProperties`, `DataPropertyDomain/Range`, `FunctionalDataProperty`, `HasKey`).
     - Queries containing anonymous individuals (existential conjunctive/tree blank-node entailment).
-  - **Ontology Classification & Realization:** Expose certified full TBox classification (complete named-class subsumption DAG + equivalence classes) and ABox realization (most specific named classes per individual) via `sabrina-alc-query` and `sabrina-session`.
+  - **Ontology Classification & Realization:** Expose certified full TBox classification (complete named-class subsumption DAG + equivalence classes) and ABox realization (most specific named classes per individual) via `sabrina-query` and `sabrina-session`.
 - [ ] **D.3 Official W3C OWL 2 Conformance Test Suite Gate**
   - Add a reproducible harness in `benchmarks/` running the official W3C OWL 2 DL WebOnt / OWL 2 Test Cases (consistency, positive entailment, negative entailment, and non-DL syntax-rejection tests).
   - Make the W3C test suite a CI gate alongside `scripts/verify_axioms.py`.

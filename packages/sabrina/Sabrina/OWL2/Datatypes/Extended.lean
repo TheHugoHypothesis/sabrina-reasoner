@@ -55,7 +55,7 @@ private def scalePow2 (q : Rat) (exp : Int) : Rat :=
   else
     mkRat q.num (q.den * 2 ^ (-exp).toNat)
 
-private def roundTiesEven (numerator denominator : Nat) : Nat :=
+def roundTiesEven (numerator denominator : Nat) : Nat :=
   let whole := numerator / denominator
   let twiceRemainder := 2 * (numerator % denominator)
   if denominator < twiceRemainder || (denominator == twiceRemainder && whole % 2 == 1)
@@ -968,7 +968,7 @@ private def daysFromCivil (y : Int) (m d : Nat) : Int :=
   let doe : Int := yoe * 365 + yoe / 4 - yoe / 100 + doy
   era * 146097 + doe - 719468
 
-private def parseNatDigits (cs : List Char) : Option Nat :=
+def parseNatDigits (cs : List Char) : Option Nat :=
   if cs.isEmpty || !cs.all (fun c => '0' ≤ c && c ≤ '9') then none
   else some (cs.foldl (fun acc c => acc * 10 + (c.toNat - '0'.toNat)) 0)
 
@@ -980,7 +980,7 @@ private def parseTwoChars (a b : Char) : Option Nat := do
   let d2 ← digitVal b
   some (d1 * 10 + d2)
 
-private def parseTzSuffix : List Char → Option (Option Int)
+def parseTzSuffix : List Char → Option (Option Int)
   | [] => some none
   | ['Z'] => some (some 0)
   | [sign, h1, h2, ':', m1, m2] => do
@@ -1002,45 +1002,57 @@ private def asciiChars? (raw : String) : Option (List Char) :=
 
 /-- Parse ISO-8601 `xsd:dateTime` / `xsd:dateTimeStamp` lexical forms:
 `(-)?YYYY-MM-DDThh:mm:ss(.fff)?(Z|(+|-)hh:mm)?`. -/
-def parseDateTime (requireTz : Bool) (raw : String) : Option DateTimeVal := do
-  let chars ← asciiChars? raw
-  let (negYear, rest) := match chars with
-    | '-' :: r => (true, r)
-    | _ => (false, chars)
-  let (yearChars, afterYear) ← match rest.span (· != '-') with
-    | (y, '-' :: r) => some (y, r)
-    | _ => none
-  if yearChars.length < 4 then none
-  if yearChars.length > 4 && yearChars.head? == some '0' then none
-  let yNat ← parseNatDigits yearChars
-  let year : Int := if negYear then -(yNat : Int) else (yNat : Int)
-  let (month, day, hour, minute, sec, fracAndTz) ← match afterYear with
-    | mo1 :: mo2 :: '-' :: d1 :: d2 :: 'T' :: h1 :: h2 :: ':' :: m1 :: m2 :: ':' :: s1 :: s2 :: tail => do
-      let mo ← parseTwoChars mo1 mo2
-      let dy ← parseTwoChars d1 d2
-      let hr ← parseTwoChars h1 h2
-      let mn ← parseTwoChars m1 m2
-      let sc ← parseTwoChars s1 s2
-      some (mo, dy, hr, mn, sc, tail)
-    | _ => none
-  if month < 1 || month > 12 || day < 1 || day > daysInMonth year month then none
-  if hour > 24 || minute ≥ 60 || sec ≥ 60 then none
-  let (fracNum, fracDen, tzChars) ← match fracAndTz with
-    | '.' :: r =>
-      let (fDigits, tz) := r.span (fun c => '0' ≤ c && c ≤ '9')
-      match parseNatDigits fDigits with
+def parseDateTime (requireTz : Bool) (raw : String) : Option DateTimeVal :=
+  match asciiChars? raw with
+  | none => none
+  | some chars =>
+    let (negYear, rest) := match chars with
+      | '-' :: r => (true, r)
+      | _ => (false, chars)
+    match rest.span (· != '-') with
+    | (yearChars, '-' :: afterYear) =>
+      if yearChars.length < 4 || (yearChars.length > 4 && yearChars.head? == some '0') then none
+      else match parseNatDigits yearChars with
       | none => none
-      | some fVal => some ((fVal : Int), 10 ^ fDigits.length, tz)
-    | tz => some ((0 : Int), 1, tz)
-  if hour == 24 && (minute != 0 || sec != 0 || fracNum != 0) then none
-  let offset ← parseTzSuffix tzChars
-  if requireTz && offset.isNone then none
-  let days := daysFromCivil year month day
-  let daySec : Nat := hour * 3600 + minute * 60 + sec
-  let totalSec : Int := days * 86400 + Int.ofNat daySec - offset.getD 0
-  let epoch : Rat := if fracDen == 1 then Rat.ofInt totalSec
-    else mkRat (totalSec * (fracDen : Int) + fracNum) fracDen
-  some ⟨epoch, offset⟩
+      | some yNat =>
+        -- Per W3C XSD 1.1 Part 2 §3.3.7 (yearFrag), year 0000 is valid (1 BCE),
+        -- whereas negative zero year (-0000) is forbidden.
+        if negYear && yNat == 0 then none
+        else
+          let year : Int := if negYear then -(yNat : Int) else (yNat : Int)
+          match afterYear with
+          | mo1 :: mo2 :: '-' :: d1 :: d2 :: 'T' :: h1 :: h2 :: ':' :: m1 :: m2 :: ':' :: s1 :: s2 :: fracAndTz =>
+            match parseTwoChars mo1 mo2, parseTwoChars d1 d2, parseTwoChars h1 h2,
+                  parseTwoChars m1 m2, parseTwoChars s1 s2 with
+            | some month, some day, some hour, some minute, some sec =>
+              if month < 1 || month > 12 || day < 1 || day > daysInMonth year month ||
+                 hour > 24 || minute ≥ 60 || sec ≥ 60 then none
+              else
+                let fracParsed : Option (Int × Nat × List Char) := match fracAndTz with
+                  | '.' :: r =>
+                    let (fDigits, tz) := r.span (fun c => '0' ≤ c && c ≤ '9')
+                    match parseNatDigits fDigits with
+                    | none => none
+                    | some fVal => some ((fVal : Int), 10 ^ fDigits.length, tz)
+                  | tz => some ((0 : Int), 1, tz)
+                match fracParsed with
+                | none => none
+                | some (fracNum, fracDen, tzChars) =>
+                  if hour == 24 && (minute != 0 || sec != 0 || fracNum != 0) then none
+                  else match parseTzSuffix tzChars with
+                  | none => none
+                  | some offset =>
+                    if requireTz && offset.isNone then none
+                    else
+                      let days := daysFromCivil year month day
+                      let daySec : Nat := hour * 3600 + minute * 60 + sec
+                      let totalSec : Int := days * 86400 + Int.ofNat daySec - offset.getD 0
+                      let epoch : Rat := if fracDen == 1 then Rat.ofInt totalSec
+                        else mkRat (totalSec * (fracDen : Int) + fracNum) fracDen
+                      some ⟨epoch, offset⟩
+            | _, _, _, _, _ => none
+          | _ => none
+    | _ => none
 
 /-- For mixed zoned and local values, strict order must hold under every
 permitted offset for the local value. The extreme offsets are ±14 hours. -/
@@ -1891,7 +1903,7 @@ private def canonXMLLoop :
     match readXMLName rest with
     | none => none
     | some (target, rem1) =>
-      if target.toLower == "xml" || !isXMLNCName target then none
+      if String.ofList (target.toList.map toLowerAscii) == "xml" || !isXMLNCName target then none
       else
         match rem1 with
         | '?' :: '>' :: rem2 =>

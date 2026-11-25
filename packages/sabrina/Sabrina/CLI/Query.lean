@@ -7,7 +7,7 @@ import Sabrina.CLI.SROIQDQuery
 import Sabrina.CLI.OFNQuery
 import Sabrina.CLI.ImportCatalog
 
-namespace Sabrina.CLI.ALCQuery
+namespace Sabrina.CLI.Query
 
 open Lean Sabrina.ALC
 
@@ -364,4 +364,4 @@ def run (args : List String) : IO UInt32 := do
   IO.println result.compress
   return code
 
-end Sabrina.CLI.ALCQuery
+end Sabrina.CLI.Query

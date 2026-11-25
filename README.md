@@ -13,7 +13,7 @@ lake build
 python3 scripts/verify_axioms.py
 ```
 
-The default build checks the [verification modules](Verification.lean) and builds `sabrina-alc-query` and `sabrina-session`. The axiom script scans both packages and reports dependencies for selected theorems.
+The default build checks the [verification modules](Verification.lean) and builds `sabrina-query` and `sabrina-session`. The axiom script scans both packages and reports dependencies for selected theorems.
 
 The reasoner and OWL formalization are in [packages/sabrina](packages/sabrina/README.md). The first-order logic library is in [packages/logic-core](packages/logic-core/README.md).
 

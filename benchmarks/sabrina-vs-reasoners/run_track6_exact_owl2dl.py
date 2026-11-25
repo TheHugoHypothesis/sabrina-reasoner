@@ -415,7 +415,7 @@ def main() -> None:
     raw_dir = out_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
 
-    sabrina_bin = Path(find_sabrina_binary("sabrina-alc-query"))
+    sabrina_bin = Path(find_sabrina_binary("sabrina-query"))
     cp_file = JAVA_DIR / "target" / "classpath.txt"
     classpath = f"{JAVA_DIR / 'target' / 'classes'}:{cp_file.read_text().strip()}"
 

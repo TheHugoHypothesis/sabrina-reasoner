@@ -21,4 +21,7 @@ import Sabrina.OWL2.SROIQD.Termination.UniversalRoleAxiomsExamples
 import Sabrina.OWL2.SROIQD.Termination.UniversalRoleExamples
 import Sabrina.OWL2.SROIQD.Termination.WeakRegularity
 import Sabrina.OWL2.SROIQD.Termination.WeakRegularityExamples
+import Sabrina.OWL2.Datatypes.StandardsCorrespondence
+import Sabrina.OWL2.Datatypes.XMLCorrespondence
+import Sabrina.OWL2.Datatypes.RegexGrammarCorrespondence
 import Sabrina.OWL2.SROIQD.Termination.WiderDataExamples

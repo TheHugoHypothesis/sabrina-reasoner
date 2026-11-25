@@ -9,3 +9,4 @@ import SabrinaTests.SROIQD
 import SabrinaTests.OFN
 import SabrinaTests.StrictAndRegex
 import SabrinaTests.TypingAndCatalog
+import SabrinaTests.StandardsTests
