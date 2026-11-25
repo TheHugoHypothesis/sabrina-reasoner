@@ -1,4 +1,5 @@
 import Sabrina.OWL2.FunctionalSyntax
+import Sabrina.OWL2.RDF.OWLMapping
 
 /-! OASIS XML Catalog (`catalog-v001.xml`) and local directory loader for
     OWL 2 Functional-Style Syntax import libraries.
@@ -143,11 +144,12 @@ def loadImportDir (dir : System.FilePath) : IO (Except String (List (IRI × Stri
     let entries ← dir.readDir
     let mut lib : List (IRI × String) := []
     for entry in entries do
-      if entry.fileName.endsWith ".ofn" then
+      let fn := entry.fileName
+      if fn.endsWith ".ofn" || fn.endsWith ".rdf" || fn.endsWith ".owl" || fn.endsWith ".ttl" then
         let contents ← IO.FS.readFile entry.path
-        let key := match parseDocument contents with
-          | .ok doc => doc.ontologyIRI.getD (doc.versionIRI.getD entry.fileName)
-          | .error _ => entry.fileName
+        let key := match RDF.OWLMapping.parseDocumentAuto contents false with
+          | .ok doc => doc.ontologyIRI.getD (doc.versionIRI.getD fn)
+          | .error _ => fn
         lib := (key, contents) :: lib
     return .ok lib.reverse
   catch e =>

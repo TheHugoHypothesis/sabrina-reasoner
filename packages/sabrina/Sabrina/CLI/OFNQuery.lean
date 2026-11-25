@@ -1,12 +1,15 @@
 import Lean.Data.Json
 import Sabrina.OWL2.FunctionalSyntax
+import Sabrina.OWL2.RDF.OWLMapping
 import Sabrina.OWL2.Normalize
 import Sabrina.OWL2.StrictOWL2DL
 import Sabrina.OWL2.StrictTyping
 import Sabrina.OWL2.Profile
 import Sabrina.OWL2.EL
+import Sabrina.OWL2.Classification
 import Sabrina.OWL2.SROIQD.Termination.SourceImportConformance
 import Sabrina.OWL2.SROIQD.Termination.ExactQueryDecision
+import Sabrina.OWL2.SROIQD.Termination.ExtendedQueryDecision
 
 /-! CLI JSON wire interface (`sabrina-ofn-query-v1`) accepting W3C OWL 2
     Functional-Style Syntax (`.ofn`) documents, optional multi-document
@@ -25,7 +28,9 @@ open Lean Sabrina.OWL2 Sabrina.OWL2.FunctionalSyntax Sabrina.OWL2.Normalize
 open Sabrina.OWL2.SROIQD Sabrina.OWL2.Datatypes Sabrina.OWL2.Profile Sabrina.OWL2.EL
 open Sabrina.ALC (InclusionVerdict roleClosure)
 
-def requestFormat := "sabrina-ofn-query-v1"
+def requestFormat  := "sabrina-ofn-query-v1"
+def classifyFormat := "sabrina-classify-v1"
+def realizeFormat  := "sabrina-realize-v1"
 
 private def encodeFloatVal : FloatVal → Json
   | .negInf => toJson "-INF"
@@ -212,9 +217,9 @@ private def runConsistency (id ofnText : String) (lib : List (IRI × String))
   if id.isEmpty then return (2, response "UNSUPPORTED" false [("reason", toJson "empty ontology ID")])
   let scope := Json.mkObj [("semantics", toJson "owl2-ofn-sroiqd"), ("id", toJson id)]
   let baseContext := [("scope", scope)]
-  let closure ← match resolveImportClosure ofnText lib with
+  let closure ← match RDF.OWLMapping.resolveImportClosureAuto ofnText lib strictOwl2DL with
     | .ok r => pure r
-    | .error err => return (2, response "UNSUPPORTED" false (("reason", toJson s!"OFN parse/import error: {err}") :: baseContext))
+    | .error err => return (2, response "UNSUPPORTED" false (("reason", toJson s!"parse/import error: {err}") :: baseContext))
   let ont := closure.ontology
   if strictOwl2DL then
     if let some err := StrictTyping.diagnoseStrictTypedOWL2DL closure.declarations closure.annotationAxioms ont then
@@ -244,7 +249,10 @@ private def runConsistency (id ofnText : String) (lib : List (IRI × String))
   let hasStringFacets := p.allDataAtoms.any SROIQD.Termination.WiderData.isStringFacetExtraAtom
   let hasBuiltInDataProp := p.allDataProps.any fun dp => dp == topDataProperty || dp == bottomDataProperty
   if allowExact && (hasReal || hasOrderedData || hasStringFacets || hasBuiltInDataProp) then
-    if let some (_, sat) := SROIQD.Termination.SourceImport.decideRealSourceClosure? ofnText lib then
+    let exactSat :=
+      (SROIQD.Termination.SourceImport.decideRealSourceClosure? ofnText lib).map Prod.snd <|>
+      SROIQD.Termination.WiderData.decideRealOntology? ont
+    if let some sat := exactSat then
       let basis :=
         if hasReal then "sroiqd-real-reduction"
         else if hasOrderedData then "sroiqd-ordered-data"
@@ -260,7 +268,10 @@ private def runConsistency (id ofnText : String) (lib : List (IRI × String))
     return (2, response "UNSUPPORTED" false (("reason", toJson err) :: ctx))
   let some ev := propose p limits | do
     if allowExact then
-      if let some (_, sat) := SROIQD.Termination.SourceImport.decideRealSourceClosure? ofnText lib then
+      let exactSat :=
+        (SROIQD.Termination.SourceImport.decideRealSourceClosure? ofnText lib).map Prod.snd <|>
+        SROIQD.Termination.WiderData.decideRealOntology? ont
+      if let some sat := exactSat then
         let verdict := if sat then "SATISFIABLE" else "INCONSISTENT_ONTOLOGY"
         return (0, response verdict true
           (("decision_basis", toJson "sroiqd-exact-consistency-v1") ::
@@ -304,8 +315,11 @@ private def tryObjectSubclass (ofnText queryText : String) (lib : List (IRI × S
       ("profile", encodeProfile qp basis) :: context))
 
 private def tryExactQuery (ofnText queryText : String) (lib : List (IRI × String))
+    (ont : Ontology) (qAx : Axiom)
     (qp : QueryProfile) (context : List (String × Json)) (basis : String) : Option (UInt32 × Json) := do
-  let (_, _, verdict) ← SROIQD.Termination.ExactQuery.decideRealSourceQuery? ofnText queryText lib
+  let verdict ←
+    ((SROIQD.Termination.ExactQuery.decideRealSourceQuery? ofnText queryText lib).map fun (_, _, v) => v) <|>
+    SROIQD.Termination.ExtendedQuery.decideRealExtendedQuery? ont qAx
   return (0, response (verdictName verdict) true
     (("decision_basis", toJson (basis ++ "-v1")) ::
       ("profile", encodeProfile qp basis) :: context))
@@ -316,9 +330,9 @@ private def runQuery (id ofnText queryText : String) (lib : List (IRI × String)
   if id.isEmpty then return (2, response "UNSUPPORTED" false [("reason", toJson "empty ontology ID")])
   let scope := Json.mkObj [("semantics", toJson "owl2-ofn-sroiqd"), ("id", toJson id)]
   let baseContext := [("scope", scope), ("query", toJson queryText)]
-  let closure ← match resolveImportClosure ofnText lib with
+  let closure ← match RDF.OWLMapping.resolveImportClosureAuto ofnText lib strictOwl2DL with
     | .ok r => pure r
-    | .error err => return (2, response "UNSUPPORTED" false (("reason", toJson s!"OFN parse/import error: {err}") :: baseContext))
+    | .error err => return (2, response "UNSUPPORTED" false (("reason", toJson s!"parse/import error: {err}") :: baseContext))
   let prefixes := closure.prefixes
   let ont := closure.ontology
   let qAx ← match parseQueryAxiom prefixes queryText with
@@ -369,8 +383,15 @@ private def runQuery (id ofnText queryText : String) (lib : List (IRI × String)
       | some dp => pure dp
       | none => return (2, response "UNSUPPORTED" false
           (("reason", toJson "ontology contains cyclic datatype definitions or constructors outside the normalized SROIQ(D) fragment") :: ctx))
-  let some incs := queryToInclusions defs qAx | return (2, response "UNSUPPORTED" false
-    (("reason", toJson "query must be SubClassOf, binary EquivalentClasses, binary DisjointClasses, ClassAssertion, (Negative)ObjectPropertyAssertion, (Negative)DataPropertyAssertion, binary SameIndividual, or binary DifferentIndividuals") :: ctx))
+  let some incs := queryToInclusions defs qAx | do
+    if allowExact then
+      if let some verdict := SROIQD.Termination.ExtendedQuery.classifyExtendedQueryWith
+          Classification.fastConsistencyCheck ont qAx then
+        return (0, response (verdictName verdict) true
+          (("decision_basis", toJson "sroiqd-extended-query-v1") ::
+           ("profile", encodeProfile qp "sroiqd-extended-query") :: context))
+    return (2, response "UNSUPPORTED" false
+      (("reason", toJson "query axiom form is outside the supported exact query language") :: ctx))
   -- Route wider datatypes, string/URI facets, and built-in data properties through
   -- the kernel-verified exact real/wider query solver before bounded search.
   let probeProblems : List Problem :=
@@ -388,7 +409,7 @@ private def runQuery (id ofnText queryText : String) (lib : List (IRI × String)
       else if hasOrderedData then "sroiqd-ordered-data-query"
       else if hasStringFacets then "sroiqd-string-facets-query"
       else "sroiqd-builtin-data-prop-query"
-    if let some res := tryExactQuery ofnText queryText lib qp context basis then
+    if let some res := tryExactQuery ofnText queryText lib ont qAx qp context basis then
       return res
   match incs with
   | [q] =>
@@ -401,7 +422,7 @@ private def runQuery (id ofnText queryText : String) (lib : List (IRI × String)
       return (⟨a, b⟩ : InclusionEvidence)
     let some ev := pair | do
       if allowExact then
-        if let some res := tryExactQuery ofnText queryText lib qp context "sroiqd-exact-query" then
+        if let some res := tryExactQuery ofnText queryText lib ont qAx qp context "sroiqd-exact-query" then
           return res
       return (2, response "UNKNOWN" false
         (("reason", toJson "SROIQ(D) search could not produce both certificates within interactive limits") ::
@@ -422,7 +443,7 @@ private def runQuery (id ofnText queryText : String) (lib : List (IRI × String)
       return (⟨← propose (counterProblem p q2) limits, ← propose (inclusionProblem p q2) limits⟩ : InclusionEvidence)
     let (some ev1, some ev2) := (pair1, pair2) | do
       if allowExact then
-        if let some res := tryExactQuery ofnText queryText lib qp context "sroiqd-exact-query" then
+        if let some res := tryExactQuery ofnText queryText lib ont qAx qp context "sroiqd-exact-query" then
           return res
       return (2, response "UNKNOWN" false
         (("reason", toJson "SROIQ(D) search could not certify equivalence within interactive limits") ::
@@ -477,5 +498,89 @@ def run (j : Json) (cliStrict : Bool := false)
     | _, .error err => return (2, response "UNSUPPORTED" false [("reason", toJson s!"invalid options: {err}")])
   | _ => return (2, response "UNSUPPORTED" false
     [("reason", toJson "expected [\"sabrina-ofn-query-v1\", id, ofnText, (optional queryOfn), (optional importsObj), (optional optionsObj)]")])
+
+private def encodeClassHierarchy (h : Classification.ClassHierarchy) : Json :=
+  Json.mkObj [
+    ("consistent", toJson h.consistent),
+    ("classes", toJson h.classes),
+    ("unsatisfiable", toJson h.unsatisfiable),
+    ("subsumptions", toJson (h.subsumptions.map fun (a, b) => #[toJson a, toJson b])),
+    ("equivalences", toJson h.equivalences),
+    ("direct_parents", Json.mkObj (h.directParents.map fun (c, ps) => (c, toJson ps)))]
+
+private def encodeRealization (r : Classification.RealizationResult) : Json :=
+  Json.mkObj [
+    ("consistent", toJson r.consistent),
+    ("individuals", toJson r.individuals),
+    ("entries", toJson (r.entries.map fun e => Json.mkObj [
+      ("individual", toJson e.individual),
+      ("all_types", toJson e.allTypes),
+      ("direct_types", toJson e.directTypes)]))]
+
+private def parseServiceRequest (j : Json) (cliStrict : Bool) (extraLib : List (IRI × String)) :
+    Except String (String × String × List (IRI × String) × Bool) := do
+  let fields ← j.getArr?
+  match fields.toList with
+  | [.str _, .str id, .str docText] => return (id, docText, extraLib, cliStrict)
+  | [.str _, .str id, .str docText, obj@(.obj _)] =>
+    if isOptionsObj obj then
+      let opts ← parseOptionsObj obj cliStrict
+      return (id, docText, extraLib, opts.strictOwl2DL)
+    else
+      let lib ← parseImportsObj obj
+      return (id, docText, lib ++ extraLib, cliStrict)
+  | [.str _, .str id, .str docText, impJson@(.obj _), optJson@(.obj _)] =>
+    let lib ← parseImportsObj impJson
+    let opts ← parseOptionsObj optJson cliStrict
+    return (id, docText, lib ++ extraLib, opts.strictOwl2DL)
+  | _ => throw "expected [format, id, ontologyText, (optional importsObj), (optional optionsObj)]"
+
+/-- Certified full TBox classification CLI handler (`sabrina-classify-v1`). -/
+def runClassify (j : Json) (cliStrict : Bool := false)
+    (extraLib : List (IRI × String) := []) : UInt32 × Json := Id.run do
+  let (id, docText, lib, strict) ← match parseServiceRequest j cliStrict extraLib with
+    | .ok r => pure r
+    | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson err)])
+  let scope := Json.mkObj [("semantics", toJson "owl2-classify-v1"), ("id", toJson id)]
+  let closure ← match RDF.OWLMapping.resolveImportClosureAuto docText lib strict with
+    | .ok r => pure r
+    | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson s!"parse/import error: {err}"), ("scope", scope)])
+  if strict then
+    if let some err := StrictTyping.diagnoseStrictTypedOWL2DL closure.declarations closure.annotationAxioms closure.ontology then
+      return (2, response "UNSUPPORTED" false [
+        ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
+        ("reason", toJson err), ("scope", scope)])
+  match Classification.classifyOntologyRuntime closure.ontology closure.declarations with
+  | some hier =>
+    let verdict := if hier.consistent then "CLASSIFIED" else "INCONSISTENT_ONTOLOGY"
+    let base := [("classification", encodeClassHierarchy hier), ("scope", scope)]
+    let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: base else base
+    return (0, response verdict true fields)
+  | none =>
+    return (2, response "UNSUPPORTED" false [("reason", toJson "ontology outside exact classification fragment"), ("scope", scope)])
+
+/-- Certified ABox realization CLI handler (`sabrina-realize-v1`). -/
+def runRealize (j : Json) (cliStrict : Bool := false)
+    (extraLib : List (IRI × String) := []) : UInt32 × Json := Id.run do
+  let (id, docText, lib, strict) ← match parseServiceRequest j cliStrict extraLib with
+    | .ok r => pure r
+    | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson err)])
+  let scope := Json.mkObj [("semantics", toJson "owl2-realize-v1"), ("id", toJson id)]
+  let closure ← match RDF.OWLMapping.resolveImportClosureAuto docText lib strict with
+    | .ok r => pure r
+    | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson s!"parse/import error: {err}"), ("scope", scope)])
+  if strict then
+    if let some err := StrictTyping.diagnoseStrictTypedOWL2DL closure.declarations closure.annotationAxioms closure.ontology then
+      return (2, response "UNSUPPORTED" false [
+        ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
+        ("reason", toJson err), ("scope", scope)])
+  match Classification.realizeOntologyRuntime closure.ontology closure.declarations with
+  | some real =>
+    let verdict := if real.consistent then "REALIZED" else "INCONSISTENT_ONTOLOGY"
+    let base := [("realization", encodeRealization real), ("scope", scope)]
+    let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: base else base
+    return (0, response verdict true fields)
+  | none =>
+    return (2, response "UNSUPPORTED" false [("reason", toJson "ontology outside exact realization fragment"), ("scope", scope)])
 
 end Sabrina.CLI.OFNQuery

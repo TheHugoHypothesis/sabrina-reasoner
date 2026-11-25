@@ -10,3 +10,4 @@ import SabrinaTests.OFN
 import SabrinaTests.StrictAndRegex
 import SabrinaTests.TypingAndCatalog
 import SabrinaTests.StandardsTests
+import SabrinaTests.MilestoneDTests

@@ -17,6 +17,10 @@ HEADLINE_MODULES = [
     "Sabrina.OWL2.Datatypes.StandardsCorrespondence",
     "Sabrina.OWL2.Datatypes.XMLCorrespondence",
     "Sabrina.OWL2.Datatypes.RegexGrammarCorrespondence",
+    "Sabrina.OWL2.RDF.Graph",
+    "Sabrina.OWL2.RDF.OWLMapping",
+    "Sabrina.OWL2.SROIQD.Termination.ExtendedQueryDecision",
+    "Sabrina.OWL2.Classification",
     "Sabrina.OWL2.SROIQD.Termination.ObjectHierarchyBoundary",
     "Sabrina.OWL2.SROIQD.Termination.RegularObjectDecision",
     "Sabrina.OWL2.SROIQD.Termination.RegularOWL2DLDecision",
@@ -46,6 +50,14 @@ HEADLINE_THEOREMS = [
     "Sabrina.OWL2.Datatypes.XMLCorrespondence.excC14N_normative_correspondence",
     "Sabrina.OWL2.Datatypes.RegexGrammarCorrespondence.GrammarRegExp.compile_matches_iff",
     "Sabrina.OWL2.Datatypes.RegexGrammarCorrespondence.matchesPattern_denotes_iff",
+    "Sabrina.OWL2.RDF.parseRDFList_encodeRDFListWith",
+    "Sabrina.OWL2.RDF.OWLMapping.owl2_rdf_mapping_roundtrip_correspondence",
+    "Sabrina.OWL2.SROIQD.Termination.ExtendedQuery.counterexample_branches_sat_iff",
+    "Sabrina.OWL2.SROIQD.Termination.ExtendedQuery.classifyExtendedQueryWith_sound",
+    "Sabrina.OWL2.SROIQD.Termination.ExtendedQuery.decideRealExtendedQuery_sound",
+    "Sabrina.OWL2.Classification.classifyOntologyWith_sound_complete",
+    "Sabrina.OWL2.Classification.classifyOntologyReal_sound_complete",
+    "Sabrina.OWL2.Classification.realizeOntologyReal_sound_complete",
 ]
 
 

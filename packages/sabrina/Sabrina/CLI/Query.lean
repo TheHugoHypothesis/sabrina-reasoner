@@ -318,6 +318,8 @@ private def solveJSON (j : Json) (cliStrict : Bool := false)
     if format == DataQuery.requestFormat then DataQuery.run j
     else if format == SROIQDQuery.requestFormat then SROIQDQuery.run j
     else if format == OFNQuery.requestFormat then OFNQuery.run j cliStrict extraLib
+    else if format == OFNQuery.classifyFormat then OFNQuery.runClassify j cliStrict extraLib
+    else if format == OFNQuery.realizeFormat then OFNQuery.runRealize j cliStrict extraLib
     else solveInclusion j
   | _ => solveInclusion j
 where

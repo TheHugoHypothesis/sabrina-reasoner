@@ -24,4 +24,8 @@ import Sabrina.OWL2.SROIQD.Termination.WeakRegularityExamples
 import Sabrina.OWL2.Datatypes.StandardsCorrespondence
 import Sabrina.OWL2.Datatypes.XMLCorrespondence
 import Sabrina.OWL2.Datatypes.RegexGrammarCorrespondence
+import Sabrina.OWL2.RDF.Graph
+import Sabrina.OWL2.RDF.OWLMapping
+import Sabrina.OWL2.SROIQD.Termination.ExtendedQueryDecision
+import Sabrina.OWL2.Classification
 import Sabrina.OWL2.SROIQD.Termination.WiderDataExamples

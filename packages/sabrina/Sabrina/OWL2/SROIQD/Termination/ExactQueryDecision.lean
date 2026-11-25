@@ -82,7 +82,7 @@ private theorem classHolds_withAnonymous_oneOf {dm : DatatypeMap} (i : Interpret
     | named _ => exact ⟨_, ha, heq⟩
     | anonymous _ _ => cases hall _ ha
 
-private theorem classHolds_withAnonymous_of_noAnon {dm : DatatypeMap} (i : Interpretation dm)
+theorem classHolds_withAnonymous_of_noAnon {dm : DatatypeMap} (i : Interpretation dm)
     (assign : String → String → i.Object) (x : i.Object) {c : ClassExpr}
     (h : hasNoAnonIndsClassExpr c = true) :
     classHolds (i.withAnonymous assign) x c ↔ classHolds i x c := by

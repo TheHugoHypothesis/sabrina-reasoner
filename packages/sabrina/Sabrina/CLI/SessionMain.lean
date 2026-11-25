@@ -1,9 +1,12 @@
 import Lean.Data.Json
 import Sabrina.OWL2.FunctionalSyntax
+import Sabrina.OWL2.RDF.OWLMapping
 import Sabrina.OWL2.Normalize
 import Sabrina.OWL2.Profile
 import Sabrina.OWL2.EL
 import Sabrina.OWL2.IncrementalABox
+import Sabrina.OWL2.Classification
+import Sabrina.OWL2.SROIQD.Termination.ExtendedQueryDecision
 
 /-! Persistent JSON-lines session server (`sabrina-session`) for incremental
     ABox inference over a compiled TBox/RBox.
@@ -33,6 +36,7 @@ private structure SessionState where
   loaded : Bool := false
   tboxId : String := ""
   prefixes : PrefixMap := []
+  declarations : List EntityDecl := []
   baseOnt : Ontology := []
   fullFragment : Fragment := .el
   elState : Option IncrementalState := none
@@ -122,14 +126,19 @@ private def encodeSROIQDEvidence (limits : Limits) : Evidence → Json
 
 private def handleLoadTBox (obj : Std.TreeMap.Raw String Json compare) : SessionState × Json := Id.run do
   let id := match obj.get? "id" with | some (.str s) => s | _ => "session-tbox"
-  let some (.str ofnText) := obj.get? "ofn" | return ({}, Json.mkObj [
-    ("ok", toJson false), ("error", toJson "load_tbox requires string field 'ofn'")])
+  let ofnText ← match obj.get? "ofn", obj.get? "ontology" with
+    | some (.str s), _ => pure s
+    | _, some (.str s) => pure s
+    | _, _ => return ({}, Json.mkObj [
+      ("ok", toJson false), ("error", toJson "load_tbox requires string field 'ofn' or 'ontology'")])
   let lib ← match parseImportsField obj with
     | .ok l => pure l
     | .error err => return ({}, Json.mkObj [("ok", toJson false), ("error", toJson s!"invalid imports: {err}")])
-  let (prefixes, ont) ← match resolveImports ofnText lib with
+  let closure ← match RDF.OWLMapping.resolveImportClosureAuto ofnText lib false with
     | .ok r => pure r
-    | .error err => return ({}, Json.mkObj [("ok", toJson false), ("error", toJson s!"OFN parse/import error: {err}")])
+    | .error err => return ({}, Json.mkObj [("ok", toJson false), ("error", toJson s!"parse/import error: {err}")])
+  let prefixes := closure.prefixes
+  let ont := closure.ontology
   let fp := profileOntology ont
   let frag := fp.leastFragment
   -- Validate global restrictions once at TBox load time
@@ -156,6 +165,7 @@ private def handleLoadTBox (obj : Std.TreeMap.Raw String Json compare) : Session
     loaded := true
     tboxId := id
     prefixes := prefixes
+    declarations := closure.declarations
     baseOnt := ont
     fullFragment := frag
     elState := elState
@@ -370,6 +380,46 @@ private def handleQuery (st : SessionState) (obj : Std.TreeMap.Raw String Json c
     ("ok", toJson false), ("verdict", toJson "UNSUPPORTED"), ("lean_verified", toJson false),
     ("reason", toJson "session query expects single-inclusion query form")]
 
+private def handleClassify (st : SessionState) : Json :=
+  if !st.loaded then
+    Json.mkObj [("ok", toJson false), ("error", toJson "no TBox loaded; call load_tbox first")]
+  else
+    let ont := activeOnt st
+    match Classification.classifyOntologyRuntime ont st.declarations with
+    | some h =>
+      Json.mkObj [
+        ("ok", toJson true), ("cmd", toJson "classify"),
+        ("lean_verified", toJson true),
+        ("consistent", toJson h.consistent),
+        ("classes", toJson h.classes),
+        ("unsatisfiable", toJson h.unsatisfiable),
+        ("subsumptions", toJson (h.subsumptions.map fun (a, b) => #[toJson a, toJson b])),
+        ("equivalences", toJson h.equivalences),
+        ("direct_parents", Json.mkObj (h.directParents.map fun (c, ps) => (c, toJson ps)))]
+    | none =>
+      Json.mkObj [("ok", toJson false), ("cmd", toJson "classify"), ("lean_verified", toJson false),
+        ("error", toJson "active ontology outside exact classification fragment")]
+
+private def handleRealize (st : SessionState) : Json :=
+  if !st.loaded then
+    Json.mkObj [("ok", toJson false), ("error", toJson "no TBox loaded; call load_tbox first")]
+  else
+    let ont := activeOnt st
+    match Classification.realizeOntologyRuntime ont st.declarations with
+    | some r =>
+      Json.mkObj [
+        ("ok", toJson true), ("cmd", toJson "realize"),
+        ("lean_verified", toJson true),
+        ("consistent", toJson r.consistent),
+        ("individuals", toJson r.individuals),
+        ("entries", toJson (r.entries.map fun e => Json.mkObj [
+          ("individual", toJson e.individual),
+          ("all_types", toJson e.allTypes),
+          ("direct_types", toJson e.directTypes)]))]
+    | none =>
+      Json.mkObj [("ok", toJson false), ("cmd", toJson "realize"), ("lean_verified", toJson false),
+        ("error", toJson "active ontology outside exact realization fragment")]
+
 private def handleStatus (st : SessionState) : Json :=
   let (dCls, dRel) := match st.elState with
     | some inc => (inc.derivedCls.size, inc.derivedRel.size)
@@ -432,6 +482,12 @@ def run (_args : List String) : IO UInt32 := do
       stdout.flush
     | "check_consistency" =>
       stdout.putStrLn (handleCheckConsistency st obj).compress
+      stdout.flush
+    | "classify" =>
+      stdout.putStrLn (handleClassify st).compress
+      stdout.flush
+    | "realize" =>
+      stdout.putStrLn (handleRealize st).compress
       stdout.flush
     | "status" =>
       stdout.putStrLn (handleStatus st).compress
