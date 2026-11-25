@@ -15,28 +15,17 @@ All Lean 4 proofs in this repository are required to build with **zero `sorry`**
 | **33-Datatype Exact Solver** | Done | Mechanized 33-datatype map: Dedekind-cut `owl:real`, IEEE-754 `xsd:float`/`xsd:double` order facets, 14h-shift `xsd:dateTime`/`xsd:dateTimeStamp`, length facets, `DataOneOf`, `rdf:langRange`, and `rdf:XMLLiteral`. |
 | **Milestone C.1: W3C XSD 1.1 Unicode Regex** | Done (`8e8a679`) | Exact Unicode 17.0.0 General Category tables (`UnicodeCategories.lean`), `\d`/`\D` = `\p{Nd}`, `\w`/`\W` = `[^\p{P}\p{Z}\p{C}]`, `\p{...}`/`\P{...}` (30 subcategories, 7 major categories, 91 `Is...` blocks), nested character-class subtraction `[base-[sub]]`, and exact full-Unicode boundary sampling (`UnicodeStringSampling.sample_exact`). |
 | **Milestone A: Strict W3C §11.2 Validator** | Done (`8e8a679`) | `StrictOWL2DL.lean` + `--strict-owl2dl` CLI flag / `"strict_owl2dl": true` JSON option: enforces `owl:topDataProperty` placement, anonymous-individual prohibitions & simple-forest/single-named-root rules, XSD 1.1 pattern syntax, and strict regular/acyclic role hierarchies (`checkStrictOWL2DL_iff`, `diagnoseStrictOWL2DL_isNone_iff`, `decideStrictOWL2DLReal_iff`). |
+| **Milestone B: Declarations, Punning & FSS** | Done (`v0.2.0` ready) | `FunctionalSyntax.lean` + `StrictTyping.lean` + `ImportCatalog.lean`: full `Declaration(...)` and annotation-axiom parsing, prefixed ontology/version IRIs, Unicode & `PN_LOCAL_ESC` tokens, W3C §5.8.1–§5.8.2 typing completeness & punning disjointness (`checkTyping_iff`, `diagnoseTyping_isNone_iff`, `decideStrictTypedOWL2DLReal_iff`), and OASIS `catalog-v001.xml` / `--import-dir` CLI resolution. |
 | **Performance & Incremental Stack** | Done | Syntactic $\bot$-locality module extraction (`extractBotModule_entails_iff`), polynomial $\mathcal{EL}^{++}$ classifier + canonical models, and provenance-tracked DRed incremental ABox sessions (`IncrementalABox.lean`). |
 
 ---
 
 ## Remaining Milestones
 
-### Milestone B — Entity Declarations, Punning & Complete Functional-Style Syntax (`v0.2.0`)
-**Goal:** Achieve full structural conformance with [W3C OWL 2 Structural Specification §5 & §11](https://www.w3.org/TR/owl2-syntax/) for Functional-Style Syntax documents and import closures.
-
-- [ ] **B.1 Entity Declaration Parsing & Typing Closure (`FunctionalSyntax.lean`, `StrictOWL2DL.lean`)**
-  - Retain all `Declaration(Class|Datatype|ObjectProperty|DataProperty|AnnotationProperty|NamedIndividual ...)` axioms in the parsed `Document` AST across the import closure (currently skipped during projection).
-  - Enforce W3C §5.8.2 typing constraints in `--strict-owl2dl`:
-    - Every non-built-in entity occurring in an axiom must be declared in the import closure.
-    - Enforce entity-type disjointness and legal punning: forbid `ObjectProperty`/`DataProperty`/`AnnotationProperty` IRI clashes and `Class`/`Datatype` IRI clashes, while permitting legal punning (e.g., `Class` + `NamedIndividual`).
-  - Prove `checkTypingClosure_iff` characterizing declaration completeness and punning validity.
-- [ ] **B.2 Complete Functional-Style Syntax Grammar (`FunctionalSyntax.lean`)**
-  - Support ontology version IRIs (`Ontology(<iri> <versionIri> ...)`), full W3C §2.4 IRI/prefix/PN_LOCAL escaping, and all annotation axioms (`AnnotationAssertion`, `SubAnnotationPropertyOf`, `AnnotationPropertyDomain`, `AnnotationPropertyRange`) cleanly parsed and preserved in the document AST (semantically inert under Direct Semantics).
-  - Verify strict syntax rejection on reserved-vocabulary misuse (§5.8.1) and malformed `Prefix`/`Ontology`/`Import` headers.
-- [ ] **B.3 Import Catalog Resolution (`CLI/OFNQuery.lean`, `CLI/SessionMain.lean`)**
-  - Add OASIS XML Catalog (`catalog-v001.xml`) and local directory/IRI-map resolution alongside the existing in-memory catalog, preserving the finite import-closure soundness theorem (`scopedImports_models_iff`).
-
-**Exit criteria:** Pass all W3C OWL 2 DL Functional-Style Syntax structural and typing conformance test cases (both positive acceptance and negative syntax/punning rejection) under `--strict-owl2dl`.
+### Milestone B — Entity Declarations, Punning & Complete Functional-Style Syntax (`v0.2.0`) — COMPLETED
+- [x] **B.1 Entity Declaration Parsing & Typing Closure (`FunctionalSyntax.lean`, `StrictTyping.lean`)**
+- [x] **B.2 Complete Functional-Style Syntax Grammar (`FunctionalSyntax.lean`)**
+- [x] **B.3 OASIS XML Catalog & Directory Import Resolution (`CLI/ImportCatalog.lean`, `CLI/ALCQuery.lean`)**
 
 ---
 

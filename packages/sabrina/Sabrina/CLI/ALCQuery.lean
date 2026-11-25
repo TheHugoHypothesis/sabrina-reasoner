@@ -5,6 +5,7 @@ import Sabrina.Graded.Search
 import Sabrina.CLI.DataQuery
 import Sabrina.CLI.SROIQDQuery
 import Sabrina.CLI.OFNQuery
+import Sabrina.CLI.ImportCatalog
 
 namespace Sabrina.CLI.ALCQuery
 
@@ -309,13 +310,14 @@ private def solve (req : Request Inclusion) : UInt32 × Json := Id.run do
     else fields
   return (0, response (verdictName evidence.verdict) true fields)
 
-private def solveJSON (j : Json) (cliStrict : Bool := false) : UInt32 × Json :=
+private def solveJSON (j : Json) (cliStrict : Bool := false)
+    (extraLib : List (Sabrina.OWL2.IRI × String) := []) : UInt32 × Json :=
   let version : Option Json := j.getArr?.toOption.bind fun fields => fields[0]?
   match version with
   | some (.str format) =>
     if format == DataQuery.requestFormat then DataQuery.run j
     else if format == SROIQDQuery.requestFormat then SROIQDQuery.run j
-    else if format == OFNQuery.requestFormat then OFNQuery.run j cliStrict
+    else if format == OFNQuery.requestFormat then OFNQuery.run j cliStrict extraLib
     else solveInclusion j
   | _ => solveInclusion j
 where
@@ -324,17 +326,40 @@ where
     | .ok (.ordinary request) => solve request
     | .ok (.graded request) => solveGraded request
 
-def run (args : List String) : IO UInt32 := do
+private def parseCliArgs (args : List String) :
+    IO (Except String (Bool × List (Sabrina.OWL2.IRI × String))) := do
   let mut strictOwl2DL := false
-  for arg in args do
-    if arg == "--strict-owl2dl" then
+  let mut extraLib : List (Sabrina.OWL2.IRI × String) := []
+  let mut rest := args
+  while !rest.isEmpty do
+    match rest with
+    | "--strict-owl2dl" :: tail =>
       strictOwl2DL := true
-    else
-      IO.println (response "UNSUPPORTED" false [("reason", toJson s!"unknown CLI flag: {arg}")]).compress
+      rest := tail
+    | "--catalog" :: path :: tail =>
+      match ← ImportCatalog.loadOasisCatalog (System.FilePath.mk path) with
+      | .ok lib => extraLib := extraLib ++ lib
+      | .error err => return .error err
+      rest := tail
+    | "--import-dir" :: dir :: tail =>
+      match ← ImportCatalog.loadImportDir (System.FilePath.mk dir) with
+      | .ok lib => extraLib := extraLib ++ lib
+      | .error err => return .error err
+      rest := tail
+    | flag :: _ =>
+      return .error s!"unknown or incomplete CLI flag: {flag} (supported: --strict-owl2dl, --catalog <path>, --import-dir <dir>)"
+    | [] => break
+  return .ok (strictOwl2DL, extraLib)
+
+def run (args : List String) : IO UInt32 := do
+  let (strictOwl2DL, extraLib) ← match ← parseCliArgs args with
+    | .ok res => pure res
+    | .error err =>
+      IO.println (response "UNSUPPORTED" false [("reason", toJson err)]).compress
       return 2
   let input ← (← IO.getStdin).readToEnd
   let (code, result) := match Json.parse input with
-    | .ok j => solveJSON j strictOwl2DL
+    | .ok j => solveJSON j strictOwl2DL extraLib
     | .error reason => (2, response "UNSUPPORTED" false [("reason", toJson reason)])
   IO.println result.compress
   return code

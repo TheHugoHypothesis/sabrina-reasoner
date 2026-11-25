@@ -29,6 +29,11 @@ HEADLINE_THEOREMS = [
     "Sabrina.OWL2.StrictOWL2DL.checkStrictOWL2DL_iff",
     "Sabrina.OWL2.StrictOWL2DL.diagnoseStrictOWL2DL_isNone_iff",
     "Sabrina.OWL2.StrictOWL2DL.decideStrictOWL2DLReal_iff",
+    "Sabrina.OWL2.StrictTyping.checkTyping_iff",
+    "Sabrina.OWL2.StrictTyping.diagnoseTyping_isNone_iff",
+    "Sabrina.OWL2.StrictTyping.checkStrictTypedOWL2DL_iff",
+    "Sabrina.OWL2.StrictTyping.diagnoseStrictTypedOWL2DL_isNone_iff",
+    "Sabrina.OWL2.StrictTyping.decideStrictTypedOWL2DLReal_iff",
 ]
 
 

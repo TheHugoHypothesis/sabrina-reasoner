@@ -21,7 +21,14 @@ private inductive Token where
   deriving Repr, BEq
 
 private def isIdentChar (c : Char) : Bool :=
-  c.isAlphanum || c == '_' || c == '-' || c == ':' || c == '.' || c == '#' || c == '/'
+  c.isAlphanum || c == '_' || c == '-' || c == ':' || c == '.' || c == '#' || c == '/' ||
+  c == '~' || c == '%' || (c.toNat ≥ 0x80 && !c.isWhitespace)
+
+/-- W3C SPARQL/OWL 2 `PN_LOCAL_ESC` characters permitted after `\` inside prefixed names. -/
+private def isPnLocalEsc (c : Char) : Bool :=
+  c == '_' || c == '~' || c == '.' || c == '-' || c == '!' || c == '$' || c == '&' ||
+  c == '\'' || c == '(' || c == ')' || c == '*' || c == '+' || c == ',' || c == ';' ||
+  c == '=' || c == '/' || c == '?' || c == '#' || c == '@' || c == '%'
 
 private def tokenize (input : String) : Except String (List Token) := Id.run do
   let cs := input.toList.toArray
@@ -52,7 +59,10 @@ private def tokenize (input : String) : Except String (List Token) := Id.run do
       i := i + 1
       let mut buf : List Char := []
       while i < n && cs[i]! != '>' do
-        buf := cs[i]! :: buf; i := i + 1
+        let ch := cs[i]!
+        if ch.isWhitespace || ch == '<' then
+          return .error s!"invalid character '{ch}' inside <IRI>"
+        buf := ch :: buf; i := i + 1
       if i >= n then return .error "unterminated <IRI>"
       i := i + 1
       toks := .iri (String.ofList buf.reverse) :: toks
@@ -72,8 +82,14 @@ private def tokenize (input : String) : Except String (List Token) := Id.run do
       toks := .str (String.ofList buf.reverse) :: toks
     else if isIdentChar c then
       let mut buf : List Char := []
-      while i < n && isIdentChar cs[i]! do
-        buf := cs[i]! :: buf; i := i + 1
+      while i < n do
+        let ch := cs[i]!
+        if ch == '\\' && i + 1 < n && isPnLocalEsc cs[i + 1]! then
+          buf := cs[i + 1]! :: buf; i := i + 2
+        else if isIdentChar ch then
+          buf := ch :: buf; i := i + 1
+        else
+          break
       toks := .ident (String.ofList buf.reverse) :: toks
     else
       return .error s!"unexpected character '{c}' in Functional Syntax"
@@ -335,29 +351,140 @@ private partial def parseClassExpr : Parser ClassExpr := do
     return .dataExact n dp d
   | _ => return .named (← parseIRI)
 
-private partial def parseAxiom? : Parser (Option Axiom) := do
+/-- W3C OWL 2 §5 entity declaration kinds. -/
+inductive EntityKind where
+  | cls
+  | datatype
+  | objectProperty
+  | dataProperty
+  | annotationProperty
+  | namedIndividual
+  deriving DecidableEq, Repr
+
+/-- W3C OWL 2 §5.8 `Declaration(Entity)` axiom. -/
+structure EntityDecl where
+  kind : EntityKind
+  iri : IRI
+  deriving DecidableEq, Repr
+
+/-- W3C OWL 2 §10.2.1 annotation subject (IRI or document-scoped anonymous individual). -/
+inductive AnnotationSubject where
+  | iri (v : IRI)
+  | anonymous (docId localId : String)
+  deriving DecidableEq, Repr
+
+/-- W3C OWL 2 §10.2.1 annotation value (IRI, anonymous individual, or literal). -/
+inductive AnnotationValue where
+  | iri (v : IRI)
+  | anonymous (docId localId : String)
+  | literal (l : Literal)
+  deriving DecidableEq, Repr
+
+/-- W3C OWL 2 §10.2 annotation axioms (semantically inert under Direct Semantics,
+    retained in `ParsedDocument` for §5.8.2 typing and punning validation). -/
+inductive AnnotationAxiom where
+  | assertion (prop : IRI) (subj : AnnotationSubject) (val : AnnotationValue)
+  | subProperty (sub sup : IRI)
+  | domain (prop dom : IRI)
+  | range (prop rng : IRI)
+  deriving DecidableEq, Repr
+
+private def parseAnnotationSubject : Parser AnnotationSubject := do
   match ← nextTok with
-  | .ident "Declaration" | .ident "AnnotationAssertion" | .ident "SubAnnotationPropertyOf"
-  | .ident "AnnotationPropertyDomain" | .ident "AnnotationPropertyRange"
+  | .iri s => return .iri s
+  | .ident s =>
+    if s.startsWith "_:" then
+      let doc := (← get).docId
+      return .anonymous doc (String.ofList (s.toList.drop 2))
+    else
+      return .iri (← expandIRI s)
+  | t => throw s!"expected annotation subject (IRI or anonymous individual), got {repr t}"
+
+private def parseAnnotationValue : Parser AnnotationValue := do
+  match ← peek with
+  | some (.str _) => return .literal (← parseLiteral)
+  | _ =>
+    match ← nextTok with
+    | .iri s => return .iri s
+    | .ident s =>
+      if s.startsWith "_:" then
+        let doc := (← get).docId
+        return .anonymous doc (String.ofList (s.toList.drop 2))
+      else
+        return .iri (← expandIRI s)
+    | t => throw s!"expected annotation value (IRI, anonymous individual, or literal), got {repr t}"
+
+private def parseEntityDecl : Parser EntityDecl := do
+  expectLParen; skipAnnotations
+  let kind ← match ← nextTok with
+    | .ident "Class" => pure EntityKind.cls
+    | .ident "Datatype" => pure EntityKind.datatype
+    | .ident "ObjectProperty" => pure EntityKind.objectProperty
+    | .ident "DataProperty" => pure EntityKind.dataProperty
+    | .ident "AnnotationProperty" => pure EntityKind.annotationProperty
+    | .ident "NamedIndividual" => pure EntityKind.namedIndividual
+    | t => throw s!"expected entity declaration kind (Class, Datatype, ObjectProperty, DataProperty, AnnotationProperty, NamedIndividual), got {repr t}"
+  expectLParen
+  let iri ← parseIRI
+  expectRParen
+  expectRParen
+  return ⟨kind, iri⟩
+
+private inductive ParsedItem where
+  | logical (ax : Axiom)
+  | decl (d : EntityDecl)
+  | annot (a : AnnotationAxiom)
+  | ontAnnot
+  deriving Repr
+
+private partial def parseItem : Parser ParsedItem := do
+  match ← nextTok with
+  | .ident "Declaration" =>
+    return .decl (← parseEntityDecl)
   | .ident "Annotation" =>
-    skipBalanced; return none
+    skipBalanced; return .ontAnnot
+  | .ident "AnnotationAssertion" =>
+    expectLParen; skipAnnotations
+    let prop ← parseIRI
+    let subj ← parseAnnotationSubject
+    let val ← parseAnnotationValue
+    expectRParen
+    return .annot (.assertion prop subj val)
+  | .ident "SubAnnotationPropertyOf" =>
+    expectLParen; skipAnnotations
+    let sub ← parseIRI
+    let sup ← parseIRI
+    expectRParen
+    return .annot (.subProperty sub sup)
+  | .ident "AnnotationPropertyDomain" =>
+    expectLParen; skipAnnotations
+    let prop ← parseIRI
+    let dom ← parseIRI
+    expectRParen
+    return .annot (.domain prop dom)
+  | .ident "AnnotationPropertyRange" =>
+    expectLParen; skipAnnotations
+    let prop ← parseIRI
+    let rng ← parseIRI
+    expectRParen
+    return .annot (.range prop rng)
   | .ident "SubClassOf" =>
     expectLParen; skipAnnotations
     let a ← parseClassExpr; let b ← parseClassExpr; expectRParen
-    return some (.subClassOf a b)
+    return .logical (.subClassOf a b)
   | .ident "EquivalentClasses" =>
     expectLParen; skipAnnotations
     let cs ← parseManyUntilRParen parseClassExpr
-    return some (.equivalentClasses cs)
+    return .logical (.equivalentClasses cs)
   | .ident "DisjointClasses" =>
     expectLParen; skipAnnotations
     let cs ← parseManyUntilRParen parseClassExpr
-    return some (.disjointClasses cs)
+    return .logical (.disjointClasses cs)
   | .ident "DisjointUnion" =>
     expectLParen; skipAnnotations
     let h ← parseIRI
     let cs ← parseManyUntilRParen parseClassExpr
-    return some (.disjointUnion h cs)
+    return .logical (.disjointUnion h cs)
   | .ident "SubObjectPropertyOf" =>
     expectLParen; skipAnnotations
     match ← peek with
@@ -365,86 +492,86 @@ private partial def parseAxiom? : Parser (Option Axiom) := do
       let _ ← nextTok; expectLParen
       let rs ← parseManyUntilRParen parseObjProp
       let sup ← parseObjProp; expectRParen
-      return some (.subObjectPropertyChain rs sup)
+      return .logical (.subObjectPropertyChain rs sup)
     | _ =>
       let r ← parseObjProp; let s ← parseObjProp; expectRParen
-      return some (.subObjectProperty r s)
+      return .logical (.subObjectProperty r s)
   | .ident "EquivalentObjectProperties" =>
     expectLParen; skipAnnotations
     let rs ← parseManyUntilRParen parseObjProp
-    return some (.equivalentObjectProperties rs)
+    return .logical (.equivalentObjectProperties rs)
   | .ident "DisjointObjectProperties" =>
     expectLParen; skipAnnotations
     let rs ← parseManyUntilRParen parseObjProp
-    return some (.disjointObjectProperties rs)
+    return .logical (.disjointObjectProperties rs)
   | .ident "InverseObjectProperties" =>
     expectLParen; skipAnnotations
     let r ← parseObjProp; let s ← parseObjProp; expectRParen
-    return some (.inverseObjectProperties r s)
+    return .logical (.inverseObjectProperties r s)
   | .ident "ObjectPropertyDomain" =>
     expectLParen; skipAnnotations
     let r ← parseObjProp; let c ← parseClassExpr; expectRParen
-    return some (.objectPropertyDomain r c)
+    return .logical (.objectPropertyDomain r c)
   | .ident "ObjectPropertyRange" =>
     expectLParen; skipAnnotations
     let r ← parseObjProp; let c ← parseClassExpr; expectRParen
-    return some (.objectPropertyRange r c)
+    return .logical (.objectPropertyRange r c)
   | .ident "FunctionalObjectProperty" =>
     expectLParen; skipAnnotations
     let r ← parseObjProp; expectRParen
-    return some (.functionalObjectProperty r)
+    return .logical (.functionalObjectProperty r)
   | .ident "InverseFunctionalObjectProperty" =>
     expectLParen; skipAnnotations
     let r ← parseObjProp; expectRParen
-    return some (.inverseFunctionalObjectProperty r)
+    return .logical (.inverseFunctionalObjectProperty r)
   | .ident "ReflexiveObjectProperty" =>
     expectLParen; skipAnnotations
     let r ← parseObjProp; expectRParen
-    return some (.reflexiveObjectProperty r)
+    return .logical (.reflexiveObjectProperty r)
   | .ident "IrreflexiveObjectProperty" =>
     expectLParen; skipAnnotations
     let r ← parseObjProp; expectRParen
-    return some (.irreflexiveObjectProperty r)
+    return .logical (.irreflexiveObjectProperty r)
   | .ident "SymmetricObjectProperty" =>
     expectLParen; skipAnnotations
     let r ← parseObjProp; expectRParen
-    return some (.symmetricObjectProperty r)
+    return .logical (.symmetricObjectProperty r)
   | .ident "AsymmetricObjectProperty" =>
     expectLParen; skipAnnotations
     let r ← parseObjProp; expectRParen
-    return some (.asymmetricObjectProperty r)
+    return .logical (.asymmetricObjectProperty r)
   | .ident "TransitiveObjectProperty" =>
     expectLParen; skipAnnotations
     let r ← parseObjProp; expectRParen
-    return some (.transitiveObjectProperty r)
+    return .logical (.transitiveObjectProperty r)
   | .ident "SubDataPropertyOf" =>
     expectLParen; skipAnnotations
     let r ← parseIRI; let s ← parseIRI; expectRParen
-    return some (.subDataProperty r s)
+    return .logical (.subDataProperty r s)
   | .ident "EquivalentDataProperties" =>
     expectLParen; skipAnnotations
     let ds ← parseManyUntilRParen parseIRI
-    return some (.equivalentDataProperties ds)
+    return .logical (.equivalentDataProperties ds)
   | .ident "DisjointDataProperties" =>
     expectLParen; skipAnnotations
     let ds ← parseManyUntilRParen parseIRI
-    return some (.disjointDataProperties ds)
+    return .logical (.disjointDataProperties ds)
   | .ident "DataPropertyDomain" =>
     expectLParen; skipAnnotations
     let dp ← parseIRI; let c ← parseClassExpr; expectRParen
-    return some (.dataPropertyDomain dp c)
+    return .logical (.dataPropertyDomain dp c)
   | .ident "DataPropertyRange" =>
     expectLParen; skipAnnotations
     let dp ← parseIRI; let d ← parseDataRange; expectRParen
-    return some (.dataPropertyRange dp d)
+    return .logical (.dataPropertyRange dp d)
   | .ident "FunctionalDataProperty" =>
     expectLParen; skipAnnotations
     let dp ← parseIRI; expectRParen
-    return some (.functionalDataProperty dp)
+    return .logical (.functionalDataProperty dp)
   | .ident "DatatypeDefinition" =>
     expectLParen; skipAnnotations
     let dt ← parseIRI; let d ← parseDataRange; expectRParen
-    return some (.datatypeDefinition dt d)
+    return .logical (.datatypeDefinition dt d)
   | .ident "HasKey" =>
     expectLParen; skipAnnotations
     let c ← parseClassExpr
@@ -453,37 +580,42 @@ private partial def parseAxiom? : Parser (Option Axiom) := do
     expectLParen
     let ds ← parseManyUntilRParen parseIRI
     expectRParen
-    return some (.hasKey c os ds)
+    return .logical (.hasKey c os ds)
   | .ident "SameIndividual" =>
     expectLParen; skipAnnotations
     let inds ← parseManyUntilRParen parseIndividual
-    return some (.sameIndividuals inds)
+    return .logical (.sameIndividuals inds)
   | .ident "DifferentIndividuals" =>
     expectLParen; skipAnnotations
     let inds ← parseManyUntilRParen parseIndividual
-    return some (.differentIndividuals inds)
+    return .logical (.differentIndividuals inds)
   | .ident "ClassAssertion" =>
     expectLParen; skipAnnotations
     let c ← parseClassExpr; let a ← parseIndividual; expectRParen
-    return some (.classAssertion c a)
+    return .logical (.classAssertion c a)
   | .ident "ObjectPropertyAssertion" =>
     expectLParen; skipAnnotations
     let r ← parseObjProp; let a ← parseIndividual; let b ← parseIndividual; expectRParen
-    return some (.objectAssertion r a b)
+    return .logical (.objectAssertion r a b)
   | .ident "NegativeObjectPropertyAssertion" =>
     expectLParen; skipAnnotations
     let r ← parseObjProp; let a ← parseIndividual; let b ← parseIndividual; expectRParen
-    return some (.negativeObjectAssertion r a b)
+    return .logical (.negativeObjectAssertion r a b)
   | .ident "DataPropertyAssertion" =>
     expectLParen; skipAnnotations
     let dp ← parseIRI; let a ← parseIndividual; let l ← parseLiteral; expectRParen
-    return some (.dataAssertion dp a l)
+    return .logical (.dataAssertion dp a l)
   | .ident "NegativeDataPropertyAssertion" =>
     expectLParen; skipAnnotations
     let dp ← parseIRI; let a ← parseIndividual; let l ← parseLiteral; expectRParen
-    return some (.negativeDataAssertion dp a l)
+    return .logical (.negativeDataAssertion dp a l)
   | .ident kw => throw s!"unsupported Functional Syntax axiom: {kw}"
   | t => throw s!"expected axiom keyword, got {repr t}"
+
+private def parseAxiom? : Parser (Option Axiom) := do
+  match ← parseItem with
+  | .logical ax => return some ax
+  | _ => return none
 
 private def parsePrefixDecls : Parser Unit := do
   while (← peek) == some (.ident "Prefix") do
@@ -499,37 +631,51 @@ private def parsePrefixDecls : Parser Unit := do
     | .eq => pure ()
     | t => throw s!"expected '=' in Prefix declaration, got {repr t}"
     let iri ← match ← nextTok with
-      | .iri s => pure s
+      | .iri s =>
+        if s.isEmpty then throw "empty <IRI> in Prefix declaration"
+        else pure s
       | t => throw s!"expected <IRI> in Prefix declaration, got {repr t}"
     expectRParen
     modify fun st => { st with prefixes := (pfx, iri) :: st.prefixes }
+
+private def parseOptionalHeaderIRI : Parser (Option IRI) := do
+  match ← peek with
+  | some (.iri s) =>
+    let _ ← nextTok
+    return some s
+  | some (.ident s) =>
+    if s.contains ':' then
+      let _ ← nextTok
+      return some (← expandIRI s)
+    else
+      return none
+  | _ => return none
 
 structure ParsedDocument where
   prefixes : PrefixMap
   ontologyIRI : Option IRI := none
   versionIRI : Option IRI := none
   imports : List IRI := []
+  declarations : List EntityDecl := []
+  annotationAxioms : List AnnotationAxiom := []
   ontology : Ontology
   deriving Repr
 
 /-- Parse a W3C OWL 2 Functional-Style Syntax document (`Prefix(...) Ontology(...)`)
-    scoping anonymous individuals `_:x` to `docId`. -/
+    scoping anonymous individuals `_:x` to `docId` and retaining entity declarations
+    and annotation axioms for §5.8.2 typing validation. -/
 def parseDocumentWithId (docId : String) (input : String) : Except String ParsedDocument := do
   let toks ← tokenize input
-  let ((ontIRI, verIRI, imps, ont), st) ← (do
+  let ((ontIRI, verIRI, imps, decls, annots, ont), st) ← (do
     parsePrefixDecls
     match ← nextTok with
     | .ident "Ontology" =>
       expectLParen
-      let mut ontIRI : Option IRI := none
-      let mut verIRI : Option IRI := none
-      if let some (.iri s) := ← peek then
-        let _ ← nextTok
-        ontIRI := some s
-        if let some (.iri v) := ← peek then
-          let _ ← nextTok
-          verIRI := some v
+      let ontIRI ← parseOptionalHeaderIRI
+      let verIRI ← if ontIRI.isSome then parseOptionalHeaderIRI else pure none
       let mut imps : List IRI := []
+      let mut decls : List EntityDecl := []
+      let mut annots : List AnnotationAxiom := []
       let mut axioms : List Axiom := []
       while (← peek) != some Token.rparen do
         if (← peek) == some (Token.ident "Import") then
@@ -538,29 +684,46 @@ def parseDocumentWithId (docId : String) (input : String) : Except String Parsed
           let target ← parseIRI
           expectRParen
           imps := target :: imps
-        else if let some ax ← parseAxiom? then
-          axioms := ax :: axioms
+        else
+          match ← parseItem with
+          | .logical ax => axioms := ax :: axioms
+          | .decl d => decls := d :: decls
+          | .annot a => annots := a :: annots
+          | .ontAnnot => pure ()
       expectRParen
-      return (ontIRI, verIRI, imps.reverse, axioms.reverse)
+      return (ontIRI, verIRI, imps.reverse, decls.reverse, annots.reverse, axioms.reverse)
     | t => throw s!"expected 'Ontology', got {repr t}").run { tokens := toks, docId := docId }
   if !st.tokens.isEmpty then
     throw "trailing tokens after Ontology(...)"
-  return ⟨st.prefixes, ontIRI, verIRI, imps, ont⟩
+  return {
+    prefixes := st.prefixes
+    ontologyIRI := ontIRI
+    versionIRI := verIRI
+    imports := imps
+    declarations := decls
+    annotationAxioms := annots
+    ontology := ont
+  }
 
 /-- Parse a single W3C OWL 2 Functional-Style Syntax document (`Prefix(...) Ontology(...)`). -/
 def parseDocument (input : String) : Except String ParsedDocument :=
   parseDocumentWithId "doc:0" input
 
+/-- Full resolved import closure retaining declarations and annotation axioms
+    across every reachable document for W3C §5.8.2 typing validation. -/
+structure ResolvedOFNClosure where
+  prefixes : PrefixMap
+  declarations : List EntityDecl
+  annotationAxioms : List AnnotationAxiom
+  ontology : Ontology
+  deriving Repr
+
 /-- Resolve the transitive `Import(...)` closure of `rootOFN` against a library
-    of `(keyIRI, ofnText)` documents. Matches imports by map key, declared
-    `versionIRI`, or declared `ontologyIRI`, handles import cycles cleanly,
-    rejects missing imports, and scopes anonymous individuals (`_:x`) to their
-    originating document per W3C OWL 2 Section 5.6.2. -/
-def resolveImports (rootOFN : String) (library : List (IRI × String)) :
-    Except String (PrefixMap × Ontology) := do
+    of `(keyIRI, ofnText)` documents, retaining all declarations and annotation
+    axioms across the closure. -/
+def resolveImportClosure (rootOFN : String) (library : List (IRI × String)) :
+    Except String ResolvedOFNClosure := do
   let rootDoc ← parseDocumentWithId "doc:0" rootOFN
-  -- Pre-parse library entries with distinct document IDs so each document gets
-  -- its own anonymous-individual scope and its ontology/version IRIs are indexed.
   let mut parsedLib : List (IRI × ParsedDocument) := []
   let mut idx := 1
   for (key, text) in library do
@@ -582,6 +745,8 @@ def resolveImports (rootOFN : String) (library : List (IRI × String)) :
   if let some iri := rootDoc.ontologyIRI then visited := iri :: visited
   if let some iri := rootDoc.versionIRI then visited := iri :: visited
   let mut queue : List IRI := rootDoc.imports
+  let mut allDecls : List EntityDecl := rootDoc.declarations
+  let mut allAnnots : List AnnotationAxiom := rootDoc.annotationAxioms
   let mut allAxioms : Ontology := rootDoc.ontology
   let mut fuel := (parsedLib.length + 1) * (parsedLib.length + 2) + 64
   while !queue.isEmpty && fuel > 0 do
@@ -597,9 +762,26 @@ def resolveImports (rootOFN : String) (library : List (IRI × String)) :
         visited := imp :: visited
         if let some iri := doc.ontologyIRI then visited := iri :: visited
         if let some iri := doc.versionIRI then visited := iri :: visited
+        allDecls := allDecls ++ doc.declarations
+        allAnnots := allAnnots ++ doc.annotationAxioms
         allAxioms := allAxioms ++ doc.ontology
         queue := queue ++ doc.imports
-  return (rootDoc.prefixes, allAxioms)
+  return {
+    prefixes := rootDoc.prefixes
+    declarations := allDecls
+    annotationAxioms := allAnnots
+    ontology := allAxioms
+  }
+
+/-- Resolve the transitive `Import(...)` closure of `rootOFN` against a library
+    of `(keyIRI, ofnText)` documents. Matches imports by map key, declared
+    `versionIRI`, or declared `ontologyIRI`, handles import cycles cleanly,
+    rejects missing imports, and scopes anonymous individuals (`_:x`) to their
+    originating document per W3C OWL 2 Section 5.6.2. -/
+def resolveImports (rootOFN : String) (library : List (IRI × String)) :
+    Except String (PrefixMap × Ontology) := do
+  let res ← resolveImportClosure rootOFN library
+  return (res.prefixes, res.ontology)
 
 /-- Parse a standalone OWL 2 Functional-Style Syntax query axiom using the
     document's declared prefixes (plus standard `owl:`, `rdf:`, `rdfs:`, `xsd:`). -/

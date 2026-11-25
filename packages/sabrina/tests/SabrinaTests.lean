@@ -8,3 +8,4 @@ import SabrinaTests.OWL2Datatypes
 import SabrinaTests.SROIQD
 import SabrinaTests.OFN
 import SabrinaTests.StrictAndRegex
+import SabrinaTests.TypingAndCatalog

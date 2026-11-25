@@ -103,6 +103,7 @@ private def nonAsciiDigitOFN : String := "
 Prefix(:=<http://example.org/rx#>)
 Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>)
 Ontology(<http://example.org/rx>
+  Declaration(DataProperty(:code))
   ClassAssertion(
     DataSomeValuesFrom(:code
       DataIntersectionOf(
