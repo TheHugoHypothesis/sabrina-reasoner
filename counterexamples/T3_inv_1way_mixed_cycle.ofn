@@ -1,0 +1,23 @@
+Prefix(:=<http://example.org/cfg#>)
+Prefix(owl:=<http://www.w3.org/2002/07/owl#>)
+Ontology(
+
+  Declaration(Class(:mark))
+  Declaration(ObjectProperty(:nA)) Declaration(ObjectProperty(:nB))
+  Declaration(ObjectProperty(:hX)) Declaration(ObjectProperty(:mX))
+  Declaration(ObjectProperty(:lS)) Declaration(ObjectProperty(:nS))
+  Declaration(NamedIndividual(:x0)) Declaration(NamedIndividual(:x1))
+  Declaration(NamedIndividual(:x2)) Declaration(NamedIndividual(:x3)) Declaration(NamedIndividual(:x4))
+  ObjectPropertyAssertion(:nA :x0 :x1)
+  ObjectPropertyAssertion(:nA :x1 :x2)
+  ObjectPropertyAssertion(:nB :x2 :x3)
+  ObjectPropertyAssertion(:nB :x3 :x4)
+  SubObjectPropertyOf(ObjectPropertyChain(ObjectInverseOf(:nB) ObjectInverseOf(:nA)) :lS)
+  SubObjectPropertyOf(ObjectPropertyChain(ObjectInverseOf(:nS) ObjectInverseOf(:nA)) :hX)
+  SubObjectPropertyOf(ObjectInverseOf(:hX) :mX)
+  SubObjectPropertyOf(ObjectPropertyChain(ObjectInverseOf(:nB) ObjectInverseOf(:mX)) :lS)
+  SubObjectPropertyOf(ObjectInverseOf(:lS) :nS)
+  ClassAssertion(ObjectAllValuesFrom(:nS :mark) :x0)
+  ClassAssertion(ObjectComplementOf(:mark) :x4)
+
+)

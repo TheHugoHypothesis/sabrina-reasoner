@@ -1,0 +1,23 @@
+# Lean / Lake build outputs
+.lake/
+**/.lake/
+*.olean
+*.ilean
+*.trace
+
+# Java / Maven build outputs
+**/target/
+
+# Downloaded OBO Foundry corpora (fetched via download_corpora.sh)
+benchmarks/sabrina-vs-reasoners/corpora/
+
+# Python caches
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+
+# OS / editor artifacts
+.DS_Store
+*.swp
+*~

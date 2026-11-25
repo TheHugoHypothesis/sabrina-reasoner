@@ -1,0 +1,130 @@
+{
+  "boundary_audit": [
+    {
+      "id": "T1",
+      "label": "Acyclic 1-way inverse chains (9 ax.)",
+      "passes_literal_11_2": true,
+      "valid_sroiq": true,
+      "ground_truth": "INCONSISTENT",
+      "owlapi_in_profile": true,
+      "owlapi_violations": 0,
+      "jfact": "INCONSISTENT",
+      "hermit": "CONSISTENT",
+      "openllet": "CONSISTENT",
+      "openllet_dropped_axioms": false,
+      "sabrina": {
+        "verdict": "INCONSISTENT_ONTOLOGY",
+        "lean_verified": true,
+        "cold_ms": 20.02
+      }
+    },
+    {
+      "id": "T1b",
+      "label": "Acyclic 2-way InverseObjectProperties (9 ax.)",
+      "passes_literal_11_2": true,
+      "valid_sroiq": true,
+      "ground_truth": "INCONSISTENT",
+      "owlapi_in_profile": true,
+      "owlapi_violations": 0,
+      "jfact": "INCONSISTENT",
+      "hermit": "INCONSISTENT",
+      "openllet": "CONSISTENT",
+      "openllet_dropped_axioms": false,
+      "sabrina": {
+        "verdict": "INCONSISTENT_ONTOLOGY",
+        "lean_verified": true,
+        "cold_ms": 21.2
+      }
+    },
+    {
+      "id": "T2",
+      "label": "Forward 4-step mixed cycle (explicit 0011)",
+      "passes_literal_11_2": true,
+      "valid_sroiq": false,
+      "ground_truth": "INCONSISTENT",
+      "owlapi_in_profile": false,
+      "owlapi_violations": 2,
+      "jfact": "EXCEPTION:ReasonerInternalException:Cycle in RIA http://example.org/cfg#nS",
+      "hermit": "EXCEPTION:IllegalArgumentException:The given property hierarchy is not regular. There is a cyclic dependency involving property <http://example.org/cfg#lS>",
+      "openllet": "CONSISTENT",
+      "openllet_dropped_axioms": true,
+      "sabrina": {
+        "verdict": "REJECTED_NON_REGULAR_OR_TIMEOUT",
+        "lean_verified": false,
+        "cold_ms": null
+      }
+    },
+    {
+      "id": "T3",
+      "label": "Inverse 1-way 4-step mixed cycle (explicit 0011)",
+      "passes_literal_11_2": true,
+      "valid_sroiq": false,
+      "ground_truth": "INCONSISTENT",
+      "owlapi_in_profile": false,
+      "owlapi_violations": 2,
+      "jfact": "EXCEPTION:ReasonerInternalException:Cycle in RIA http://example.org/cfg#nS",
+      "hermit": "CONSISTENT",
+      "openllet": "CONSISTENT",
+      "openllet_dropped_axioms": true,
+      "sabrina": {
+        "verdict": "REJECTED_NON_REGULAR_OR_TIMEOUT",
+        "lean_verified": false,
+        "cold_ms": null
+      }
+    },
+    {
+      "id": "T3b",
+      "label": "Inverse 2-way 4-step mixed cycle (explicit 0011)",
+      "passes_literal_11_2": true,
+      "valid_sroiq": false,
+      "ground_truth": "INCONSISTENT",
+      "owlapi_in_profile": false,
+      "owlapi_violations": 2,
+      "jfact": "EXCEPTION:ReasonerInternalException:Cycle in RIA http://example.org/cfg#lS",
+      "hermit": "EXCEPTION:IllegalArgumentException:The given property hierarchy is not regular. There is a cyclic dependency involving property ObjectInverseOf(<http://example.org/cfg#mX>)",
+      "openllet": "CONSISTENT",
+      "openllet_dropped_axioms": true,
+      "sabrina": {
+        "verdict": "REJECTED_NON_REGULAR_OR_TIMEOUT",
+        "lean_verified": false,
+        "cold_ms": null
+      }
+    },
+    {
+      "id": "T4",
+      "label": "Exact Prop. 1 CFG intersection ({0^k 1^k} cap {0011})",
+      "passes_literal_11_2": true,
+      "valid_sroiq": false,
+      "ground_truth": "INCONSISTENT",
+      "owlapi_in_profile": false,
+      "owlapi_violations": 4,
+      "jfact": "EXCEPTION:ReasonerInternalException:Cycle in RIA http://example.org/cfg#lX",
+      "hermit": "CONSISTENT",
+      "openllet": "CONSISTENT",
+      "openllet_dropped_axioms": true,
+      "sabrina": {
+        "verdict": "REJECTED_NON_REGULAR_OR_TIMEOUT",
+        "lean_verified": false,
+        "cold_ms": null
+      }
+    },
+    {
+      "id": "T5",
+      "label": "Forward full CFG intersection ({0^k 1^k} cap {0011})",
+      "passes_literal_11_2": true,
+      "valid_sroiq": false,
+      "ground_truth": "INCONSISTENT",
+      "owlapi_in_profile": false,
+      "owlapi_violations": 2,
+      "jfact": "EXCEPTION:ReasonerInternalException:Cycle in RIA http://example.org/cfg#nS",
+      "hermit": "EXCEPTION:IllegalArgumentException:The given property hierarchy is not regular. There is a cyclic dependency involving property <http://example.org/cfg#lS>",
+      "openllet": "CONSISTENT",
+      "openllet_dropped_axioms": true,
+      "sabrina": {
+        "verdict": "REJECTED_NON_REGULAR_OR_TIMEOUT",
+        "lean_verified": false,
+        "cold_ms": null
+      }
+    }
+  ]
+}

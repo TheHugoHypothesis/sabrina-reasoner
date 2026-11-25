@@ -1,0 +1,8 @@
+import LogicTests.CertificateExamples
+import LogicTests.EigenExamples
+import LogicTests.EqExamples
+import LogicTests.Examples
+import LogicTests.FiniteExamples
+import LogicTests.RenameBoundary
+import LogicTests.RenamingExamples
+import LogicTests.ReverseExamples

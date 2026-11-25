@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use SABRINA, its Lean 4 formalization, or its role-hierarchy counterexamples, please cite this artifact."
+title: "Cycles at the Edge of Decidability: SABRINA, a Kernel-Verified SROIQ(D) OWL 2 DL Reasoner"
+type: software
+version: "1.0.0"
+license: MIT
+repository-code: "https://github.com/TheHugoHypothesis/sabrina-reasoner"
+authors:
+  - family-names: "Araújo"
+    given-names: "Hugo Cardoso Ferreira de"
+    email: "hugo.card@usp.br"
+    orcid: "https://orcid.org/0009-0003-5773-5331"
+    affiliation: "Universidade de São Paulo"
+keywords:
+  - OWL 2 DL
+  - Description Logic
+  - SROIQ(D)
+  - Lean 4
+  - Formal Verification
+  - Automated Reasoning
+  - Role Hierarchy Regularity

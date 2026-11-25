@@ -1,0 +1,14 @@
+{"version": "1.3.0",
+ "packagesDir": ".lake/packages",
+ "packages":
+ [{"type": "path",
+   "scope": "",
+   "name": "logicCore",
+   "manifestFile": "lake-manifest.json",
+   "inherited": false,
+   "dir": "../logic-core",
+   "copy": false,
+   "configFile": "lakefile.lean"}],
+ "name": "sabrina",
+ "lakeDir": ".lake",
+ "fixedToolchain": false}

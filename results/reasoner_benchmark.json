@@ -1,0 +1,1692 @@
+{
+  "environment": {
+    "platform": "Linux-7.3.4-300.fc45.x86_64-x86_64-with-glibc2.44",
+    "processor": "",
+    "python": "3.15.2",
+    "java": "27.0.1.0.3",
+    "lean": "4.35.0",
+    "hermit": "1.4.5.519 (OWL API 5.1.20)",
+    "elk": "0.6.0 (OWL API 5.1.20)"
+  },
+  "track1_bfo2020": {
+    "n_items": 30,
+    "sabrina_hermit_gold_agreement": "30/30",
+    "elk_gold_agreement": "30/30",
+    "locality_module_median_axioms": 5.0,
+    "locality_module_range": [
+      3,
+      8
+    ],
+    "el_downgrade_count": 30,
+    "sabrina_cold": {
+      "mean_ms": 85.677,
+      "median_ms": 101.834,
+      "p95_ms": 104.707,
+      "min_ms": 49.617,
+      "max_ms": 109.762
+    },
+    "sabrina_warm_reload": {
+      "mean_ms": 33.681,
+      "median_ms": 33.45,
+      "p95_ms": 34.682,
+      "min_ms": 32.788,
+      "max_ms": 34.7
+    },
+    "hermit_warm_reload": {
+      "mean_ms": 11.282,
+      "median_ms": 10.5,
+      "p95_ms": 16.592,
+      "min_ms": 8.078,
+      "max_ms": 22.933
+    },
+    "hermit_cold_cli": {
+      "mean_ms": 395.165,
+      "median_ms": 394.211,
+      "p95_ms": 404.858,
+      "min_ms": 389.059,
+      "max_ms": 404.858
+    },
+    "elk_warm_reload": {
+      "mean_ms": 9.308,
+      "median_ms": 7.626,
+      "p95_ms": 12.259,
+      "min_ms": 6.752,
+      "max_ms": 47.135
+    },
+    "elk_cold_cli": {
+      "mean_ms": 442.377,
+      "median_ms": 442.198,
+      "p95_ms": 450.495,
+      "min_ms": 433.512,
+      "max_ms": 450.495
+    },
+    "batch_pure_bfo_24": {
+      "n_queries": 21,
+      "sabrina_load_ms": 54.953,
+      "sabrina_queries_total_ms": 2.835,
+      "sabrina_per_query_median_ms": 0.131,
+      "hermit_parse_ms": 8.686,
+      "hermit_classify_ms": 24.485,
+      "hermit_queries_total_ms": 11.735,
+      "hermit_total_ms": 44.906,
+      "elk_parse_ms": 7.982,
+      "elk_classify_ms": 34.712,
+      "elk_queries_total_ms": 31.457,
+      "elk_total_ms": 74.152
+    },
+    "records": [
+      {
+        "id": "S1-01",
+        "gold": "PROVABLY_TRUE",
+        "full_axioms": 192,
+        "module_axioms": 4,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "PROVABLY_TRUE",
+        "sabrina_cold_ms": 51.9,
+        "sabrina_warm_verdict": "PROVABLY_TRUE",
+        "sabrina_warm_ms": 32.788,
+        "hermit_warm_verdict": "PROVABLY_TRUE",
+        "hermit_warm_ms": 22.933,
+        "hermit_cold_ms": 395.507,
+        "elk_warm_verdict": "PROVABLY_TRUE",
+        "elk_warm_ms": 47.135,
+        "elk_cold_ms": 450.495
+      },
+      {
+        "id": "S1-02",
+        "gold": "PROVABLY_TRUE",
+        "full_axioms": 192,
+        "module_axioms": 5,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "PROVABLY_TRUE",
+        "sabrina_cold_ms": 49.617,
+        "sabrina_warm_verdict": "PROVABLY_TRUE",
+        "sabrina_warm_ms": 34.7,
+        "hermit_warm_verdict": "PROVABLY_TRUE",
+        "hermit_warm_ms": 16.592,
+        "hermit_cold_ms": 389.059,
+        "elk_warm_verdict": "PROVABLY_TRUE",
+        "elk_warm_ms": 12.259,
+        "elk_cold_ms": 439.101
+      },
+      {
+        "id": "S1-03",
+        "gold": "PROVABLY_TRUE",
+        "full_axioms": 192,
+        "module_axioms": 3,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "PROVABLY_TRUE",
+        "sabrina_cold_ms": 50.875,
+        "sabrina_warm_verdict": "PROVABLY_TRUE",
+        "sabrina_warm_ms": 33.582,
+        "hermit_warm_verdict": "PROVABLY_TRUE",
+        "hermit_warm_ms": 14.671,
+        "hermit_cold_ms": 396.778,
+        "elk_warm_verdict": "PROVABLY_TRUE",
+        "elk_warm_ms": 10.107,
+        "elk_cold_ms": 440.877
+      },
+      {
+        "id": "S1-04",
+        "gold": "PROVABLY_TRUE",
+        "full_axioms": 192,
+        "module_axioms": 4,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "PROVABLY_TRUE",
+        "sabrina_cold_ms": 50.448,
+        "sabrina_warm_verdict": "PROVABLY_TRUE",
+        "sabrina_warm_ms": 34.078,
+        "hermit_warm_verdict": "PROVABLY_TRUE",
+        "hermit_warm_ms": 15.043,
+        "hermit_cold_ms": 404.858,
+        "elk_warm_verdict": "PROVABLY_TRUE",
+        "elk_warm_ms": 8.506,
+        "elk_cold_ms": 446.756
+      },
+      {
+        "id": "S1-05",
+        "gold": "PROVABLY_TRUE",
+        "full_axioms": 192,
+        "module_axioms": 5,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "PROVABLY_TRUE",
+        "sabrina_cold_ms": 51.942,
+        "sabrina_warm_verdict": "PROVABLY_TRUE",
+        "sabrina_warm_ms": 34.321,
+        "hermit_warm_verdict": "PROVABLY_TRUE",
+        "hermit_warm_ms": 11.311,
+        "hermit_cold_ms": 391.87,
+        "elk_warm_verdict": "PROVABLY_TRUE",
+        "elk_warm_ms": 7.895,
+        "elk_cold_ms": 433.512
+      },
+      {
+        "id": "S1-06",
+        "gold": "PROVABLY_TRUE",
+        "full_axioms": 192,
+        "module_axioms": 4,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "PROVABLY_TRUE",
+        "sabrina_cold_ms": 51.185,
+        "sabrina_warm_verdict": "PROVABLY_TRUE",
+        "sabrina_warm_ms": 34.408,
+        "hermit_warm_verdict": "PROVABLY_TRUE",
+        "hermit_warm_ms": 10.708,
+        "hermit_cold_ms": 392.916,
+        "elk_warm_verdict": "PROVABLY_TRUE",
+        "elk_warm_ms": 7.608,
+        "elk_cold_ms": 443.519
+      },
+      {
+        "id": "S1-07",
+        "gold": "PROVABLY_TRUE",
+        "full_axioms": 192,
+        "module_axioms": 4,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "PROVABLY_TRUE",
+        "sabrina_cold_ms": 51.806,
+        "sabrina_warm_verdict": "PROVABLY_TRUE",
+        "sabrina_warm_ms": 32.965,
+        "hermit_warm_verdict": "PROVABLY_TRUE",
+        "hermit_warm_ms": 10.78,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "PROVABLY_TRUE",
+        "elk_warm_ms": 8.63,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-08",
+        "gold": "PROVABLY_TRUE",
+        "full_axioms": 193,
+        "module_axioms": 5,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "PROVABLY_TRUE",
+        "sabrina_cold_ms": 51.085,
+        "sabrina_warm_verdict": "PROVABLY_TRUE",
+        "sabrina_warm_ms": 33.683,
+        "hermit_warm_verdict": "PROVABLY_TRUE",
+        "hermit_warm_ms": 13.273,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "PROVABLY_TRUE",
+        "elk_warm_ms": 8.451,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-09",
+        "gold": "PROVABLY_TRUE",
+        "full_axioms": 193,
+        "module_axioms": 6,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "PROVABLY_TRUE",
+        "sabrina_cold_ms": 49.967,
+        "sabrina_warm_verdict": "PROVABLY_TRUE",
+        "sabrina_warm_ms": 34.682,
+        "hermit_warm_verdict": "PROVABLY_TRUE",
+        "hermit_warm_ms": 13.439,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "PROVABLY_TRUE",
+        "elk_warm_ms": 7.667,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-10",
+        "gold": "PROVABLY_TRUE",
+        "full_axioms": 193,
+        "module_axioms": 3,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "PROVABLY_TRUE",
+        "sabrina_cold_ms": 50.561,
+        "sabrina_warm_verdict": "PROVABLY_TRUE",
+        "sabrina_warm_ms": 32.937,
+        "hermit_warm_verdict": "PROVABLY_TRUE",
+        "hermit_warm_ms": 12.741,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "PROVABLY_TRUE",
+        "elk_warm_ms": 10.403,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-11",
+        "gold": "PROVABLY_DISJOINT",
+        "full_axioms": 192,
+        "module_axioms": 5,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "PROVABLY_DISJOINT",
+        "sabrina_cold_ms": 102.52,
+        "sabrina_warm_verdict": "PROVABLY_DISJOINT",
+        "sabrina_warm_ms": 33.222,
+        "hermit_warm_verdict": "PROVABLY_DISJOINT",
+        "hermit_warm_ms": 10.188,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "PROVABLY_DISJOINT",
+        "elk_warm_ms": 7.615,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-12",
+        "gold": "PROVABLY_DISJOINT",
+        "full_axioms": 192,
+        "module_axioms": 6,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "PROVABLY_DISJOINT",
+        "sabrina_cold_ms": 101.114,
+        "sabrina_warm_verdict": "PROVABLY_DISJOINT",
+        "sabrina_warm_ms": 33.176,
+        "hermit_warm_verdict": "PROVABLY_DISJOINT",
+        "hermit_warm_ms": 10.293,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "PROVABLY_DISJOINT",
+        "elk_warm_ms": 8.28,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-13",
+        "gold": "PROVABLY_DISJOINT",
+        "full_axioms": 192,
+        "module_axioms": 6,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "PROVABLY_DISJOINT",
+        "sabrina_cold_ms": 101.708,
+        "sabrina_warm_verdict": "PROVABLY_DISJOINT",
+        "sabrina_warm_ms": 33.341,
+        "hermit_warm_verdict": "PROVABLY_DISJOINT",
+        "hermit_warm_ms": 9.271,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "PROVABLY_DISJOINT",
+        "elk_warm_ms": 7.687,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-14",
+        "gold": "PROVABLY_DISJOINT",
+        "full_axioms": 192,
+        "module_axioms": 7,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "PROVABLY_DISJOINT",
+        "sabrina_cold_ms": 101.961,
+        "sabrina_warm_verdict": "PROVABLY_DISJOINT",
+        "sabrina_warm_ms": 33.179,
+        "hermit_warm_verdict": "PROVABLY_DISJOINT",
+        "hermit_warm_ms": 12.623,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "PROVABLY_DISJOINT",
+        "elk_warm_ms": 7.158,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-15",
+        "gold": "PROVABLY_DISJOINT",
+        "full_axioms": 192,
+        "module_axioms": 5,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "PROVABLY_DISJOINT",
+        "sabrina_cold_ms": 101.068,
+        "sabrina_warm_verdict": "PROVABLY_DISJOINT",
+        "sabrina_warm_ms": 33.726,
+        "hermit_warm_verdict": "PROVABLY_DISJOINT",
+        "hermit_warm_ms": 9.626,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "PROVABLY_DISJOINT",
+        "elk_warm_ms": 7.476,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-16",
+        "gold": "PROVABLY_DISJOINT",
+        "full_axioms": 192,
+        "module_axioms": 6,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "PROVABLY_DISJOINT",
+        "sabrina_cold_ms": 103.125,
+        "sabrina_warm_verdict": "PROVABLY_DISJOINT",
+        "sabrina_warm_ms": 33.108,
+        "hermit_warm_verdict": "PROVABLY_DISJOINT",
+        "hermit_warm_ms": 9.014,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "PROVABLY_DISJOINT",
+        "elk_warm_ms": 7.188,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-17",
+        "gold": "PROVABLY_DISJOINT",
+        "full_axioms": 192,
+        "module_axioms": 5,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "PROVABLY_DISJOINT",
+        "sabrina_cold_ms": 102.898,
+        "sabrina_warm_verdict": "PROVABLY_DISJOINT",
+        "sabrina_warm_ms": 33.23,
+        "hermit_warm_verdict": "PROVABLY_DISJOINT",
+        "hermit_warm_ms": 8.964,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "PROVABLY_DISJOINT",
+        "elk_warm_ms": 7.382,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-18",
+        "gold": "PROVABLY_DISJOINT",
+        "full_axioms": 193,
+        "module_axioms": 8,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "PROVABLY_DISJOINT",
+        "sabrina_cold_ms": 103.493,
+        "sabrina_warm_verdict": "PROVABLY_DISJOINT",
+        "sabrina_warm_ms": 33.168,
+        "hermit_warm_verdict": "PROVABLY_DISJOINT",
+        "hermit_warm_ms": 9.516,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "PROVABLY_DISJOINT",
+        "elk_warm_ms": 7.594,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-19",
+        "gold": "PROVABLY_DISJOINT",
+        "full_axioms": 193,
+        "module_axioms": 7,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "PROVABLY_DISJOINT",
+        "sabrina_cold_ms": 102.181,
+        "sabrina_warm_verdict": "PROVABLY_DISJOINT",
+        "sabrina_warm_ms": 34.649,
+        "hermit_warm_verdict": "PROVABLY_DISJOINT",
+        "hermit_warm_ms": 14.02,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "PROVABLY_DISJOINT",
+        "elk_warm_ms": 7.596,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-20",
+        "gold": "PROVABLY_DISJOINT",
+        "full_axioms": 193,
+        "module_axioms": 7,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "PROVABLY_DISJOINT",
+        "sabrina_cold_ms": 102.508,
+        "sabrina_warm_verdict": "PROVABLY_DISJOINT",
+        "sabrina_warm_ms": 33.313,
+        "hermit_warm_verdict": "PROVABLY_DISJOINT",
+        "hermit_warm_ms": 9.512,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "PROVABLY_DISJOINT",
+        "elk_warm_ms": 7.223,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-21",
+        "gold": "SENTENCE_INDEPENDENT",
+        "full_axioms": 192,
+        "module_axioms": 4,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_cold_ms": 103.194,
+        "sabrina_warm_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_warm_ms": 33.04,
+        "hermit_warm_verdict": "SENTENCE_INDEPENDENT",
+        "hermit_warm_ms": 9.27,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 7.361,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-22",
+        "gold": "SENTENCE_INDEPENDENT",
+        "full_axioms": 192,
+        "module_axioms": 3,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_cold_ms": 104.465,
+        "sabrina_warm_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_warm_ms": 34.642,
+        "hermit_warm_verdict": "SENTENCE_INDEPENDENT",
+        "hermit_warm_ms": 8.52,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 6.775,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-23",
+        "gold": "SENTENCE_INDEPENDENT",
+        "full_axioms": 192,
+        "module_axioms": 3,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_cold_ms": 102.506,
+        "sabrina_warm_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_warm_ms": 33.519,
+        "hermit_warm_verdict": "SENTENCE_INDEPENDENT",
+        "hermit_warm_ms": 8.531,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 6.757,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-24",
+        "gold": "SENTENCE_INDEPENDENT",
+        "full_axioms": 192,
+        "module_axioms": 5,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_cold_ms": 103.572,
+        "sabrina_warm_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_warm_ms": 34.331,
+        "hermit_warm_verdict": "SENTENCE_INDEPENDENT",
+        "hermit_warm_ms": 11.518,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 6.752,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-25",
+        "gold": "SENTENCE_INDEPENDENT",
+        "full_axioms": 192,
+        "module_axioms": 4,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_cold_ms": 104.435,
+        "sabrina_warm_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_warm_ms": 33.382,
+        "hermit_warm_verdict": "SENTENCE_INDEPENDENT",
+        "hermit_warm_ms": 8.983,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 7.103,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-26",
+        "gold": "SENTENCE_INDEPENDENT",
+        "full_axioms": 192,
+        "module_axioms": 4,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_cold_ms": 103.345,
+        "sabrina_warm_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_warm_ms": 33.99,
+        "hermit_warm_verdict": "SENTENCE_INDEPENDENT",
+        "hermit_warm_ms": 8.387,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 7.644,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-27",
+        "gold": "SENTENCE_INDEPENDENT",
+        "full_axioms": 192,
+        "module_axioms": 4,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_cold_ms": 104.707,
+        "sabrina_warm_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_warm_ms": 33.33,
+        "hermit_warm_verdict": "SENTENCE_INDEPENDENT",
+        "hermit_warm_ms": 10.783,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 7.827,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-28",
+        "gold": "SENTENCE_INDEPENDENT",
+        "full_axioms": 193,
+        "module_axioms": 5,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_cold_ms": 101.47,
+        "sabrina_warm_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_warm_ms": 33.326,
+        "hermit_warm_verdict": "SENTENCE_INDEPENDENT",
+        "hermit_warm_ms": 8.222,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 10.636,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-29",
+        "gold": "SENTENCE_INDEPENDENT",
+        "full_axioms": 194,
+        "module_axioms": 6,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_cold_ms": 100.9,
+        "sabrina_warm_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_warm_ms": 34.04,
+        "hermit_warm_verdict": "SENTENCE_INDEPENDENT",
+        "hermit_warm_ms": 8.078,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 7.636,
+        "elk_cold_ms": null
+      },
+      {
+        "id": "S1-30",
+        "gold": "SENTENCE_INDEPENDENT",
+        "full_axioms": 194,
+        "module_axioms": 4,
+        "full_fragment": "SROIQ(D)",
+        "module_fragment": "EL++",
+        "engine_used": "el-polynomial",
+        "sabrina_cold_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_cold_ms": 109.762,
+        "sabrina_warm_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_warm_ms": 34.57,
+        "hermit_warm_verdict": "SENTENCE_INDEPENDENT",
+        "hermit_warm_ms": 11.641,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 6.902,
+        "elk_cold_ms": null
+      }
+    ]
+  },
+  "track2_sroiqd": {
+    "n_items": 24,
+    "sabrina_hermit_gold_agreement": "24/24",
+    "elk_gold_agreement": "10/24",
+    "sabrina_cold": {
+      "mean_ms": 33.31,
+      "median_ms": 39.514,
+      "p95_ms": 41.05,
+      "min_ms": 19.51,
+      "max_ms": 41.713
+    },
+    "sabrina_warm_reload": {
+      "mean_ms": 0.439,
+      "median_ms": 0.412,
+      "p95_ms": 0.599,
+      "min_ms": 0.303,
+      "max_ms": 0.786
+    },
+    "hermit_warm_reload": {
+      "mean_ms": 4.876,
+      "median_ms": 2.572,
+      "p95_ms": 6.785,
+      "min_ms": 1.865,
+      "max_ms": 43.86
+    },
+    "hermit_cold_cli": {
+      "mean_ms": 320.913,
+      "median_ms": 316.805,
+      "p95_ms": 335.187,
+      "min_ms": 311.498,
+      "max_ms": 335.187
+    },
+    "elk_warm_reload": {
+      "mean_ms": 3.236,
+      "median_ms": 2.833,
+      "p95_ms": 4.418,
+      "min_ms": 2.351,
+      "max_ms": 7.414
+    },
+    "records": [
+      {
+        "id": "S4-01",
+        "trap_type": "role_chain_entailment",
+        "gold": "PROVABLY_TRUE",
+        "full_axioms": 3,
+        "module_axioms": 3,
+        "module_fragment": "EL++",
+        "sabrina_cold_verdict": "PROVABLY_TRUE",
+        "sabrina_cold_ms": 20.776,
+        "sabrina_warm_verdict": "PROVABLY_TRUE",
+        "sabrina_warm_ms": 0.407,
+        "hermit_warm_verdict": "PROVABLY_TRUE",
+        "hermit_warm_ms": 5.258,
+        "hermit_cold_ms": 311.549,
+        "elk_warm_verdict": "PROVABLY_TRUE",
+        "elk_warm_ms": 7.414
+      },
+      {
+        "id": "S4-02",
+        "trap_type": "role_chain_disjoint_clash",
+        "gold": "PROVABLY_DISJOINT",
+        "full_axioms": 3,
+        "module_axioms": 3,
+        "module_fragment": "RankedRoleChains",
+        "sabrina_cold_verdict": "PROVABLY_DISJOINT",
+        "sabrina_cold_ms": 39.814,
+        "sabrina_warm_verdict": "PROVABLY_DISJOINT",
+        "sabrina_warm_ms": 0.56,
+        "hermit_warm_verdict": "PROVABLY_DISJOINT",
+        "hermit_warm_ms": 2.63,
+        "hermit_cold_ms": 335.187,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 3.359
+      },
+      {
+        "id": "S4-03",
+        "trap_type": "role_chain_reversed_open",
+        "gold": "SENTENCE_INDEPENDENT",
+        "full_axioms": 3,
+        "module_axioms": 3,
+        "module_fragment": "EL++",
+        "sabrina_cold_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_cold_ms": 39.879,
+        "sabrina_warm_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_warm_ms": 0.382,
+        "hermit_warm_verdict": "SENTENCE_INDEPENDENT",
+        "hermit_warm_ms": 3.28,
+        "hermit_cold_ms": 333.631,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 3.656
+      },
+      {
+        "id": "S4-04",
+        "trap_type": "inverse_existential_universal",
+        "gold": "PROVABLY_TRUE",
+        "full_axioms": 3,
+        "module_axioms": 3,
+        "module_fragment": "ALCHI",
+        "sabrina_cold_verdict": "PROVABLY_TRUE",
+        "sabrina_cold_ms": 20.037,
+        "sabrina_warm_verdict": "PROVABLY_TRUE",
+        "sabrina_warm_ms": 0.328,
+        "hermit_warm_verdict": "PROVABLY_TRUE",
+        "hermit_warm_ms": 2.32,
+        "hermit_cold_ms": 319.324,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 2.884
+      },
+      {
+        "id": "S4-05",
+        "trap_type": "inverse_transitivity_chain",
+        "gold": "PROVABLY_TRUE",
+        "full_axioms": 4,
+        "module_axioms": 4,
+        "module_fragment": "RankedRoleChains",
+        "sabrina_cold_verdict": "PROVABLY_TRUE",
+        "sabrina_cold_ms": 20.278,
+        "sabrina_warm_verdict": "PROVABLY_TRUE",
+        "sabrina_warm_ms": 0.554,
+        "hermit_warm_verdict": "PROVABLY_TRUE",
+        "hermit_warm_ms": 2.48,
+        "hermit_cold_ms": 314.286,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 3.204
+      },
+      {
+        "id": "S4-06",
+        "trap_type": "inverse_clash",
+        "gold": "PROVABLY_DISJOINT",
+        "full_axioms": 3,
+        "module_axioms": 3,
+        "module_fragment": "ALCHI",
+        "sabrina_cold_verdict": "PROVABLY_DISJOINT",
+        "sabrina_cold_ms": 39.168,
+        "sabrina_warm_verdict": "PROVABLY_DISJOINT",
+        "sabrina_warm_ms": 0.519,
+        "hermit_warm_verdict": "PROVABLY_DISJOINT",
+        "hermit_warm_ms": 2.446,
+        "hermit_cold_ms": 311.498,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 2.768
+      },
+      {
+        "id": "S4-07",
+        "trap_type": "existential_universal_clash",
+        "gold": "PROVABLY_DISJOINT",
+        "full_axioms": 3,
+        "module_axioms": 3,
+        "module_fragment": "ALC",
+        "sabrina_cold_verdict": "PROVABLY_DISJOINT",
+        "sabrina_cold_ms": 41.05,
+        "sabrina_warm_verdict": "PROVABLY_DISJOINT",
+        "sabrina_warm_ms": 0.599,
+        "hermit_warm_verdict": "PROVABLY_DISJOINT",
+        "hermit_warm_ms": 6.785,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 3.536
+      },
+      {
+        "id": "S4-08",
+        "trap_type": "vacuous_universal_open",
+        "gold": "SENTENCE_INDEPENDENT",
+        "full_axioms": 2,
+        "module_axioms": 2,
+        "module_fragment": "ALC",
+        "sabrina_cold_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_cold_ms": 39.426,
+        "sabrina_warm_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_warm_ms": 0.333,
+        "hermit_warm_verdict": "SENTENCE_INDEPENDENT",
+        "hermit_warm_ms": 1.932,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 2.798
+      },
+      {
+        "id": "S4-09",
+        "trap_type": "missing_inverse_open",
+        "gold": "SENTENCE_INDEPENDENT",
+        "full_axioms": 2,
+        "module_axioms": 1,
+        "module_fragment": "EL++",
+        "sabrina_cold_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_cold_ms": 39.695,
+        "sabrina_warm_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_warm_ms": 0.321,
+        "hermit_warm_verdict": "SENTENCE_INDEPENDENT",
+        "hermit_warm_ms": 1.985,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 4.418
+      },
+      {
+        "id": "S4-10",
+        "trap_type": "nominal_enumeration_subsumption",
+        "gold": "PROVABLY_TRUE",
+        "full_axioms": 4,
+        "module_axioms": 4,
+        "module_fragment": "SROIQ(D)",
+        "sabrina_cold_verdict": "PROVABLY_TRUE",
+        "sabrina_cold_ms": 20.908,
+        "sabrina_warm_verdict": "PROVABLY_TRUE",
+        "sabrina_warm_ms": 0.449,
+        "hermit_warm_verdict": "PROVABLY_TRUE",
+        "hermit_warm_ms": 4.092,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 3.497
+      },
+      {
+        "id": "S4-11",
+        "trap_type": "nominal_different_individuals_clash",
+        "gold": "PROVABLY_DISJOINT",
+        "full_axioms": 3,
+        "module_axioms": 3,
+        "module_fragment": "SROIQ(D)",
+        "sabrina_cold_verdict": "PROVABLY_DISJOINT",
+        "sabrina_cold_ms": 39.844,
+        "sabrina_warm_verdict": "PROVABLY_DISJOINT",
+        "sabrina_warm_ms": 0.462,
+        "hermit_warm_verdict": "PROVABLY_DISJOINT",
+        "hermit_warm_ms": 3.933,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "PROVABLY_DISJOINT",
+        "elk_warm_ms": 2.828
+      },
+      {
+        "id": "S4-12",
+        "trap_type": "no_una_nominal_open",
+        "gold": "SENTENCE_INDEPENDENT",
+        "full_axioms": 2,
+        "module_axioms": 2,
+        "module_fragment": "SROIQ(D)",
+        "sabrina_cold_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_cold_ms": 39.601,
+        "sabrina_warm_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_warm_ms": 0.433,
+        "hermit_warm_verdict": "SENTENCE_INDEPENDENT",
+        "hermit_warm_ms": 2.1,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 2.602
+      },
+      {
+        "id": "S4-13",
+        "trap_type": "cardinality_monotonicity",
+        "gold": "PROVABLY_TRUE",
+        "full_axioms": 3,
+        "module_axioms": 3,
+        "module_fragment": "SROIQ(D)",
+        "sabrina_cold_verdict": "PROVABLY_TRUE",
+        "sabrina_cold_ms": 19.818,
+        "sabrina_warm_verdict": "PROVABLY_TRUE",
+        "sabrina_warm_ms": 0.49,
+        "hermit_warm_verdict": "PROVABLY_TRUE",
+        "hermit_warm_ms": 3.377,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 2.683
+      },
+      {
+        "id": "S4-14",
+        "trap_type": "exact_implies_min_max",
+        "gold": "PROVABLY_TRUE",
+        "full_axioms": 2,
+        "module_axioms": 2,
+        "module_fragment": "SROIQ(D)",
+        "sabrina_cold_verdict": "PROVABLY_TRUE",
+        "sabrina_cold_ms": 19.527,
+        "sabrina_warm_verdict": "PROVABLY_TRUE",
+        "sabrina_warm_ms": 0.454,
+        "hermit_warm_verdict": "PROVABLY_TRUE",
+        "hermit_warm_ms": 3.447,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 2.463
+      },
+      {
+        "id": "S4-15",
+        "trap_type": "min_exceeds_max_clash",
+        "gold": "PROVABLY_DISJOINT",
+        "full_axioms": 2,
+        "module_axioms": 2,
+        "module_fragment": "SROIQ(D)",
+        "sabrina_cold_verdict": "PROVABLY_DISJOINT",
+        "sabrina_cold_ms": 39.351,
+        "sabrina_warm_verdict": "PROVABLY_DISJOINT",
+        "sabrina_warm_ms": 0.398,
+        "hermit_warm_verdict": "PROVABLY_DISJOINT",
+        "hermit_warm_ms": 2.138,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 2.735
+      },
+      {
+        "id": "S4-16",
+        "trap_type": "disjoint_fillers_pigeonhole_clash",
+        "gold": "PROVABLY_DISJOINT",
+        "full_axioms": 3,
+        "module_axioms": 3,
+        "module_fragment": "SROIQ(D)",
+        "sabrina_cold_verdict": "PROVABLY_DISJOINT",
+        "sabrina_cold_ms": 39.69,
+        "sabrina_warm_verdict": "PROVABLY_DISJOINT",
+        "sabrina_warm_ms": 0.786,
+        "hermit_warm_verdict": "PROVABLY_DISJOINT",
+        "hermit_warm_ms": 2.515,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 2.838
+      },
+      {
+        "id": "S4-17",
+        "trap_type": "overlapping_cardinality_bounds_open",
+        "gold": "SENTENCE_INDEPENDENT",
+        "full_axioms": 2,
+        "module_axioms": 2,
+        "module_fragment": "SROIQ(D)",
+        "sabrina_cold_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_cold_ms": 39.769,
+        "sabrina_warm_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_warm_ms": 0.303,
+        "hermit_warm_verdict": "SENTENCE_INDEPENDENT",
+        "hermit_warm_ms": 2.34,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 2.351
+      },
+      {
+        "id": "S4-18",
+        "trap_type": "non_disjoint_fillers_max1_open",
+        "gold": "SENTENCE_INDEPENDENT",
+        "full_axioms": 2,
+        "module_axioms": 2,
+        "module_fragment": "SROIQ(D)",
+        "sabrina_cold_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_cold_ms": 40.849,
+        "sabrina_warm_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_warm_ms": 0.496,
+        "hermit_warm_verdict": "SENTENCE_INDEPENDENT",
+        "hermit_warm_ms": 1.865,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 2.461
+      },
+      {
+        "id": "S4-19",
+        "trap_type": "unsat_facet_elimination",
+        "gold": "PROVABLY_TRUE",
+        "full_axioms": 2,
+        "module_axioms": 2,
+        "module_fragment": "SROIQ(D)",
+        "sabrina_cold_verdict": "PROVABLY_TRUE",
+        "sabrina_cold_ms": 19.674,
+        "sabrina_warm_verdict": "PROVABLY_TRUE",
+        "sabrina_warm_ms": 0.418,
+        "hermit_warm_verdict": "PROVABLY_TRUE",
+        "hermit_warm_ms": 43.86,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 3.87
+      },
+      {
+        "id": "S4-20",
+        "trap_type": "haskey_integer_merge",
+        "gold": "PROVABLY_TRUE",
+        "full_axioms": 7,
+        "module_axioms": 7,
+        "module_fragment": "SROIQ(D)",
+        "sabrina_cold_verdict": "PROVABLY_TRUE",
+        "sabrina_cold_ms": 19.51,
+        "sabrina_warm_verdict": "PROVABLY_TRUE",
+        "sabrina_warm_ms": 0.314,
+        "hermit_warm_verdict": "PROVABLY_TRUE",
+        "hermit_warm_ms": 4.426,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 3.738
+      },
+      {
+        "id": "S4-21",
+        "trap_type": "facet_allvalues_clash",
+        "gold": "PROVABLY_DISJOINT",
+        "full_axioms": 2,
+        "module_axioms": 2,
+        "module_fragment": "SROIQ(D)",
+        "sabrina_cold_verdict": "PROVABLY_DISJOINT",
+        "sabrina_cold_ms": 40.583,
+        "sabrina_warm_verdict": "PROVABLY_DISJOINT",
+        "sabrina_warm_ms": 0.387,
+        "hermit_warm_verdict": "PROVABLY_DISJOINT",
+        "hermit_warm_ms": 5.079,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 4.052
+      },
+      {
+        "id": "S4-22",
+        "trap_type": "strict_boundary_facet_clash",
+        "gold": "PROVABLY_DISJOINT",
+        "full_axioms": 2,
+        "module_axioms": 2,
+        "module_fragment": "SROIQ(D)",
+        "sabrina_cold_verdict": "PROVABLY_DISJOINT",
+        "sabrina_cold_ms": 41.713,
+        "sabrina_warm_verdict": "PROVABLY_DISJOINT",
+        "sabrina_warm_ms": 0.358,
+        "hermit_warm_verdict": "PROVABLY_DISJOINT",
+        "hermit_warm_ms": 2.309,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 2.495
+      },
+      {
+        "id": "S4-23",
+        "trap_type": "non_functional_data_facet_open",
+        "gold": "SENTENCE_INDEPENDENT",
+        "full_axioms": 2,
+        "module_axioms": 2,
+        "module_fragment": "SROIQ(D)",
+        "sabrina_cold_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_cold_ms": 39.897,
+        "sabrina_warm_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_warm_ms": 0.384,
+        "hermit_warm_verdict": "SENTENCE_INDEPENDENT",
+        "hermit_warm_ms": 2.251,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 2.619
+      },
+      {
+        "id": "S4-24",
+        "trap_type": "reversed_facet_value_open",
+        "gold": "SENTENCE_INDEPENDENT",
+        "full_axioms": 3,
+        "module_axioms": 3,
+        "module_fragment": "SROIQ(D)",
+        "sabrina_cold_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_cold_ms": 38.572,
+        "sabrina_warm_verdict": "SENTENCE_INDEPENDENT",
+        "sabrina_warm_ms": 0.403,
+        "hermit_warm_verdict": "SENTENCE_INDEPENDENT",
+        "hermit_warm_ms": 4.184,
+        "hermit_cold_ms": null,
+        "elk_warm_verdict": "SENTENCE_INDEPENDENT",
+        "elk_warm_ms": 2.4
+      }
+    ]
+  },
+  "track3_el_scaling": [
+    {
+      "n_axioms": 50,
+      "module_axioms": 6,
+      "locality_reduction_pct": 88.0,
+      "sabrina_cold_pos_ms": 20.275,
+      "sabrina_cold_neg_ms": 20.01,
+      "sabrina_warm_pos_ms": 0.779,
+      "hermit_warm_pos_ms": 3.109,
+      "elk_warm_pos_ms": 3.007,
+      "verdicts": {
+        "sabrina_pos": "ENTAILED",
+        "sabrina_neg": "NOT_ENTAILED",
+        "hermit_pos": "ENTAILED",
+        "elk_pos": "ENTAILED"
+      }
+    },
+    {
+      "n_axioms": 100,
+      "module_axioms": 6,
+      "locality_reduction_pct": 94.0,
+      "sabrina_cold_pos_ms": 20.293,
+      "sabrina_cold_neg_ms": 20.316,
+      "sabrina_warm_pos_ms": 1.25,
+      "hermit_warm_pos_ms": 3.3,
+      "elk_warm_pos_ms": 2.959,
+      "verdicts": {
+        "sabrina_pos": "ENTAILED",
+        "sabrina_neg": "NOT_ENTAILED",
+        "hermit_pos": "ENTAILED",
+        "elk_pos": "ENTAILED"
+      }
+    },
+    {
+      "n_axioms": 250,
+      "module_axioms": 6,
+      "locality_reduction_pct": 97.6,
+      "sabrina_cold_pos_ms": 20.528,
+      "sabrina_cold_neg_ms": 20.732,
+      "sabrina_warm_pos_ms": 2.541,
+      "hermit_warm_pos_ms": 4.695,
+      "elk_warm_pos_ms": 3.859,
+      "verdicts": {
+        "sabrina_pos": "ENTAILED",
+        "sabrina_neg": "NOT_ENTAILED",
+        "hermit_pos": "ENTAILED",
+        "elk_pos": "ENTAILED"
+      }
+    },
+    {
+      "n_axioms": 500,
+      "module_axioms": 6,
+      "locality_reduction_pct": 98.8,
+      "sabrina_cold_pos_ms": 21.219,
+      "sabrina_cold_neg_ms": 21.193,
+      "sabrina_warm_pos_ms": 5.294,
+      "hermit_warm_pos_ms": 7.1,
+      "elk_warm_pos_ms": 5.387,
+      "verdicts": {
+        "sabrina_pos": "ENTAILED",
+        "sabrina_neg": "NOT_ENTAILED",
+        "hermit_pos": "ENTAILED",
+        "elk_pos": "ENTAILED"
+      }
+    },
+    {
+      "n_axioms": 1000,
+      "module_axioms": 6,
+      "locality_reduction_pct": 99.4,
+      "sabrina_cold_pos_ms": 22.858,
+      "sabrina_cold_neg_ms": 22.874,
+      "sabrina_warm_pos_ms": 12.962,
+      "hermit_warm_pos_ms": 10.413,
+      "elk_warm_pos_ms": 8.251,
+      "verdicts": {
+        "sabrina_pos": "ENTAILED",
+        "sabrina_neg": "NOT_ENTAILED",
+        "hermit_pos": "ENTAILED",
+        "elk_pos": "ENTAILED"
+      }
+    }
+  ],
+  "track4_dred": {
+    "suite5_sessions": [
+      {
+        "id": "S5-01",
+        "preset": "bfo-core",
+        "n_steps": 5,
+        "n_queries": 3,
+        "expected": [
+          "NOT_ENTAILED",
+          "ENTAILED",
+          "NOT_ENTAILED"
+        ],
+        "sabrina": {
+          "mode": "sroiqd-cached",
+          "load_ms": 35.44,
+          "steps_ms": 0.355,
+          "total_ms": 35.795,
+          "matches_gold": true,
+          "verdicts": [
+            "NOT_ENTAILED",
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        },
+        "hermit": {
+          "load_ms": 14.807,
+          "steps_ms": 18.085,
+          "total_ms": 32.893,
+          "matches_gold": true,
+          "verdicts": [
+            "NOT_ENTAILED",
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        },
+        "elk": {
+          "load_ms": 8.694,
+          "steps_ms": 10.397,
+          "total_ms": 19.091,
+          "matches_gold": true,
+          "verdicts": [
+            "NOT_ENTAILED",
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        }
+      },
+      {
+        "id": "S5-02",
+        "preset": "bfo-core",
+        "n_steps": 7,
+        "n_queries": 3,
+        "expected": [
+          "ENTAILED",
+          "ENTAILED",
+          "NOT_ENTAILED"
+        ],
+        "sabrina": {
+          "mode": "sroiqd-cached",
+          "load_ms": 35.821,
+          "steps_ms": 0.402,
+          "total_ms": 36.223,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        },
+        "hermit": {
+          "load_ms": 12.899,
+          "steps_ms": 20.853,
+          "total_ms": 33.752,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        },
+        "elk": {
+          "load_ms": 9.203,
+          "steps_ms": 7.241,
+          "total_ms": 16.444,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        }
+      },
+      {
+        "id": "S5-03",
+        "preset": "bfo-core",
+        "n_steps": 4,
+        "n_queries": 2,
+        "expected": [
+          "ENTAILED",
+          "NOT_ENTAILED"
+        ],
+        "sabrina": {
+          "mode": "sroiqd-cached",
+          "load_ms": 33.851,
+          "steps_ms": 0.271,
+          "total_ms": 34.122,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        },
+        "hermit": {
+          "load_ms": 9.193,
+          "steps_ms": 10.244,
+          "total_ms": 19.437,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        },
+        "elk": {
+          "load_ms": 6.757,
+          "steps_ms": 4.031,
+          "total_ms": 10.788,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        }
+      },
+      {
+        "id": "S5-04",
+        "preset": "el-custom",
+        "n_steps": 5,
+        "n_queries": 2,
+        "expected": [
+          "ENTAILED",
+          "NOT_ENTAILED"
+        ],
+        "sabrina": {
+          "mode": "el-incremental",
+          "load_ms": 0.189,
+          "steps_ms": 0.191,
+          "total_ms": 0.38,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        },
+        "hermit": {
+          "load_ms": 1.644,
+          "steps_ms": 5.424,
+          "total_ms": 7.068,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        },
+        "elk": {
+          "load_ms": 1.797,
+          "steps_ms": 7.544,
+          "total_ms": 9.341,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        }
+      },
+      {
+        "id": "S5-05",
+        "preset": "el-custom",
+        "n_steps": 9,
+        "n_queries": 3,
+        "expected": [
+          "ENTAILED",
+          "ENTAILED",
+          "NOT_ENTAILED"
+        ],
+        "sabrina": {
+          "mode": "el-incremental",
+          "load_ms": 0.162,
+          "steps_ms": 0.29,
+          "total_ms": 0.452,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        },
+        "hermit": {
+          "load_ms": 1.749,
+          "steps_ms": 9.183,
+          "total_ms": 10.932,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        },
+        "elk": {
+          "load_ms": 4.335,
+          "steps_ms": 7.289,
+          "total_ms": 11.623,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        }
+      },
+      {
+        "id": "S5-06",
+        "preset": "el-custom",
+        "n_steps": 6,
+        "n_queries": 2,
+        "expected": [
+          "ENTAILED",
+          "NOT_ENTAILED"
+        ],
+        "sabrina": {
+          "mode": "el-incremental",
+          "load_ms": 0.17,
+          "steps_ms": 0.224,
+          "total_ms": 0.394,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        },
+        "hermit": {
+          "load_ms": 1.271,
+          "steps_ms": 4.065,
+          "total_ms": 5.335,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        },
+        "elk": {
+          "load_ms": 1.7,
+          "steps_ms": 5.332,
+          "total_ms": 7.033,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        }
+      },
+      {
+        "id": "S5-07",
+        "preset": "el-custom",
+        "n_steps": 6,
+        "n_queries": 3,
+        "expected": [
+          "NOT_ENTAILED",
+          "ENTAILED",
+          "NOT_ENTAILED"
+        ],
+        "sabrina": {
+          "mode": "el-incremental",
+          "load_ms": 0.151,
+          "steps_ms": 0.21,
+          "total_ms": 0.361,
+          "matches_gold": true,
+          "verdicts": [
+            "NOT_ENTAILED",
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        },
+        "hermit": {
+          "load_ms": 1.262,
+          "steps_ms": 4.369,
+          "total_ms": 5.632,
+          "matches_gold": true,
+          "verdicts": [
+            "NOT_ENTAILED",
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        },
+        "elk": {
+          "load_ms": 1.689,
+          "steps_ms": 6.222,
+          "total_ms": 7.911,
+          "matches_gold": true,
+          "verdicts": [
+            "NOT_ENTAILED",
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        }
+      },
+      {
+        "id": "S5-08",
+        "preset": "el-custom",
+        "n_steps": 7,
+        "n_queries": 3,
+        "expected": [
+          "ENTAILED",
+          "ENTAILED",
+          "NOT_ENTAILED"
+        ],
+        "sabrina": {
+          "mode": "el-incremental",
+          "load_ms": 0.182,
+          "steps_ms": 0.272,
+          "total_ms": 0.454,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        },
+        "hermit": {
+          "load_ms": 1.295,
+          "steps_ms": 4.342,
+          "total_ms": 5.637,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        },
+        "elk": {
+          "load_ms": 1.645,
+          "steps_ms": 5.755,
+          "total_ms": 7.4,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        }
+      },
+      {
+        "id": "S5-09",
+        "preset": "el-custom",
+        "n_steps": 8,
+        "n_queries": 3,
+        "expected": [
+          "ENTAILED",
+          "ENTAILED",
+          "NOT_ENTAILED"
+        ],
+        "sabrina": {
+          "mode": "el-incremental",
+          "load_ms": 0.185,
+          "steps_ms": 0.268,
+          "total_ms": 0.452,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        },
+        "hermit": {
+          "load_ms": 1.162,
+          "steps_ms": 5.2,
+          "total_ms": 6.362,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        },
+        "elk": {
+          "load_ms": 1.597,
+          "steps_ms": 7.363,
+          "total_ms": 8.96,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "ENTAILED",
+            "NOT_ENTAILED"
+          ]
+        }
+      },
+      {
+        "id": "S5-10",
+        "preset": "el-custom",
+        "n_steps": 6,
+        "n_queries": 3,
+        "expected": [
+          "ENTAILED",
+          "NOT_ENTAILED",
+          "ENTAILED"
+        ],
+        "sabrina": {
+          "mode": "el-incremental",
+          "load_ms": 0.175,
+          "steps_ms": 0.216,
+          "total_ms": 0.39,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "NOT_ENTAILED",
+            "ENTAILED"
+          ]
+        },
+        "hermit": {
+          "load_ms": 2.116,
+          "steps_ms": 5.742,
+          "total_ms": 7.857,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "NOT_ENTAILED",
+            "ENTAILED"
+          ]
+        },
+        "elk": {
+          "load_ms": 3.565,
+          "steps_ms": 6.085,
+          "total_ms": 9.65,
+          "matches_gold": true,
+          "verdicts": [
+            "ENTAILED",
+            "NOT_ENTAILED",
+            "ENTAILED"
+          ]
+        }
+      }
+    ],
+    "suite5_summary": {
+      "n_sessions": 10,
+      "sabrina_all_agree": true,
+      "hermit_all_agree": true,
+      "elk_all_agree": true,
+      "sabrina_steps": {
+        "mean_ms": 0.27,
+        "median_ms": 0.27,
+        "p95_ms": 0.402,
+        "min_ms": 0.191,
+        "max_ms": 0.402
+      },
+      "hermit_steps": {
+        "mean_ms": 8.751,
+        "median_ms": 5.583,
+        "p95_ms": 20.853,
+        "min_ms": 4.065,
+        "max_ms": 20.853
+      },
+      "elk_steps": {
+        "mean_ms": 6.726,
+        "median_ms": 6.732,
+        "p95_ms": 10.397,
+        "min_ms": 4.031,
+        "max_ms": 10.397
+      },
+      "sabrina_total": {
+        "mean_ms": 10.902,
+        "median_ms": 0.452,
+        "p95_ms": 36.223,
+        "min_ms": 0.361,
+        "max_ms": 36.223
+      },
+      "hermit_total": {
+        "mean_ms": 13.491,
+        "median_ms": 7.463,
+        "p95_ms": 33.752,
+        "min_ms": 5.335,
+        "max_ms": 33.752
+      },
+      "elk_total": {
+        "mean_ms": 10.824,
+        "median_ms": 9.495,
+        "p95_ms": 19.091,
+        "min_ms": 7.033,
+        "max_ms": 19.091
+      }
+    },
+    "stress_50": {
+      "id": "STRESS-50",
+      "tbox_axioms": 206,
+      "n_steps": 50,
+      "n_queries": 18,
+      "agreement": {
+        "sabrina": true,
+        "hermit": true,
+        "elk": true
+      },
+      "sabrina_load_ms": 2.764,
+      "sabrina_steps_ms": 1.677,
+      "sabrina_per_step_ms": 0.0335,
+      "hermit_load_ms": 8.835,
+      "hermit_steps_ms": 60.886,
+      "hermit_per_step_ms": 1.2177,
+      "elk_load_ms": 5.679,
+      "elk_steps_ms": 45.859,
+      "elk_per_step_ms": 0.9172
+    }
+  }
+}
