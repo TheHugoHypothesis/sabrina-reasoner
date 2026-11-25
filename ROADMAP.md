@@ -1,33 +1,13 @@
-# SABRINA Roadmap to Full W3C OWL 2 DL Conformance
+# Roadmap
 
-This roadmap tracks `sabrina-reasoner` from its initial archived release ([DOI 10.5281/zenodo.24521179](https://doi.org/10.5281/zenodo.24521179)) to **full W3C OWL 2 DL conformance (`v1.0.0`)**.
+This document records the milestones completed for `v1.0.0`. Every Lean module builds with zero `sorry` and strictly standard Lean axioms (`propext`, `Classical.choice`, `Quot.sound`), checked by `scripts/verify_axioms.py`.
 
-All Lean 4 proofs in this repository build with **zero `sorry`**, **zero custom axioms**, and strictly standard Lean foundational axioms (`propext`, `Classical.choice`, `Quot.sound`), verified by `lake build && python3 scripts/verify_axioms.py`.
+## Completed milestones
 
----
-
-## Completed Milestones (`v1.0.0`)
-
-| Area | Status | Key Modules & Verified Guarantees |
-|---|---|---|
-| **$\mathcal{SROIQ}(\mathcal{D})$ Logical Core** | Done | All 16 OWL 2 class constructors, TBox/RBox/ABox Direct Semantics, nominals, inverse roles, qualified cardinalities, mixed object/data `HasKey`, cyclic GCIs, and fuel-free blocked-forest termination (`decideSROIQBool_ontology_iff`, `decideRegularOWL2DLReal_ontology_iff`). |
-| **Role Hierarchies & Built-in Properties** | Done | Exact dependency-acyclic admission (`AcyclicOWL2DLHierarchy`), W3C §11.1–§11.2 simple-role checks with universal roles, and complete elimination of `owl:topObjectProperty`, `owl:bottomObjectProperty`, `owl:topDataProperty`, and `owl:bottomDataProperty`. |
-| **33-Datatype Exact Solver** | Done | Mechanized 33-datatype map: Dedekind-cut `owl:real`, IEEE-754 `xsd:float`/`xsd:double` order facets, 14h-shift `xsd:dateTime`/`xsd:dateTimeStamp`, length facets, `DataOneOf`, `rdf:langRange`, and `rdf:XMLLiteral`. |
-| **Milestone C.1: W3C XSD 1.1 Unicode Regex** | Done (`8e8a679`) | Exact Unicode 17.0.0 General Category tables (`UnicodeCategories.lean`), `\d`/`\D` = `\p{Nd}`, `\w`/`\W` = `[^\p{P}\p{Z}\p{C}]`, `\p{...}`/`\P{...}` (30 subcategories, 7 major categories, 91 `Is...` blocks), nested character-class subtraction `[base-[sub]]`, and exact full-Unicode boundary sampling (`UnicodeStringSampling.sample_exact`). |
-| **Milestone A: Strict W3C §11.2 Validator** | Done (`8e8a679`) | `StrictOWL2DL.lean` + `--strict-owl2dl` CLI flag / `"strict_owl2dl": true` JSON option: enforces `owl:topDataProperty` placement, anonymous-individual prohibitions & simple-forest/single-named-root rules, XSD 1.1 pattern syntax, and strict regular/acyclic role hierarchies (`checkStrictOWL2DL_iff`, `diagnoseStrictOWL2DL_isNone_iff`, `decideStrictOWL2DLReal_iff`). |
-| **Milestone B: Declarations, Punning & FSS** | Done (`426516b`) | `FunctionalSyntax.lean` + `StrictTyping.lean` + `ImportCatalog.lean`: full `Declaration(...)` and annotation-axiom parsing, prefixed ontology/version IRIs, Unicode & `PN_LOCAL_ESC` tokens, W3C §5.8.1–§5.8.2 typing completeness & punning disjointness (`checkTyping_iff`, `diagnoseTyping_isNone_iff`, `decideStrictTypedOWL2DLReal_iff`), and OASIS `catalog-v001.xml` / `--import-dir` CLI resolution. |
-| **Milestone C.2: Datatype, Exc-C14N & Regex Correspondence** | Done (`65b241f`) | `StandardsCorrespondence.lean`, `XMLCorrespondence.lean`, and `RegexGrammarCorrespondence.lean`: independent declarative W3C XSD 1.1 / IEEE-754 / RFC 4647 / Exc-C14N / Appendix G BNF specifications with kernel-checked correspondence theorems (`parseHexBinary_iff`, `roundTiesEven_iff`, `parseDateTime_valid`, `matchesLangRange_iff`, `renderExcC14N_simpleText_canonical`, `excC14N_normative_correspondence`, `GrammarRegExp.compile_matches_iff`). Renamed primary CLI to `sabrina-query`. |
-| **Milestone D: RDF/XML, Turtle, Extended Entailment, Classification, Realization & W3C Suite** | Done (`a0ca51b`) | `RDF/Graph.lean`, `RDF/XMLParser.lean`, `RDF/TurtleParser.lean`, `RDF/OWLMapping.lean`, `ExtendedQueryDecision.lean`, `Classification.lean`, and `benchmarks/w3c-owl2-conformance/run_w3c_conformance.py`: native RDF/XML + Turtle 1.1 parsers & W3C OWL 2 RDF-to-Structural mapping (`parseRDFList_encodeRDFListWith`, `owl2_rdf_mapping_roundtrip_correspondence`), exact 4-way entailment across 29 OWL 2 axiom forms + anonymous-individual queries (`counterexample_branches_sat_iff`, `decideRealExtendedQuery_sound`), certified TBox classification & ABox realization (`classifyOntologyReal_sound_complete`, `realizeOntologyReal_sound_complete`), and a 42-test W3C OWL 2 DL conformance gate. |
-| **Milestone E.1: Hash-Indexed $\bot$-Locality Extraction** | Done (`e8bd449`) | `FastLocality.lean`: $O(|O|)$ inverted signature index (`LocalityIndex.build`/`extend`), $O(|M|)$ hash-set worklist (`runWorklist`), $O(|O|)$ linear certificate verifier (`verifyMinimalBuild`, `verifyMaskAux`), wired into `OFNQuery.lean` and cached in `SessionMain.lean`, with kernel-checked exact set equality (`extractBotModuleFast_mem_iff`), satisfiability preservation (`extractBotModuleFast_sat_iff`), and entailment conservativity (`extractBotModuleFast_entails_iff`). Achieves <0.9s cold / ~67 ms warm extraction on 350,000 axioms. |
-| **Milestone E.2: Release & Archival Hygiene (`v1.0.0`)** | Done | Package versions bumped to `1.0.0`, documentation & changelog updated, all verification gates green, tagged `v1.0.0` on GitHub for Zenodo archival. |
-
----
-
-## Checklist Archive
-
-- [x] **A** — Strict W3C OWL 2 DL §11.2 Validator (`StrictOWL2DL.lean`)
-- [x] **B.1–B.3** — Entity Declarations, Punning/Typing, Complete FSS & OASIS XML Catalog (`FunctionalSyntax.lean`, `StrictTyping.lean`, `ImportCatalog.lean`)
-- [x] **C.1–C.2** — Unicode 17.0.0 XSD 1.1 Regex & Independent Standards Correspondence (`UnicodeCategories.lean`, `StandardsCorrespondence.lean`, `XMLCorrespondence.lean`, `RegexGrammarCorrespondence.lean`)
-- [x] **D.1–D.3** — Native RDF/XML & Turtle 1.1, Extended 29-Form Entailment, Classification, Realization & 42-Test W3C Conformance Gate
-- [x] **E.1** — Hash-Indexed $\bot$-Locality Extraction (`FastLocality.lean`, `benchmarks/fast-locality/bench_snomed_scale.py`)
-- [x] **E.2** — Release & Archival Hygiene (`v1.0.0`)
+- **A. Strict W3C §11.2 validator** (`StrictOWL2DL.lean`, `8e8a679`): `--strict-owl2dl` and `"strict_owl2dl": true` enforcing `owl:topDataProperty` placement, anonymous-individual forest and single-named-root restrictions, XSD 1.1 pattern syntax, and regular/acyclic role hierarchies.
+- **B. Declarations, punning, FSS, and import catalogs** (`FunctionalSyntax.lean`, `StrictTyping.lean`, `ImportCatalog.lean`, `426516b`): `Declaration(...)` and annotation-axiom parsing, prefixed ontology/version IRIs, Unicode and `PN_LOCAL_ESC` tokens, W3C §5.8.1–§5.8.2 typing and punning checks, and OASIS `catalog-v001.xml` / `--import-dir` loading.
+- **C.1. Unicode 17.0.0 XSD 1.1 regular expressions** (`UnicodeCategories.lean`, `8e8a679`): `\d`/`\D`, `\w`/`\W`, `\p{...}`/`\P{...}` categories and blocks, nested character-class subtraction, and full-Unicode boundary sampling.
+- **C.2. Standards correspondence** (`StandardsCorrespondence.lean`, `XMLCorrespondence.lean`, `RegexGrammarCorrespondence.lean`, `65b241f`): independent declarative specifications and correspondence theorems for `xsd:hexBinary`, IEEE-754 ties-to-even rounding, `xsd:dateTime`, RFC 4647 language ranges, Exclusive XML Canonicalization, and the XSD 1.1 Appendix G regex grammar. Renamed primary CLI to `sabrina-query`.
+- **D. RDF/XML, Turtle, reasoning services, and W3C suite** (`RDF/`, `ExtendedQueryDecision.lean`, `Classification.lean`, `benchmarks/w3c-owl2-conformance/`, `a0ca51b`): native RDF 1.1 graph, RDF/XML 1.1 and Turtle 1.1 parsers, W3C OWL 2 RDF-to-Structural mapping with round-trip proof, 4-way entailment across 29 axiom forms and anonymous-individual queries, certified TBox classification and ABox realization, and a 42-test conformance suite.
+- **E.1. Hash-indexed $\bot$-locality extraction** (`FastLocality.lean`, `benchmarks/fast-locality/`, `e8bd449`): inverted signature index, worklist fixpoint, and linear certificate verifier proved axiom-set-identical to `Profile.extractBotModule` (`extractBotModuleFast_mem_iff`, `extractBotModuleFast_entails_iff`), wired into `sabrina-query` and cached in `sabrina-session`.
+- **E.2. Release hygiene** (`v1.0.0`): package versions aligned to `1.0.0`, documentation updated, and `v1.0.0` tagged on GitHub.
