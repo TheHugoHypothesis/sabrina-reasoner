@@ -49,3 +49,70 @@ def run_ofn_query(
     )
     res = json.loads(proc.stdout)
     return bool(res.get("lean_verified", False)), res
+
+
+def inject_ofn_extension(base_ofn: str, extra_axioms_ofn: str) -> str:
+    """Insert prefix declarations and axioms from a benchmark fixture."""
+    prefixes = []
+    axioms = []
+    for line in extra_axioms_ofn.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("Prefix("):
+            prefixes.append(line)
+        else:
+            axioms.append("  " + line)
+
+    if prefixes:
+        start = base_ofn.index("Ontology(")
+        base_ofn = base_ofn[:start] + "\n".join(prefixes) + "\n" + base_ofn[start:]
+    if axioms:
+        end = base_ofn.rindex(")")
+        base_ofn = base_ofn[:end] + "\n" + "\n".join(axioms) + "\n" + base_ofn[end:]
+    return base_ofn
+
+
+class SabrinaSession:
+    """Drive the persistent JSON-lines CLI used in the incremental benchmark."""
+
+    def __init__(self) -> None:
+        self._process = subprocess.Popen(
+            [str(find_sabrina_binary("sabrina-session"))],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+
+    def _send(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        stdin = self._process.stdin
+        stdout = self._process.stdout
+        assert stdin is not None and stdout is not None
+        stdin.write(json.dumps(payload) + "\n")
+        stdin.flush()
+        line = stdout.readline()
+        if not line:
+            raise RuntimeError("sabrina-session closed before replying")
+        return json.loads(line)
+
+    def load_tbox(self, *, ofn_text: str) -> Dict[str, Any]:
+        return self._send({"cmd": "load_tbox", "id": "session-tbox", "ofn": ofn_text})
+
+    def assert_fact(self, ofn_axiom: str, *, fact_id: str) -> Dict[str, Any]:
+        return self._send({"cmd": "assert", "id": fact_id, "ofn": ofn_axiom})
+
+    def retract_fact(self, fact_id: str) -> Dict[str, Any]:
+        return self._send({"cmd": "retract", "id": fact_id})
+
+    def query(self, ofn_query: str) -> Dict[str, Any]:
+        return self._send({"cmd": "query", "ofn": ofn_query})
+
+    def close(self) -> None:
+        with self._process:
+            assert self._process.stdin is not None
+            self._process.stdin.close()
+            try:
+                self._process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._process.kill()

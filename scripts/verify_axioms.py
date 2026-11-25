@@ -71,24 +71,32 @@ def scan_source() -> list[str]:
 
 
 def check_kernel_axioms() -> list[str]:
-    imports = "\n".join(f"import {m}" for m in HEADLINE_MODULES)
-    prints = "\n".join(f"#print axioms {t}" for t in HEADLINE_THEOREMS)
+    imports = "\n".join(f"import {m}" for m in ("Lean", *HEADLINE_MODULES))
+    theorems = ", ".join(f"`{name}" for name in HEADLINE_THEOREMS)
+    allowed = ", ".join(f"`{name}" for name in sorted(ALLOWED_AXIOMS))
+    source = f"""{imports}
+
+open Lean Elab Command
+
+run_cmd do
+  let allowed : List Name := [{allowed}]
+  for name in ([{theorems}] : List Name) do
+    unless (← getEnv).contains name do
+      logError m!"Unknown declaration: {{name}}"
+      continue
+    let axioms ← collectAxioms name
+    let unexpected := axioms.filter (fun axiomName => !allowed.contains axiomName)
+    if unexpected.isEmpty then
+      logInfo m!"{{name}} depends on {{axioms}}"
+    else
+      logError m!"{{name}} depends on non-standard axioms: {{unexpected}}"
+"""
     cmd = ["lake", "env", "lean", "--stdin"]
-    proc = subprocess.run(cmd, input=imports + "\n\n" + prints + "\n",
-                          cwd=ROOT, text=True, capture_output=True)
+    proc = subprocess.run(cmd, input=source, cwd=ROOT, text=True, capture_output=True)
     if proc.returncode != 0:
         return [f"lean kernel axiom check failed:\n{proc.stderr}\n{proc.stdout}"]
-    violations: list[str] = []
-    for line in proc.stdout.splitlines():
-        if "depends on axioms:" in line:
-            m = re.search(r"\[([^\]]*)\]", line)
-            if m:
-                axioms = {a.strip() for a in m.group(1).split(",") if a.strip()}
-                extra = axioms - ALLOWED_AXIOMS
-                if extra:
-                    violations.append(f"Non-standard axioms in {line}: {sorted(extra)}")
-        print(" ", line)
-    return violations
+    print(proc.stdout, end="")
+    return []
 
 
 def main() -> int:

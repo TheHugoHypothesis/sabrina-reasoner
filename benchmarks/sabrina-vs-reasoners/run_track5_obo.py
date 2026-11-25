@@ -18,37 +18,19 @@ vs. warm-JVM HermiT/ELK) and amortized 10-query warm batch latency (HermiT/ELK).
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
 import statistics
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 BENCH_DIR = Path(__file__).resolve().parent
-BFO_LEAN_ROOT = BENCH_DIR.parents[1]
 JAVA_DIR = BENCH_DIR / "java-harness"
-CORP_DIR = BENCH_DIR / "corpora"
 
 from sabrina_cli import run_ofn_query  # noqa: E402
-
-ONTOLOGIES = [
-    ("cl-basic", "CL-basic (Cell Ontology)", "http://purl.obolibrary.org/obo/cl/cl-basic.owl"),
-    ("doid", "DOID (Human Disease)", "http://purl.obolibrary.org/obo/doid.owl"),
-    ("uberon-basic", "UBERON-basic (Anatomy)", "http://purl.obolibrary.org/obo/uberon/uberon-basic.owl"),
-    ("go-basic", "GO-basic (Gene Ontology)", "http://purl.obolibrary.org/obo/go/go-basic.owl"),
-]
-
-
-def sha256_file(p: Path) -> str:
-    h = hashlib.sha256()
-    with p.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+from track5_corpora import CORPORA, verify_sha256  # noqa: E402
 
 
 def select_balanced_queries(ofn_path: Path, n_pos: int = 5, n_neg: int = 5) -> Tuple[List[Dict[str, str]], Dict[str, int]]:
@@ -142,13 +124,14 @@ def main() -> None:
 
     results: List[Dict[str, Any]] = []
     try:
-        for slug, label, url in ONTOLOGIES:
-            ofn_path = CORP_DIR / f"{slug}.ofn"
+        for corpus in CORPORA:
+            ofn_path = corpus.ofn_path
             if not ofn_path.is_file():
                 raise FileNotFoundError(f"Missing {ofn_path}; run download_corpora.sh first.")
+            verify_sha256(ofn_path, corpus.ofn_sha256)
             ofn_text = ofn_path.read_text(encoding="utf-8")
             queries, stats = select_balanced_queries(ofn_path, n_pos=5, n_neg=5)
-            print(f"[Track 5] {label} ({len(queries)} queries)...")
+            print(f"[Track 5] {corpus.label} ({len(queries)} queries)...")
 
             # 1. Per-query fresh-load measurements: SABRINA Cold CLI vs HermiT Warm JVM (fresh load) vs ELK Warm JVM (fresh load)
             sb_ms_list, hm_ms_list, elk_ms_list = [], [], []
@@ -224,10 +207,10 @@ def main() -> None:
                 )
 
             entry = {
-                "slug": slug,
-                "label": label,
-                "source_url": url,
-                "ofn_sha256": sha256_file(ofn_path),
+                "slug": corpus.slug,
+                "label": corpus.label,
+                "source_url": corpus.source_url,
+                "ofn_sha256": corpus.ofn_sha256,
                 "ofn_bytes": ofn_path.stat().st_size,
                 "logical_axioms": full_axioms or hm_batch.get("logical_axioms"),
                 "declared_classes": stats["declared_classes"],

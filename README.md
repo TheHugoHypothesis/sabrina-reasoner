@@ -27,7 +27,7 @@ Run the cross-reasoner audit after building SABRINA. It requires Java 17 or late
 python3 benchmarks/sabrina-vs-reasoners/run_boundary_audit.py --out /tmp/boundary_audit.json
 ```
 
-The [benchmark sources](benchmarks/sabrina-vs-reasoners/) and [recorded results](results/) are included. The results cover all six benchmark tracks and the boundary audit.
+The [benchmark guide](benchmarks/sabrina-vs-reasoners/README.md) explains how to rerun all six tracks with the original workloads and pinned inputs. The [recorded results](results/) include all six tracks and the boundary audit.
 
 ## Citation and license
 
