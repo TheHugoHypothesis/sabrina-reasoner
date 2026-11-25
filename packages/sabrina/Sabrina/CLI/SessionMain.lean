@@ -3,6 +3,7 @@ import Sabrina.OWL2.FunctionalSyntax
 import Sabrina.OWL2.RDF.OWLMapping
 import Sabrina.OWL2.Normalize
 import Sabrina.OWL2.Profile
+import Sabrina.OWL2.FastLocality
 import Sabrina.OWL2.EL
 import Sabrina.OWL2.IncrementalABox
 import Sabrina.OWL2.Classification
@@ -38,6 +39,7 @@ private structure SessionState where
   prefixes : PrefixMap := []
   declarations : List EntityDecl := []
   baseOnt : Ontology := []
+  baseIndex : Option FastLocality.LocalityIndex := none
   fullFragment : Fragment := .el
   elState : Option IncrementalState := none
   -- Active ABox assertions stored by caller string ID → (numeric Tag, Axiom)
@@ -85,8 +87,11 @@ private def parseLimitsField (obj : Std.TreeMap.Raw String Json compare) : Limit
 private def currentMode (st : SessionState) : String :=
   if st.elState.isSome && st.sroiqdOnlyCount == 0 then "el-incremental" else "sroiqd-cached"
 
+private def activeABox (st : SessionState) : Ontology :=
+  st.aboxByName.map (fun (_, _, ax) => ax)
+
 private def activeOnt (st : SessionState) : Ontology :=
-  st.baseOnt ++ st.aboxByName.map (fun (_, _, ax) => ax)
+  st.baseOnt ++ activeABox st
 
 private def verdictName : InclusionVerdict → String
   | .entailed => "ENTAILED"
@@ -167,6 +172,7 @@ private def handleLoadTBox (obj : Std.TreeMap.Raw String Json compare) : Session
     prefixes := prefixes
     declarations := closure.declarations
     baseOnt := ont
+    baseIndex := some (FastLocality.LocalityIndex.build ont)
     fullFragment := frag
     elState := elState
     nextTag := 1
@@ -267,9 +273,13 @@ private def handleCheckConsistency (st : SessionState) (obj : Std.TreeMap.Raw St
             ("ok", toJson true), ("cmd", toJson "check_consistency"),
             ("verdict", toJson "INCONSISTENT_ONTOLOGY"), ("lean_verified", toJson true),
             ("mode", toJson "el-incremental"), ("certificate", encodeABoxProof pf)]
-  -- Cached SROIQ(D) path: extract ⊥-local module (provably equisatisfiable via Profile.extractBotModule_sat_iff)
+  -- Cached SROIQ(D) path: extract ⊥-local module (provably equisatisfiable via FastLocality.extractBotModuleWithIndex_sat_iff)
   let ont := activeOnt st
-  let mod := (extractBotModule ont Sig.empty).1
+  let mod := match st.baseIndex with
+    | some baseIdx =>
+      let idx := if st.aboxByName.isEmpty then baseIdx else baseIdx.extend (activeABox st)
+      (FastLocality.extractBotModuleWithIndex idx ont Sig.empty).1
+    | none => (FastLocality.extractBotModuleFast ont Sig.empty).1
   let some (_, p) := normalizeWithDefs mod | return Json.mkObj [
     ("ok", toJson false), ("verdict", toJson "UNSUPPORTED"), ("lean_verified", toJson false),
     ("reason", toJson "active ontology outside normalized SROIQ(D)")]
@@ -346,7 +356,11 @@ private def handleQuery (st : SessionState) (obj : Std.TreeMap.Raw String Json c
       | _ => pure ()
   -- General cached SROIQ(D) path over ⊥-local module of (baseOnt ++ activeABox)
   let ont := activeOnt st
-  let qp := profileQuery ont (some qAx)
+  let qp := match st.baseIndex with
+    | some baseIdx =>
+      let idx := if st.aboxByName.isEmpty then baseIdx else baseIdx.extend (activeABox st)
+      FastLocality.profileQueryWithIndex idx ont (some qAx)
+    | none => FastLocality.profileQueryFast ont (some qAx)
   let some (defs, p) := normalizeWithDefs qp.extractedModule | return Json.mkObj [
     ("ok", toJson false), ("verdict", toJson "UNSUPPORTED"), ("lean_verified", toJson false),
     ("reason", toJson "active ontology outside normalized SROIQ(D)")]

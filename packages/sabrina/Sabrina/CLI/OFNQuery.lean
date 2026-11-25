@@ -5,6 +5,7 @@ import Sabrina.OWL2.Normalize
 import Sabrina.OWL2.StrictOWL2DL
 import Sabrina.OWL2.StrictTyping
 import Sabrina.OWL2.Profile
+import Sabrina.OWL2.FastLocality
 import Sabrina.OWL2.EL
 import Sabrina.OWL2.Classification
 import Sabrina.OWL2.SROIQD.Termination.SourceImportConformance
@@ -228,7 +229,7 @@ private def runConsistency (id ofnText : String) (lib : List (IRI × String))
   let context := if strictOwl2DL then
       ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: baseContext
     else baseContext
-  let qp := profileQuery ont none
+  let qp := FastLocality.profileQueryFast ont none
   -- Fast path: polynomial EL++ consequence-based classifier
   if qp.moduleFragment == .el then
     if let some elAxs := normalizeEL ont then
@@ -345,7 +346,7 @@ private def runQuery (id ofnText queryText : String) (lib : List (IRI × String)
   let context := if strictOwl2DL then
       ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: baseContext
     else baseContext
-  let qp := profileQuery ont (some qAx)
+  let qp := FastLocality.profileQueryFast ont (some qAx)
   let tryGrounding := fun () =>
     if strictOwl2DL then none else tryObjectSubclass ofnText queryText lib qp context
   -- Validate global OWL 2 DL structural/role restrictions on the full ontology

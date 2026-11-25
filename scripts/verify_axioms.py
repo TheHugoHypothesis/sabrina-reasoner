@@ -21,6 +21,7 @@ HEADLINE_MODULES = [
     "Sabrina.OWL2.RDF.OWLMapping",
     "Sabrina.OWL2.SROIQD.Termination.ExtendedQueryDecision",
     "Sabrina.OWL2.Classification",
+    "Sabrina.OWL2.FastLocality",
     "Sabrina.OWL2.SROIQD.Termination.ObjectHierarchyBoundary",
     "Sabrina.OWL2.SROIQD.Termination.RegularObjectDecision",
     "Sabrina.OWL2.SROIQD.Termination.RegularOWL2DLDecision",
@@ -58,6 +59,11 @@ HEADLINE_THEOREMS = [
     "Sabrina.OWL2.Classification.classifyOntologyWith_sound_complete",
     "Sabrina.OWL2.Classification.classifyOntologyReal_sound_complete",
     "Sabrina.OWL2.Classification.realizeOntologyReal_sound_complete",
+    "Sabrina.OWL2.FastLocality.isBotLocalAxiom_antitone",
+    "Sabrina.OWL2.FastLocality.extractBotModule_least",
+    "Sabrina.OWL2.FastLocality.extractBotModuleFast_mem_iff",
+    "Sabrina.OWL2.FastLocality.extractBotModuleFast_sat_iff",
+    "Sabrina.OWL2.FastLocality.extractBotModuleFast_entails_iff",
 ]
 
 

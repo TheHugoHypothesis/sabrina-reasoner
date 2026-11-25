@@ -1056,12 +1056,12 @@ theorem isBotLocalAxiom_sound {d : DatatypeMap} (i : Interpretation d) (σ : Sig
 
 /-! ### Syntactic ⊥-locality module extractor & conservativity theorems -/
 
-private def extractStep (rem : Ontology) (σ : Sig) : Ontology × Ontology × Sig :=
+def extractStep (rem : Ontology) (σ : Sig) : Ontology × Ontology × Sig :=
   rem.foldl (fun (added, kept, s) a =>
     if isBotLocalAxiom s a then (added, a :: kept, s)
     else (a :: added, kept, s.union (axiomSig a))) ([], [], σ)
 
-private theorem extractStep_props (rem : Ontology) (σ : Sig) :
+theorem extractStep_props (rem : Ontology) (σ : Sig) :
     let res := extractStep rem σ
     res.1.length + res.2.1.length = rem.length ∧
     σ.Subset res.2.2 ∧
@@ -1165,7 +1165,7 @@ private theorem extractStep_props (rem : Ontology) (σ : Sig) :
   · intro a ha; exact (had a ha).elim (fun h => nomatch h) id
   · intro a ha; exact (hkp a ha).elim (fun h => nomatch h) id
 
-private def extractLoop (picked rem : Ontology) (σ : Sig) : Ontology × Sig :=
+def extractLoop (picked rem : Ontology) (σ : Sig) : Ontology × Sig :=
   let res := extractStep rem σ
   if h : res.1.isEmpty then
     (picked.reverse, σ)

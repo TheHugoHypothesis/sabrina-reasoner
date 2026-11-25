@@ -17,5 +17,6 @@ import Sabrina.OWL2.WellFormed
 import Sabrina.OWL2.StrictOWL2DL
 import Sabrina.OWL2.StrictTyping
 import Sabrina.OWL2.Profile
+import Sabrina.OWL2.FastLocality
 import Sabrina.OWL2.EL
 import Sabrina.OWL2.IncrementalABox
