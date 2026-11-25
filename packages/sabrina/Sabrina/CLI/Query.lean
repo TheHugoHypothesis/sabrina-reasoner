@@ -333,6 +333,9 @@ where
 private structure CliConfig where
   strictOwl2DL : Bool := false
   extraLib : List (Sabrina.OWL2.IRI × String) := []
+  classifyInput : Option String := none
+  summaryOnly : Bool := false
+  workers : Nat := 8
   materializeInput : Option String := none
   explainInput : Option String := none
   explainQuery : Option String := none
@@ -358,6 +361,17 @@ private def parseCliArgs (args : List String) : IO (Except String CliConfig) := 
       match ← ImportCatalog.loadImportDir (System.FilePath.mk dir) with
       | .ok lib => cfg := { cfg with extraLib := cfg.extraLib ++ lib }
       | .error err => return .error err
+      rest := tail
+    | "--classify" :: path :: tail =>
+      cfg := { cfg with classifyInput := some path }
+      rest := tail
+    | "--summary-only" :: tail =>
+      cfg := { cfg with summaryOnly := true }
+      rest := tail
+    | "--workers" :: nStr :: tail =>
+      match nStr.toNat? with
+      | some n => cfg := { cfg with workers := max 1 n }
+      | none => return .error s!"expected natural number for --workers, got '{nStr}'"
       rest := tail
     | "--materialize" :: path :: tail =>
       cfg := { cfg with materializeInput := some path }
@@ -388,7 +402,7 @@ private def parseCliArgs (args : List String) : IO (Except String CliConfig) := 
       cfg := { cfg with matOpts := { cfg.matOpts with includeAllSubClass := true, includeAllTypes := true } }
       rest := tail
     | flag :: _ =>
-      return .error s!"unknown or incomplete CLI flag: {flag} (supported: --strict-owl2dl, --catalog <path>, --import-dir <dir>, --materialize <in>, --explain <in>, --query <ofn>, --max-justifications <n>, -o <out>, --format <ofn|ttl|rdfxml>, --inferred-only, --all-inferred)"
+      return .error s!"unknown or incomplete CLI flag: {flag} (supported: --strict-owl2dl, --catalog <path>, --import-dir <dir>, --classify <in>, --summary-only, --workers <n>, --materialize <in>, --explain <in>, --query <ofn>, --max-justifications <n>, -o <out>, --format <ofn|ttl|rdfxml>, --inferred-only, --all-inferred)"
     | [] => break
   return .ok cfg
 
@@ -398,6 +412,16 @@ def run (args : List String) : IO UInt32 := do
     | .error err =>
       IO.println (response "UNSUPPORTED" false [("reason", toJson err)]).compress
       return 2
+  if let some inPath := cfg.classifyInput then
+    let docText ← try
+        IO.FS.readFile (System.FilePath.mk inPath)
+      catch e =>
+        IO.println (response "UNSUPPORTED" false [("reason", toJson s!"failed to read '{inPath}': {e}")]).compress
+        return 2
+    let (code, outJson) := OFNQuery.runClassifyDocument inPath docText
+      cfg.extraLib cfg.strictOwl2DL cfg.workers cfg.summaryOnly
+    IO.println outJson.compress
+    return code
   if let some inPath := cfg.explainInput then
     let docText ← try
         IO.FS.readFile (System.FilePath.mk inPath)

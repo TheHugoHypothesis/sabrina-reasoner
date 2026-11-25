@@ -2,7 +2,7 @@
 
 SABRINA is a Lean 4 reasoner for SROIQ(D) and OWL 2 DL. This repository accompanies Hugo Cardoso Ferreira de Araújo’s *Cycles at the Edge of Decidability: SABRINA, a Kernel-Verified SROIQ(D) OWL 2 DL Reasoner*.
 
-The decision procedure is proved sound and complete for admitted inputs under SABRINA’s Direct Semantics with zero `sorry` and no custom axioms. It covers all 16 OWL 2 class constructors, TBox/RBox/ABox reasoning, regular and dependency-acyclic role hierarchies, 33 XML Schema and OWL datatypes (including Unicode 17.0.0 XSD 1.1 regular expressions and Exclusive XML Canonicalization), OWL 2 Functional-Style Syntax, RDF/XML 1.1, Turtle 1.1, OASIS XML import catalogs, strict W3C §5.8.1–§5.8.2 and §11.2 validation (`--strict-owl2dl`), single-pass $\mathcal{EL}^{++}$ and Enhanced Traversal TBox classification, ABox realization, inferred ontology materialization (`--materialize` to `.ofn`, `.ttl`, and `.owl`), minimal entailment/inconsistency justifications (`--explain`), and hash-indexed $\bot$-locality module extraction. The formalization also characterizes which role hierarchies the compiler can rank and reduces context-free grammar intersection emptiness to satisfiability under the literal pairwise reading of OWL 2 sections 11.1 and 11.2.
+The decision procedure is proved sound and complete for admitted inputs under SABRINA’s Direct Semantics with zero `sorry` and no custom axioms. It covers all 16 OWL 2 class constructors, TBox/RBox/ABox reasoning, regular and dependency-acyclic role hierarchies, 33 XML Schema and OWL datatypes (including Unicode 17.0.0 XSD 1.1 regular expressions and Exclusive XML Canonicalization), OWL 2 Functional-Style Syntax, RDF/XML 1.1, Turtle 1.1, OASIS XML import catalogs, strict W3C §5.8.1–§5.8.2 and §11.2 validation (`--strict-owl2dl`), parallel single-model $\mathcal{EL}^{++}$ (`FastEL.lean`) and Enhanced Traversal TBox classification (`--classify`), ABox realization, inferred ontology materialization (`--materialize` to `.ofn`, `.ttl`, and `.owl`), minimal entailment/inconsistency justifications (`--explain`), and hash-indexed $\bot$-locality module extraction. The formalization also characterizes which role hierarchies the compiler can rank and reduces context-free grammar intersection emptiness to satisfiability under the literal pairwise reading of OWL 2 sections 11.1 and 11.2.
 
 ## Build
 
@@ -14,11 +14,13 @@ python3 scripts/verify_axioms.py
 python3 benchmarks/w3c-owl2-conformance/run_w3c_conformance.py
 python3 benchmarks/fast-locality/bench_snomed_scale.py
 python3 benchmarks/fast-locality/bench_fast_classification.py
+python3 benchmarks/fast-locality/bench_fast_el_scale.py
 ```
 
-The default build checks [Verification.lean](Verification.lean) and builds `sabrina-query` and `sabrina-session`. The axiom script scans both packages and checks kernel axiom dependencies for 48 headline theorems. To materialize an inferred ontology or compute minimal justifications directly:
+The default build checks [Verification.lean](Verification.lean) and builds `sabrina-query` and `sabrina-session`. The axiom script scans both packages and checks kernel axiom dependencies for 55 headline theorems. To classify, materialize an inferred ontology, or compute minimal justifications directly:
 
 ```sh
+.lake/build/bin/sabrina-query --classify input.ofn --summary-only --workers 8
 .lake/build/bin/sabrina-query --materialize input.ttl -o inferred.owl
 .lake/build/bin/sabrina-query --explain input.owl --query "SubClassOf(:A :C)"
 ```

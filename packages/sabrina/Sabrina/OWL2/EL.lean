@@ -493,11 +493,44 @@ private def normAxiom (a : Axiom) (st : NormState) : Option NormState :=
     some { st with axs := .roleRefl rn :: st.axs }
   | _ => none
 
+private def classExprHasReservedELPrefix : ClassExpr → Bool
+  | .named c => c.startsWith elAuxPrefix
+  | .complement c => classExprHasReservedELPrefix c
+  | .intersection a b | .union a b =>
+    classExprHasReservedELPrefix a || classExprHasReservedELPrefix b
+  | .objectSome r c | .objectAll r c | .objectMin _ r c | .objectMax _ r c | .objectExact _ r c =>
+    (objPropIRI r).startsWith elRoleAuxPrefix || classExprHasReservedELPrefix c
+  | .objectValue r _ | .objectSelf r => (objPropIRI r).startsWith elRoleAuxPrefix
+  | _ => false
+
+private def axiomHasReservedELPrefix : Axiom → Bool
+  | .subClassOf a b => classExprHasReservedELPrefix a || classExprHasReservedELPrefix b
+  | .equivalentClasses cs | .disjointClasses cs => cs.any classExprHasReservedELPrefix
+  | .disjointUnion h cs => h.startsWith elAuxPrefix || cs.any classExprHasReservedELPrefix
+  | .subObjectProperty r s | .inverseObjectProperties r s =>
+    (objPropIRI r).startsWith elRoleAuxPrefix || (objPropIRI s).startsWith elRoleAuxPrefix
+  | .subObjectPropertyChain rs s =>
+    rs.any (fun r => (objPropIRI r).startsWith elRoleAuxPrefix) || (objPropIRI s).startsWith elRoleAuxPrefix
+  | .equivalentObjectProperties rs | .disjointObjectProperties rs =>
+    rs.any (fun r => (objPropIRI r).startsWith elRoleAuxPrefix)
+  | .objectPropertyDomain r c | .objectPropertyRange r c =>
+    (objPropIRI r).startsWith elRoleAuxPrefix || classExprHasReservedELPrefix c
+  | .functionalObjectProperty r | .inverseFunctionalObjectProperty r
+  | .reflexiveObjectProperty r | .irreflexiveObjectProperty r
+  | .symmetricObjectProperty r | .asymmetricObjectProperty r
+  | .transitiveObjectProperty r => (objPropIRI r).startsWith elRoleAuxPrefix
+  | .dataPropertyDomain _ c | .classAssertion c _ => classExprHasReservedELPrefix c
+  | .hasKey c rs _ =>
+    classExprHasReservedELPrefix c || rs.any (fun r => (objPropIRI r).startsWith elRoleAuxPrefix)
+  | .objectAssertion r _ _ | .negativeObjectAssertion r _ _ =>
+    (objPropIRI r).startsWith elRoleAuxPrefix
+  | _ => false
+
 /-- Normalize an EL++ `Ontology` (provided no input symbol starts with the
-    reserved internal auxiliary prefixes). Returns the normalized `ELAxiom` list. -/
+    reserved internal auxiliary prefixes). Returns the normalized `ELAxiom` list.
+    Runs in linear `O(|o|)` time without quadratic signature deduplication. -/
 def normalizeEL (o : Ontology) : Option (List ELAxiom) := do
-  let sig := ontologySig o
-  if sig.cls.any (·.startsWith elAuxPrefix) || sig.obj.any (·.startsWith elRoleAuxPrefix) then
+  if o.any axiomHasReservedELPrefix then
     none
   let st ← o.foldlM (fun acc a => normAxiom a acc) {}
   some st.axs.reverse

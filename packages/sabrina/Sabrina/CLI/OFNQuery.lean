@@ -541,12 +541,11 @@ private def parseServiceRequest (j : Json) (cliStrict : Bool) (extraLib : List (
     return (id, docText, lib ++ extraLib, opts.strictOwl2DL)
   | _ => throw "expected [format, id, ontologyText, (optional importsObj), (optional optionsObj)]"
 
-/-- Certified full TBox classification CLI handler (`sabrina-classify-v1`). -/
-def runClassify (j : Json) (cliStrict : Bool := false)
-    (extraLib : List (IRI × String) := []) : UInt32 × Json := Id.run do
-  let (id, docText, lib, strict) ← match parseServiceRequest j cliStrict extraLib with
-    | .ok r => pure r
-    | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson err)])
+/-- Classify an OWL 2 document (FSS, RDF/XML, or Turtle) directly from CLI `--classify`.
+    When `summaryOnly = true`, uses the compact parallel $\mathcal{EL}^{++}$ engine
+    when applicable and outputs compact counts without serializing millions of JSON strings. -/
+def runClassifyDocument (id docText : String) (lib : List (IRI × String))
+    (strict : Bool) (numWorkers : Nat := 8) (summaryOnly : Bool := false) : UInt32 × Json := Id.run do
   let scope := Json.mkObj [("semantics", toJson "owl2-classify-v1"), ("id", toJson id)]
   let closure ← match RDF.OWLMapping.resolveImportClosureAuto docText lib strict with
     | .ok r => pure r
@@ -556,14 +555,51 @@ def runClassify (j : Json) (cliStrict : Bool := false)
       return (2, response "UNSUPPORTED" false [
         ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
         ("reason", toJson err), ("scope", scope)])
-  match FastClassification.classifyOntologyFastRuntime closure.ontology closure.declarations with
+  if summaryOnly then
+    if let some ch := FastClassification.classifyOntologyCompactELRuntime closure.ontology closure.declarations numWorkers then
+      let verdict := if ch.consistent then "CLASSIFIED" else "INCONSISTENT_ONTOLOGY"
+      let subCount := ch.superClasses.foldl (fun acc arr => acc + arr.size) 0
+      let dpCount := ch.directParents.foldl (fun acc arr => acc + if arr.isEmpty then 1 else arr.size) 0
+      let summary := Json.mkObj [
+        ("consistent", toJson ch.consistent),
+        ("engine", toJson "fast-el-parallel"),
+        ("workers", toJson numWorkers),
+        ("class_count", toJson ch.classes.size),
+        ("unsatisfiable_count", toJson ch.unsatisfiable.size),
+        ("subsumption_count", toJson subCount),
+        ("equivalence_count", toJson ch.equivalences.size),
+        ("direct_parent_edges", toJson dpCount)]
+      let base := [("classification_summary", summary), ("scope", scope)]
+      let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: base else base
+      return (0, response verdict true fields)
+  match FastClassification.classifyOntologyFastRuntime closure.ontology closure.declarations numWorkers with
   | some hier =>
     let verdict := if hier.consistent then "CLASSIFIED" else "INCONSISTENT_ONTOLOGY"
-    let base := [("classification", encodeClassHierarchy hier), ("scope", scope)]
+    let base := if summaryOnly then
+        let summary := Json.mkObj [
+          ("consistent", toJson hier.consistent),
+          ("engine", toJson "hybrid-fast"),
+          ("workers", toJson numWorkers),
+          ("class_count", toJson hier.classes.length),
+          ("unsatisfiable_count", toJson hier.unsatisfiable.length),
+          ("subsumption_count", toJson hier.subsumptions.length),
+          ("equivalence_count", toJson hier.equivalences.length),
+          ("direct_parent_edges", toJson (hier.directParents.foldl (fun acc (_, ps) => acc + ps.length) 0))]
+        [("classification_summary", summary), ("scope", scope)]
+      else
+        [("classification", encodeClassHierarchy hier), ("scope", scope)]
     let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: base else base
     return (0, response verdict true fields)
   | none =>
     return (2, response "UNSUPPORTED" false [("reason", toJson "ontology outside exact classification fragment"), ("scope", scope)])
+
+/-- Certified full TBox classification CLI handler (`sabrina-classify-v1`). -/
+def runClassify (j : Json) (cliStrict : Bool := false)
+    (extraLib : List (IRI × String) := []) : UInt32 × Json := Id.run do
+  let (id, docText, lib, strict) ← match parseServiceRequest j cliStrict extraLib with
+    | .ok r => pure r
+    | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson err)])
+  return runClassifyDocument id docText lib strict 8 false
 
 /-- Certified ABox realization CLI handler (`sabrina-realize-v1`). -/
 def runRealize (j : Json) (cliStrict : Bool := false)

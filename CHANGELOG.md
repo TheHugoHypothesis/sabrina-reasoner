@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Parallel, integer-interned, kernel-verified $\mathcal{EL}^{++}$ classifier (`FastEL.lean`) using `Task.spawn` context-sharded BSP saturation, parallel $O(|S| + |R|)$ rank-stratified soundness verification (`checkCertSound_entails_sub`, `checkCertSound_inconsistent`), parallel $O(|\mathcal{O}| + |S| + |R|)$ single global canonical model completeness verification (`checkCanonicalModel_sound`, `checkCanonicalModel_counter_sub`), and parallel sparse transitive reduction (`classifyFastELCore_sound_complete`, `classifyFastELToHierarchy_sound_complete`).
+- CLI file-mode classification flags `sabrina-query --classify <in> [--summary-only] [--workers <n>]`, unit/cross-check suite (`FastELTests.lean`), and 1k–350k class scale benchmark (`benchmarks/fast-locality/bench_fast_el_scale.py`, 350,000 classes / 487,495 axioms / 8.41M subsumptions certified in 8.25 s).
+
+### Changed
+- Replaced quadratic `List.contains` deduplication in `Classification.dedupIRIs` with $O(N)$ `Std.HashSet` deduplication and replaced quadratic `ontologySig` scanning in `EL.normalizeEL` with a linear structural prefix check.
+
 ## 1.1.0 (2026-11-25)
 
 ### Added

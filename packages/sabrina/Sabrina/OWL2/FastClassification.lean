@@ -3,6 +3,7 @@ import Std.Data.HashMap
 import Sabrina.OWL2.Classification
 import Sabrina.OWL2.FastLocality
 import Sabrina.OWL2.EL
+import Sabrina.OWL2.FastEL
 
 /-! Kernel-verified fast OWL 2 DL ontology classification:
     1. **Single-pass polynomial $\mathcal{EL}^{++}$ classification** (`classifyELSinglePass`,
@@ -755,9 +756,14 @@ theorem directELNormalize_models_iff {dm : DatatypeMap} (i : Interpretation dm)
     models i o ↔ models i (elOntology axs) :=
   exists_congr fun assign => directELNormalize_satisfies_iff (i.withAnonymous assign) h
 
-/-- Certified single-pass polynomial $\mathcal{EL}^{++}$ classifier directly on OWL 2 `Ontology`. -/
+/-- Certified parallel polynomial $\mathcal{EL}^{++}$ classifier directly on OWL 2 `Ontology`.
+    Dispatches to the parallel integer-interned single-model engine (`FastEL.classifyFastELToHierarchy`)
+    and falls back to `classifyELSinglePass` only if built-in top/bottom object properties appear. -/
 def classifyDirectEL (o : Ontology) (namedClasses : List IRI) : Option ClassHierarchy :=
-  (directELNormalize o).bind fun axs => classifyELSinglePass axs namedClasses
+  (directELNormalize o).bind fun axs =>
+    match FastEL.classifyFastELToHierarchy axs namedClasses with
+    | some h => some h
+    | none => classifyELSinglePass axs namedClasses
 
 theorem classifyDirectEL_sound_complete {dm : DatatypeMap}
     {o : Ontology} {namedClasses : List IRI} {h : ClassHierarchy}
@@ -774,7 +780,21 @@ theorem classifyDirectEL_sound_complete {dm : DatatypeMap}
     exists_congr fun i => directELNormalize_models_iff i hnorm
   have hentEq : ∀ q, Entails dm o q ↔ Entails dm (elOntology axs) q := fun q =>
     forall_congr' fun i => imp_congr (directELNormalize_models_iff i hnorm) Iff.rfl
-  obtain ⟨h1, h2⟩ := classifyELSinglePass_sound_complete (dm := dm) hel
+  have hEL :
+      (h.consistent = false → ¬ Satisfiable dm (elOntology axs)) ∧
+      (h.consistent = true →
+        Satisfiable dm (elOntology axs) ∧
+        (∀ c, c ∈ h.unsatisfiable ↔ c ∈ namedClasses ∧ Entails dm (elOntology axs) [.subClassOf (.named c) (.named nothing)]) ∧
+        (∀ a b, (a, b) ∈ h.subsumptions ↔
+          a ∈ namedClasses ∧ b ∈ namedClasses ∧ Entails dm (elOntology axs) [.subClassOf (.named a) (.named b)])) := by
+    cases hfast : FastEL.classifyFastELToHierarchy axs namedClasses with
+    | some h0 =>
+      rw [hfast] at hel; simp only [Option.some.injEq] at hel; subst hel
+      exact FastEL.classifyFastELToHierarchy_sound_complete (dm := dm) hfast
+    | none =>
+      rw [hfast] at hel
+      exact classifyELSinglePass_sound_complete (dm := dm) hel
+  obtain ⟨h1, h2⟩ := hEL
   refine ⟨fun hf hs => h1 hf (hsatEq.mp hs), fun ht => ?_⟩
   obtain ⟨hs, hu, hsub⟩ := h2 ht
   refine ⟨hsatEq.mpr hs, fun c => by rw [hu c, hentEq], fun a b => by rw [hsub a b, hentEq]⟩
@@ -1838,14 +1858,33 @@ theorem classifyEnhancedStd_sound_complete {o : Ontology} {namedClasses : List I
         · cases hp
       · cases hp
 
+/-- Fast parallel compact $\mathcal{EL}^{++}$ classifier for 100k–350k class ontologies:
+    returns `FastEL.CompactELHierarchy` without materializing flat `List (IRI × IRI)`
+    subsumption pairs. -/
+def classifyOntologyCompactELRuntime (o : Ontology)
+    (decls : List FunctionalSyntax.EntityDecl := []) (numWorkers : Nat := 8) :
+    Option FastEL.CompactELHierarchy :=
+  let namedClasses := collectNamedClasses o decls
+  let fp := profileOntology o
+  if fp.leastFragment == .el then
+    match normalizeEL o with
+    | some elAxs =>
+      if checkELRegular elAxs then
+        FastEL.classifyFastEL elAxs namedClasses numWorkers
+      else none
+    | none => none
+  else none
+
 /-- Fast hybrid runtime TBox classifier:
-    1. Pure $\mathcal{EL}^{++}$ ontologies: single-pass polynomial `classifyELSinglePass`
-       (1 `saturateEL` pass for the entire ontology instead of `O(n²)` solver calls)
+    1. Pure $\mathcal{EL}^{++}$ ontologies: parallel integer-interned single-model
+       `FastEL.classifyFastELToHierarchy` (falling back to `classifyELSinglePass`
+       only if built-in top/bottom object properties appear).
     2. General $\mathcal{SROIQ}(\mathcal{D})$ ontologies: `classifyEnhancedCore` with
        pre-built `FastLocality.LocalityIndex`, told subsumers + transitive closure,
        monotone sat/unsat sweep, told disjointness pruning, `SROIQDModel` countermodel
        seeding, Enhanced Traversal closure, and `Classification.fastConsistencyCheck`. -/
-def classifyOntologyFastRuntime (o : Ontology) (decls : List FunctionalSyntax.EntityDecl := []) :
+def classifyOntologyFastRuntime (o : Ontology) (decls : List FunctionalSyntax.EntityDecl := [])
+    (numWorkers : Nat := 8) :
     Option ClassHierarchy :=
   let namedClasses := collectNamedClasses o decls
   let fp := profileOntology o
@@ -1853,9 +1892,12 @@ def classifyOntologyFastRuntime (o : Ontology) (decls : List FunctionalSyntax.En
     match normalizeEL o with
     | some elAxs =>
       if checkELRegular elAxs then
-        match classifyELSinglePass elAxs namedClasses with
+        match FastEL.classifyFastELToHierarchy elAxs namedClasses numWorkers with
         | some h => some h
-        | none => classifyEnhancedCore fastConsistencyCheck proposeInitModelPairs (fun _ _ _ => []) o namedClasses
+        | none =>
+          match classifyELSinglePass elAxs namedClasses with
+          | some h => some h
+          | none => classifyEnhancedCore fastConsistencyCheck proposeInitModelPairs (fun _ _ _ => []) o namedClasses
       else
         classifyEnhancedCore fastConsistencyCheck proposeInitModelPairs (fun _ _ _ => []) o namedClasses
     | none => classifyEnhancedCore fastConsistencyCheck proposeInitModelPairs (fun _ _ _ => []) o namedClasses

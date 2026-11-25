@@ -25,9 +25,14 @@ open Sabrina.OWL2.SROIQD.Termination.ExtendedQuery
 
 /-! ### 1. Named Class & Named Individual Extraction -/
 
-private def dedupIRIs : List IRI → List IRI
-  | [] => []
-  | x :: xs => if xs.contains x then dedupIRIs xs else x :: dedupIRIs xs
+private def dedupIRIs (xs : List IRI) : List IRI := Id.run do
+  let mut seen : Std.HashSet IRI := {}
+  let mut out : Array IRI := #[]
+  for x in xs do
+    if !seen.contains x then
+      seen := seen.insert x
+      out := out.push x
+  return out.toList
 
 /-- Collect all non-built-in named classes appearing in `o` or explicit `decls`. -/
 def collectNamedClasses (o : Ontology) (decls : List FunctionalSyntax.EntityDecl := []) : List IRI :=
