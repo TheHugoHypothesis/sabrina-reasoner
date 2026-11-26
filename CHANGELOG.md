@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.1 (2026-11-26)
 
 ### Added
 - Parallel, integer-interned, kernel-verified $\mathcal{EL}^{++}$ classifier (`FastEL.lean`) using `Task.spawn` context-sharded BSP saturation, parallel $O(|S| + |R|)$ rank-stratified soundness verification (`checkCertSound_entails_sub`, `checkCertSound_inconsistent`), parallel $O(|\mathcal{O}| + |S| + |R|)$ single global canonical model completeness verification (`checkCanonicalModel_sound`, `checkCanonicalModel_counter_sub`), and parallel sparse transitive reduction (`classifyFastELCore_sound_complete`, `classifyFastELToHierarchy_sound_complete`).
