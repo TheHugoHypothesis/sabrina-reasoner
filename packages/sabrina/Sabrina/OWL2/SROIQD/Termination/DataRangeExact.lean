@@ -62,6 +62,16 @@ namespace Termination
 
 /-! ### 2. Exact integer interval difference and bounded sampling -/
 
+def isNonEmptyBounds (b : IntegerBounds) : Bool :=
+  match b.lower, b.upper with
+  | some lo, some hi => decide (lo ≤ hi)
+  | _, _ => true
+
+private theorem isNonEmptyBounds_of_contains {b : IntegerBounds} {z : Int}
+    (h : b.contains z) : isNonEmptyBounds b = true := by
+  rcases b with ⟨lo, hi⟩
+  cases lo <;> cases hi <;> simp [isNonEmptyBounds, IntegerBounds.contains] at h ⊢ <;> omega
+
 def subtractBoundsOne (cur neg : IntegerBounds) : List IntegerBounds :=
   let left : List IntegerBounds :=
     match neg.lower with
@@ -79,14 +89,20 @@ def subtractBoundsOne (cur neg : IntegerBounds) : List IntegerBounds :=
            | none => some (nhi + 1)
            | some clo => some (max clo (nhi + 1)),
          upper := cur.upper }]
-  left ++ right
+  (left ++ right).filter isNonEmptyBounds
 
 theorem mem_subtractBoundsOne_iff (cur neg : IntegerBounds) (z : Int) :
     (∃ b ∈ subtractBoundsOne cur neg, b.contains z) ↔ (cur.contains z ∧ ¬ neg.contains z) := by
+  have hfilt : ∀ xs : List IntegerBounds,
+      (∃ b ∈ xs.filter isNonEmptyBounds, b.contains z) ↔ (∃ b ∈ xs, b.contains z) := fun xs =>
+    ⟨fun ⟨b, hb, hz⟩ => ⟨b, (List.mem_filter.mp hb).1, hz⟩,
+     fun ⟨b, hb, hz⟩ => ⟨b, List.mem_filter.mpr ⟨hb, isNonEmptyBounds_of_contains hz⟩, hz⟩⟩
+  unfold subtractBoundsOne
+  rw [hfilt]
   rcases cur with ⟨clo, chi⟩
   rcases neg with ⟨nlo, nhi⟩
   cases clo <;> cases chi <;> cases nlo <;> cases nhi <;>
-    simp [subtractBoundsOne, IntegerBounds.contains] <;> omega
+    simp [IntegerBounds.contains] <;> omega
 
 def foldSubtractBounds : List IntegerBounds → List IntegerBounds → List IntegerBounds
   | bs, [] => bs
@@ -827,16 +843,24 @@ private theorem repBytes_inj {k₁ k₂ : Nat} (h : repBytes k₁ = repBytes k�
 
 def vennCandidates (K : Nat) (pos neg : List DataRange) : List Value :=
   let M := K + (allOneOfValues neg).length
-  let bools := [Value.boolean false, Value.boolean true]
-  let oneOfs := allOneOfValues pos ++ allOneOfValues neg
-  let ints := (sampleIntSet K (vennIntSet pos neg)).map Value.integer
-  let strs := (List.range M).map fun k => Value.string (repStr k)
-  let uris := (List.range M).map fun k => Value.anyURI (repStr k)
-  let xmls := (List.range M).map fun k => Value.xmlLiteral (repStr k)
-  let hexs := (List.range M).map fun k => Value.hexBinary (repBytes k)
-  let b64s := (List.range M).map fun k => Value.base64Binary (repBytes k)
-  let rats := (List.range M).map ratWitness
-  bools ++ oneOfs ++ ints ++ strs ++ uris ++ xmls ++ hexs ++ b64s ++ rats
+  if pos.any (fun | .oneOf _ => true | _ => false) then
+    allOneOfValues pos
+  else if pos.any (fun a => (extractIntAtomBounds a).isSome) then
+    (sampleIntSet K (vennIntSet pos neg)).map Value.integer
+  else if pos.any (fun a => a == .datatype (xsd "boolean")) then
+    [Value.boolean false, Value.boolean true]
+  else if pos.any (fun a => a == .datatype (xsd "string")) then
+    (List.range M).map fun k => Value.string (repStr k)
+  else if pos.any (fun a => a == .datatype (xsd "anyURI")) then
+    (List.range M).map fun k => Value.anyURI (repStr k)
+  else if pos.any (fun a => a == .datatype (rdf "XMLLiteral")) then
+    (List.range M).map fun k => Value.xmlLiteral (repStr k)
+  else if pos.any (fun a => a == .datatype (xsd "hexBinary")) then
+    (List.range M).map fun k => Value.hexBinary (repBytes k)
+  else if pos.any (fun a => a == .datatype (xsd "base64Binary")) then
+    (List.range M).map fun k => Value.base64Binary (repBytes k)
+  else
+    (List.range M).map ratWitness
 
 def samplePartition (K : Nat) (pos neg : List DataRange) : List Value :=
   (((vennCandidates K pos neg).eraseDups).filter (evalPartition pos neg)).take K
@@ -1178,6 +1202,12 @@ private theorem evalPartition_infinite_sort {pos neg : List DataRange}
     · rw [hAtomEq a (hneg a ha) (fun ls h => hone ⟨ls, h⟩)]
       exact hnegEv a ha
 
+private theorem any_eq_false_of_forall {α : Type} {xs : List α} {p : α → Bool}
+    (h : ∀ x ∈ xs, p x = false) : xs.any p = false :=
+  Bool.eq_false_iff.mpr fun ha => by
+    obtain ⟨x, hx, hpx⟩ := List.any_eq_true.mp ha
+    rw [h x hx] at hpx; cases hpx
+
 private theorem cover_of_evalPartition {K : Nat} {pos neg : List DataRange}
     (hpos : ∀ a ∈ pos, isExactAtomicDataRange a = true)
     (hneg : ∀ a ∈ neg, isExactAtomicDataRange a = true)
@@ -1197,20 +1227,57 @@ private theorem cover_of_evalPartition {K : Nat} {pos neg : List DataRange}
     simp [evalAtom] at this
   by_cases honePos : ∃ ls, DataRange.oneOf ls ∈ pos
   · obtain ⟨ls, hls⟩ := honePos
+    have hAnyOne : pos.any (fun | .oneOf _ => true | _ => false) = true :=
+      List.any_eq_true.mpr ⟨.oneOf ls, hls, rfl⟩
     have hmem : v₀ ∈ allOneOfValues pos :=
       mem_allOneOfValues_of_mem hls (evalAtom_oneOf_mem (hposEv (.oneOf ls) hls))
     refine .inr ?_
-    simp only [vennCandidates, List.mem_append]
-    exact .inl (.inl (.inl (.inl (.inl (.inl (.inl (.inr (.inl hmem))))))))
+    simp [vennCandidates, hAnyOne, hmem]
   · have hnoOneOfPos (a : DataRange) (ha : a ∈ pos) (ls : List Literal) : a ≠ .oneOf ls :=
       fun h => honePos ⟨ls, h ▸ ha⟩
+    have hAnyOneFalse : pos.any (fun | .oneOf _ => true | _ => false) = false :=
+      any_eq_false_of_forall fun a ha => by
+        cases a with
+        | oneOf ls => exact (hnoOneOfPos _ ha ls rfl).elim
+        | _ => rfl
+    have hNoIntOfNotNum (hnn : ∀ z, v₀ ≠ .integer z) :
+        pos.any (fun a => (extractIntAtomBounds a).isSome) = false :=
+      any_eq_false_of_forall fun a ha => by
+        cases hb : extractIntAtomBounds a with
+        | none => rfl
+        | some b =>
+          obtain ⟨z, _, heq⟩ := (extractIntAtomBounds_evalAtom_iff hb v₀).mp (hposEv a ha)
+          exact (hnn z heq).elim
+    have hNoDtOfFalse (t : IRI) (hf : evalAtom (.datatype t) v₀ = false) :
+        pos.any (fun a => a == .datatype t) = false :=
+      any_eq_false_of_forall fun a ha => by
+        cases h : (a == .datatype t) with
+        | false => rfl
+        | true =>
+          have hEq := beq_iff_eq.mp h
+          have ht := hposEv a ha
+          rw [hEq, hf] at ht; cases ht
     obtain ⟨a₀, ha₀Mem, ha₀Ne⟩ := ha₀
     have ha₀Ev := hposEv a₀ ha₀Mem
     cases v₀ with
     | boolean b =>
+      have ha₀Eq : a₀ = .datatype (xsd "boolean") := by
+        rcases evalAtom_nonOneOf_cases (hpos a₀ ha₀Mem) (hnoOneOfPos a₀ ha₀Mem) with
+          rfl | rfl | ⟨b', hb'⟩ | rfl | rfl | rfl | rfl | rfl
+        · exact (ha₀Ne rfl).elim
+        · rfl
+        · obtain ⟨z, _, heq⟩ := (extractIntAtomBounds_evalAtom_iff hb' _).mp ha₀Ev; cases heq
+        · cases ha₀Ev
+        · cases ha₀Ev
+        · cases ha₀Ev
+        · cases ha₀Ev
+        · cases ha₀Ev
+      have hIntF := hNoIntOfNotNum (fun _ h => by cases h)
+      have hBoolT : pos.any (fun a => a == .datatype (xsd "boolean")) = true :=
+        List.any_eq_true.mpr ⟨a₀, ha₀Mem, by rw [ha₀Eq]; rfl⟩
       refine .inr ?_
-      simp only [vennCandidates, List.mem_append]
-      exact .inl (.inl (.inl (.inl (.inl (.inl (.inl (.inl (by cases b <;> simp))))))))
+      simp only [vennCandidates, hAnyOneFalse, hIntF, hBoolT, Bool.false_eq_true, ↓reduceIte]
+      cases b <;> simp
     | float _ | double _ | dateTime _ | irrational _ =>
       rcases evalAtom_nonOneOf_cases (hpos a₀ ha₀Mem) (hnoOneOfPos a₀ ha₀Mem) with
         rfl | rfl | ⟨b, hb⟩ | rfl | rfl | rfl | rfl | rfl
@@ -1223,19 +1290,21 @@ private theorem cover_of_evalPartition {K : Nat} {pos neg : List DataRange}
       · cases ha₀Ev
       · cases ha₀Ev
     | number q =>
-      have hqInt : q.den = 1 := by
+      have ⟨b₀, hb₀, hqInt⟩ : ∃ b, extractIntAtomBounds a₀ = some b ∧ q.den = 1 := by
         rcases evalAtom_nonOneOf_cases (hpos a₀ ha₀Mem) (hnoOneOfPos a₀ ha₀Mem) with
           rfl | rfl | ⟨b, hb⟩ | rfl | rfl | rfl | rfl | rfl
         · exact (ha₀Ne rfl).elim
         · cases ha₀Ev
         · obtain ⟨z, _, heq⟩ := (extractIntAtomBounds_evalAtom_iff hb _).mp ha₀Ev
           have hq : q = Rat.ofInt z := Value.number.inj heq
-          subst hq; rfl
+          subst hq; exact ⟨b, hb, rfl⟩
         · cases ha₀Ev
         · cases ha₀Ev
         · cases ha₀Ev
         · cases ha₀Ev
         · cases ha₀Ev
+      have hIntT : pos.any (fun a => (extractIntAtomBounds a).isSome) = true :=
+        List.any_eq_true.mpr ⟨a₀, ha₀Mem, by simp [hb₀]⟩
       have hqEq : Value.number q = Value.integer q.num := by
         simp only [Value.integer]; congr 1; apply Rat.ext <;> simp [hqInt]
       have hposOnlyInt (a : DataRange) (ha : a ∈ pos) :
@@ -1275,15 +1344,15 @@ private theorem cover_of_evalPartition {K : Nat} {pos neg : List DataRange}
         have hmem : q.num ∈ sInts := sampleIntSet_complete_of_lt K _ hlt hqIn
         refine .inr ?_
         rw [hqEq]
-        simp only [vennCandidates, List.mem_append]
-        exact .inl (.inl (.inl (.inl (.inl (.inl (.inr (List.mem_map_of_mem hmem)))))))
+        simp only [vennCandidates, hAnyOneFalse, hIntT, Bool.false_eq_true, ↓reduceIte]
+        exact List.mem_map_of_mem hmem
       · refine .inl ?_
         let xs := sInts.map Value.integer
         have hnd : xs.Nodup := nodup_map_inj
           (fun h => congrArg Rat.num (Value.number.inj h)) (sampleIntSet_nodup K _)
         have hsub : ∀ x ∈ xs, x ∈ vennCandidates K pos neg := fun x hx => by
-          simp only [vennCandidates, List.mem_append]
-          exact .inl (.inl (.inl (.inl (.inl (.inl (.inr hx))))))
+          simp only [vennCandidates, hAnyOneFalse, hIntT, Bool.false_eq_true, ↓reduceIte]
+          exact hx
         have hall : (xs.filter (evalPartition pos neg)).length = xs.length := by
           have hfeq : xs.filter (evalPartition pos neg) = xs :=
             List.filter_eq_self.mpr fun x hx => by
@@ -1295,7 +1364,7 @@ private theorem cover_of_evalPartition {K : Nat} {pos neg : List DataRange}
         have hlen : xs.length = sInts.length := List.length_map Value.integer
         omega
     | plainLiteral s lang =>
-      have hlang : lang = "" := by
+      have ⟨ha₀Eq, hlang⟩ : a₀ = .datatype (xsd "string") ∧ lang = "" := by
         rcases evalAtom_nonOneOf_cases (hpos a₀ ha₀Mem) (hnoOneOfPos a₀ ha₀Mem) with
           rfl | rfl | ⟨b, hb⟩ | rfl | rfl | rfl | rfl | rfl
         · exact (ha₀Ne rfl).elim
@@ -1304,31 +1373,51 @@ private theorem cover_of_evalPartition {K : Nat} {pos neg : List DataRange}
         · have hne : xsd "string" ≠ literalDatatype := by decide
           simp only [evalAtom, beq_false_of_ne hne] at ha₀Ev
           obtain ⟨s', hs'⟩ := (valueSpace_string_iff _).mp ((checkValue_iff _ _).mp ha₀Ev)
-          exact (Value.plainLiteral.inj hs').2
+          exact ⟨rfl, (Value.plainLiteral.inj hs').2⟩
         · cases ha₀Ev
         · cases ha₀Ev
         · cases ha₀Ev
         · cases ha₀Ev
       subst hlang
+      have hIntF := hNoIntOfNotNum (fun _ h => by cases h)
+      have hBoolF := hNoDtOfFalse (xsd "boolean") rfl
+      have hStrT : pos.any (fun a => a == .datatype (xsd "string")) = true :=
+        List.any_eq_true.mpr ⟨a₀, ha₀Mem, by rw [ha₀Eq]; rfl⟩
       refine .inl (infinite_family_ge_K K (fun k => Value.string (repStr k))
         (fun h => repStr_inj (Value.plainLiteral.inj h).1)
         (fun x hx => by
-          simp only [vennCandidates, List.mem_append]
-          exact .inl (.inl (.inl (.inl (.inl (.inr hx))))))
+          simp only [vennCandidates, hAnyOneFalse, hIntF, hBoolF, hStrT, Bool.false_eq_true, ↓reduceIte]
+          exact hx)
         fun k hnb => evalPartition_infinite_sort hpos hneg hnoOneOfPos hnolit
           (fun _ h => by cases h) (fun _ h => by cases h) hnb hposEv hnegEv
           (fun t ht => by rcases ht with rfl | rfl | rfl | rfl | rfl | rfl <;> rfl))
     | anyURI s =>
+      have ha₀Eq : a₀ = .datatype (xsd "anyURI") := by
+        rcases evalAtom_nonOneOf_cases (hpos a₀ ha₀Mem) (hnoOneOfPos a₀ ha₀Mem) with
+          rfl | rfl | ⟨b, hb⟩ | rfl | rfl | rfl | rfl | rfl
+        · exact (ha₀Ne rfl).elim
+        · cases ha₀Ev
+        · obtain ⟨z, _, heq⟩ := (extractIntAtomBounds_evalAtom_iff hb _).mp ha₀Ev; cases heq
+        · cases ha₀Ev
+        · rfl
+        · cases ha₀Ev
+        · cases ha₀Ev
+        · cases ha₀Ev
+      have hIntF := hNoIntOfNotNum (fun _ h => by cases h)
+      have hBoolF := hNoDtOfFalse (xsd "boolean") rfl
+      have hStrF := hNoDtOfFalse (xsd "string") rfl
+      have hUriT : pos.any (fun a => a == .datatype (xsd "anyURI")) = true :=
+        List.any_eq_true.mpr ⟨a₀, ha₀Mem, by rw [ha₀Eq]; rfl⟩
       refine .inl (infinite_family_ge_K K (fun k => Value.anyURI (repStr k))
         (fun h => repStr_inj (Value.anyURI.inj h))
         (fun x hx => by
-          simp only [vennCandidates, List.mem_append]
-          exact .inl (.inl (.inl (.inl (.inr hx)))))
+          simp only [vennCandidates, hAnyOneFalse, hIntF, hBoolF, hStrF, hUriT, Bool.false_eq_true, ↓reduceIte]
+          exact hx)
         fun k hnb => evalPartition_infinite_sort hpos hneg hnoOneOfPos hnolit
           (fun _ h => by cases h) (fun _ h => by cases h) hnb hposEv hnegEv
           (fun t ht => by rcases ht with rfl | rfl | rfl | rfl | rfl | rfl <;> rfl))
     | xmlLiteral s =>
-      have hcanonS : checkValue (rdf "XMLLiteral") (.xmlLiteral s) = true := by
+      have ⟨ha₀Eq, hcanonS⟩ : a₀ = .datatype (rdf "XMLLiteral") ∧ checkValue (rdf "XMLLiteral") (.xmlLiteral s) = true := by
         rcases evalAtom_nonOneOf_cases (hpos a₀ ha₀Mem) (hnoOneOfPos a₀ ha₀Mem) with
           rfl | rfl | ⟨b, hb⟩ | rfl | rfl | rfl | rfl | rfl
         · exact (ha₀Ne rfl).elim
@@ -1337,14 +1426,20 @@ private theorem cover_of_evalPartition {K : Nat} {pos neg : List DataRange}
         · cases ha₀Ev
         · cases ha₀Ev
         · have hne : rdf "XMLLiteral" ≠ literalDatatype := by decide
-          simpa [evalAtom, beq_false_of_ne hne] using ha₀Ev
+          exact ⟨rfl, by simpa [evalAtom, beq_false_of_ne hne] using ha₀Ev⟩
         · cases ha₀Ev
         · cases ha₀Ev
+      have hIntF := hNoIntOfNotNum (fun _ h => by cases h)
+      have hBoolF := hNoDtOfFalse (xsd "boolean") rfl
+      have hStrF := hNoDtOfFalse (xsd "string") rfl
+      have hUriF := hNoDtOfFalse (xsd "anyURI") rfl
+      have hXmlT : pos.any (fun a => a == .datatype (rdf "XMLLiteral")) = true :=
+        List.any_eq_true.mpr ⟨a₀, ha₀Mem, by rw [ha₀Eq]; rfl⟩
       refine .inl (infinite_family_ge_K K (fun k => Value.xmlLiteral (repStr k))
         (fun h => repStr_inj (Value.xmlLiteral.inj h))
         (fun x hx => by
-          simp only [vennCandidates, List.mem_append]
-          exact .inl (.inl (.inl (.inr hx))))
+          simp only [vennCandidates, hAnyOneFalse, hIntF, hBoolF, hStrF, hUriF, hXmlT, Bool.false_eq_true, ↓reduceIte]
+          exact hx)
         fun k hnb => evalPartition_infinite_sort hpos hneg hnoOneOfPos hnolit
           (fun _ h => by cases h) (fun _ h => by cases h) hnb hposEv hnegEv
           (fun t ht => by
@@ -1359,20 +1454,57 @@ private theorem cover_of_evalPartition {K : Nat} {pos neg : List DataRange}
             · rfl
             · rfl))
     | hexBinary bs =>
+      have ha₀Eq : a₀ = .datatype (xsd "hexBinary") := by
+        rcases evalAtom_nonOneOf_cases (hpos a₀ ha₀Mem) (hnoOneOfPos a₀ ha₀Mem) with
+          rfl | rfl | ⟨b, hb⟩ | rfl | rfl | rfl | rfl | rfl
+        · exact (ha₀Ne rfl).elim
+        · cases ha₀Ev
+        · obtain ⟨z, _, heq⟩ := (extractIntAtomBounds_evalAtom_iff hb _).mp ha₀Ev; cases heq
+        · cases ha₀Ev
+        · cases ha₀Ev
+        · cases ha₀Ev
+        · rfl
+        · cases ha₀Ev
+      have hIntF := hNoIntOfNotNum (fun _ h => by cases h)
+      have hBoolF := hNoDtOfFalse (xsd "boolean") rfl
+      have hStrF := hNoDtOfFalse (xsd "string") rfl
+      have hUriF := hNoDtOfFalse (xsd "anyURI") rfl
+      have hXmlF := hNoDtOfFalse (rdf "XMLLiteral") rfl
+      have hHexT : pos.any (fun a => a == .datatype (xsd "hexBinary")) = true :=
+        List.any_eq_true.mpr ⟨a₀, ha₀Mem, by rw [ha₀Eq]; rfl⟩
       refine .inl (infinite_family_ge_K K (fun k => Value.hexBinary (repBytes k))
         (fun h => repBytes_inj (Value.hexBinary.inj h))
         (fun x hx => by
-          simp only [vennCandidates, List.mem_append]
-          exact .inl (.inl (.inr hx)))
+          simp only [vennCandidates, hAnyOneFalse, hIntF, hBoolF, hStrF, hUriF, hXmlF, hHexT, Bool.false_eq_true, ↓reduceIte]
+          exact hx)
         fun k hnb => evalPartition_infinite_sort hpos hneg hnoOneOfPos hnolit
           (fun _ h => by cases h) (fun _ h => by cases h) hnb hposEv hnegEv
           (fun t ht => by rcases ht with rfl | rfl | rfl | rfl | rfl | rfl <;> rfl))
     | base64Binary bs =>
+      have ha₀Eq : a₀ = .datatype (xsd "base64Binary") := by
+        rcases evalAtom_nonOneOf_cases (hpos a₀ ha₀Mem) (hnoOneOfPos a₀ ha₀Mem) with
+          rfl | rfl | ⟨b, hb⟩ | rfl | rfl | rfl | rfl | rfl
+        · exact (ha₀Ne rfl).elim
+        · cases ha₀Ev
+        · obtain ⟨z, _, heq⟩ := (extractIntAtomBounds_evalAtom_iff hb _).mp ha₀Ev; cases heq
+        · cases ha₀Ev
+        · cases ha₀Ev
+        · cases ha₀Ev
+        · cases ha₀Ev
+        · rfl
+      have hIntF := hNoIntOfNotNum (fun _ h => by cases h)
+      have hBoolF := hNoDtOfFalse (xsd "boolean") rfl
+      have hStrF := hNoDtOfFalse (xsd "string") rfl
+      have hUriF := hNoDtOfFalse (xsd "anyURI") rfl
+      have hXmlF := hNoDtOfFalse (rdf "XMLLiteral") rfl
+      have hHexF := hNoDtOfFalse (xsd "hexBinary") rfl
+      have hB64T : pos.any (fun a => a == .datatype (xsd "base64Binary")) = true :=
+        List.any_eq_true.mpr ⟨a₀, ha₀Mem, by rw [ha₀Eq]; rfl⟩
       refine .inl (infinite_family_ge_K K (fun k => Value.base64Binary (repBytes k))
         (fun h => repBytes_inj (Value.base64Binary.inj h))
         (fun x hx => by
-          simp only [vennCandidates, List.mem_append]
-          exact .inl (.inr hx))
+          simp only [vennCandidates, hAnyOneFalse, hIntF, hBoolF, hStrF, hUriF, hXmlF, hHexF, hB64T, Bool.false_eq_true, ↓reduceIte]
+          exact hx)
         fun k hnb => evalPartition_infinite_sort hpos hneg hnoOneOfPos hnolit
           (fun _ h => by cases h) (fun _ h => by cases h) hnb hposEv hnegEv
           (fun t ht => by rcases ht with rfl | rfl | rfl | rfl | rfl | rfl <;> rfl))
@@ -1407,17 +1539,539 @@ theorem samplePartition_complete_of_lt {K : Nat} {pos neg : List DataRange}
       Classical.byContradiction fun hne => ha₀ ⟨a, ha, hne⟩
     have hnegNoLit : ∀ a ∈ neg, a ≠ .datatype literalDatatype := fun a ha hlit =>
       hyNeg a ha (hlit ▸ i.literalDatatypeExt y)
+    have h1 : pos.any (fun | .oneOf _ => true | _ => false) = false :=
+      any_eq_false_of_forall fun a ha => by rw [hposLit a ha]
+    have h2 : pos.any (fun a => (extractIntAtomBounds a).isSome) = false :=
+      any_eq_false_of_forall fun a ha => by rw [hposLit a ha]; decide
+    have h3 : pos.any (fun a => a == .datatype (xsd "boolean")) = false :=
+      any_eq_false_of_forall fun a ha => by rw [hposLit a ha]; decide
+    have h4 : pos.any (fun a => a == .datatype (xsd "string")) = false :=
+      any_eq_false_of_forall fun a ha => by rw [hposLit a ha]; decide
+    have h5 : pos.any (fun a => a == .datatype (xsd "anyURI")) = false :=
+      any_eq_false_of_forall fun a ha => by rw [hposLit a ha]; decide
+    have h6 : pos.any (fun a => a == .datatype (rdf "XMLLiteral")) = false :=
+      any_eq_false_of_forall fun a ha => by rw [hposLit a ha]; decide
+    have h7 : pos.any (fun a => a == .datatype (xsd "hexBinary")) = false :=
+      any_eq_false_of_forall fun a ha => by rw [hposLit a ha]; decide
+    have h8 : pos.any (fun a => a == .datatype (xsd "base64Binary")) = false :=
+      any_eq_false_of_forall fun a ha => by rw [hposLit a ha]; decide
     have hge : K ≤ (((vennCandidates K pos neg).eraseDups).filter (evalPartition pos neg)).length :=
       infinite_family_ge_K K ratWitness ratWitness_inj
         (fun x hx => by
-          simp only [vennCandidates, List.mem_append]
-          exact .inr hx)
+          simp only [vennCandidates, h1, h2, h3, h4, h5, h6, h7, h8, Bool.false_eq_true, ↓reduceIte]
+          exact hx)
         (fun k hnb => by
           simp only [evalPartition, Bool.and_eq_true, List.all_eq_true, Bool.not_eq_true']
           refine ⟨fun a ha => by rw [hposLit a ha]; rfl, fun a ha => ?_⟩
           exact evalAtom_ratWitness_false (hneg a ha) (hnegNoLit a ha) k
             (fun hm => hnb (mem_allOneOfValues_of_mem ha hm)))
     omega
+
+/-! ### 8. Family- and interval-pruned exact Venn partitions -/
+
+def intBoundsDisjoint (b₁ b₂ : IntegerBounds) : Bool :=
+  (match b₁.upper, b₂.lower with
+   | some hi1, some lo2 => decide (hi1 < lo2)
+   | _, _ => false) ||
+  (match b₂.upper, b₁.lower with
+   | some hi2, some lo1 => decide (hi2 < lo1)
+   | _, _ => false)
+
+theorem intBoundsDisjoint_sound {b₁ b₂ : IntegerBounds}
+    (h : intBoundsDisjoint b₁ b₂ = true) {z : Int}
+    (h1 : b₁.contains z) (h2 : b₂.contains z) : False := by
+  rcases b₁ with ⟨lo1, hi1⟩
+  rcases b₂ with ⟨lo2, hi2⟩
+  cases lo1 <;> cases hi1 <;> cases lo2 <;> cases hi2 <;>
+    simp [intBoundsDisjoint, IntegerBounds.contains] at h h1 h2 <;> omega
+
+def intBoundsSubset (sub sup : IntegerBounds) : Bool :=
+  (match sup.lower with
+   | none => true
+   | some lo2 => match sub.lower with | some lo1 => decide (lo2 ≤ lo1) | none => false) &&
+  (match sup.upper with
+   | none => true
+   | some hi2 => match sub.upper with | some hi1 => decide (hi1 ≤ hi2) | none => false)
+
+theorem intBoundsSubset_sound {sub sup : IntegerBounds}
+    (h : intBoundsSubset sub sup = true) {z : Int}
+    (hz : sub.contains z) : sup.contains z := by
+  rcases sub with ⟨lo1, hi1⟩
+  rcases sup with ⟨lo2, hi2⟩
+  cases lo1 <;> cases hi1 <;> cases lo2 <;> cases hi2 <;>
+    simp [intBoundsSubset, IntegerBounds.contains] at h hz ⊢ <;> omega
+
+def exactAtomFamily? : DataRange → Option Nat
+  | .datatype t =>
+    if t == xsd "boolean" then some 0
+    else if (integerBounds t).isSome then some 1
+    else if t == xsd "string" then some 2
+    else if t == rdf "XMLLiteral" then some 4
+    else if t == xsd "hexBinary" then some 5
+    else if t == xsd "base64Binary" then some 6
+    else none
+  | .restriction t fs =>
+    if (extractIntAtomBounds (.restriction t fs)).isSome then some 1 else none
+  | _ => none
+
+private def exactValueFamily : Value → Option Nat
+  | .boolean _ => some 0
+  | .number _ => some 1
+  | .plainLiteral _ _ => some 2
+  | .xmlLiteral _ => some 4
+  | .hexBinary _ => some 5
+  | .base64Binary _ => some 6
+  | _ => none
+
+private theorem checkValue_of_evalAtom_dt {t : IRI} {v : Value} (hne : t ≠ literalDatatype)
+    (hv : evalAtom (.datatype t) v = true) : checkValue t v = true := by
+  simpa [evalAtom, beq_false_of_ne hne] using hv
+
+private theorem exactAtomFamily_eval {a : DataRange} {f : Nat}
+    (hf : exactAtomFamily? a = some f) {v : Value} (hv : evalAtom a v = true) :
+    exactValueFamily v = some f := by
+  cases a with
+  | datatype t =>
+    simp only [exactAtomFamily?] at hf
+    split at hf
+    · rename_i ht; have hEq := beq_iff_eq.mp ht; subst hEq
+      have hc := checkValue_of_evalAtom_dt (by decide) hv
+      obtain ⟨b, rfl⟩ := (valueSpace_boolean_iff _).mp ((checkValue_iff _ _).mp hc)
+      obtain rfl := Option.some.inj hf; rfl
+    · split at hf
+      · rename_i hint
+        obtain ⟨b, hb⟩ := Option.isSome_iff_exists.mp hint
+        have hne : t ≠ literalDatatype := by
+          intro h; subst h
+          have : integerBounds literalDatatype = none := by decide
+          rw [this] at hb; cases hb
+        obtain ⟨z, _, rfl⟩ :=
+          (checkValue_integerSubtype_iff hb v).mp (checkValue_of_evalAtom_dt hne hv)
+        obtain rfl := Option.some.inj hf; rfl
+      · split at hf
+        · rename_i ht; have hEq := beq_iff_eq.mp ht; subst hEq
+          have hc := checkValue_of_evalAtom_dt (by decide) hv
+          obtain ⟨s, rfl⟩ := (valueSpace_string_iff _).mp ((checkValue_iff _ _).mp hc)
+          obtain rfl := Option.some.inj hf; rfl
+        · split at hf
+          · rename_i ht; have hEq := beq_iff_eq.mp ht; subst hEq
+            have hc := checkValue_of_evalAtom_dt (by decide) hv
+            obtain ⟨s, _, rfl⟩ := (valueSpace_xmlLiteral_iff _).mp ((checkValue_iff _ _).mp hc)
+            obtain rfl := Option.some.inj hf; rfl
+          · split at hf
+            · rename_i ht; have hEq := beq_iff_eq.mp ht; subst hEq
+              have hc := checkValue_of_evalAtom_dt (by decide) hv
+              obtain ⟨bs, rfl⟩ := (valueSpace_hexBinary_iff _).mp ((checkValue_iff _ _).mp hc)
+              obtain rfl := Option.some.inj hf; rfl
+            · split at hf
+              · rename_i ht; have hEq := beq_iff_eq.mp ht; subst hEq
+                have hc := checkValue_of_evalAtom_dt (by decide) hv
+                obtain ⟨bs, rfl⟩ := (valueSpace_base64Binary_iff _).mp ((checkValue_iff _ _).mp hc)
+                obtain rfl := Option.some.inj hf; rfl
+              · cases hf
+  | restriction t fs =>
+    simp only [exactAtomFamily?] at hf
+    split at hf
+    · rename_i hint
+      obtain ⟨b, hb⟩ := Option.isSome_iff_exists.mp hint
+      obtain ⟨z, _, rfl⟩ := (extractIntAtomBounds_evalAtom_iff hb v).mp hv
+      obtain rfl := Option.some.inj hf; rfl
+    · cases hf
+  | _ => simp [exactAtomFamily?] at hf
+
+def canAddPosExact (a : DataRange) (pos neg : List DataRange) : Bool :=
+  if a == .oneOf [] then false
+  else if pos.any (fun b =>
+    match exactAtomFamily? b, exactAtomFamily? a with
+    | some f1, some f2 => f1 != f2
+    | _, _ => false) then false
+  else if (match extractIntAtomBounds a with
+    | some ba =>
+      pos.any (fun b => match extractIntAtomBounds b with | some bb => intBoundsDisjoint ba bb | none => false) ||
+      neg.any (fun b => match extractIntAtomBounds b with | some bb => intBoundsSubset ba bb | none => false)
+    | none => false) then false
+  else if pos.any (fun
+    | .oneOf ls =>
+      match decodeLiteralsList ls with
+      | some vs => vs.all (fun v => !evalAtom a v)
+      | none => false
+    | _ => false) then false
+  else true
+
+def canAddNegExact (a : DataRange) (pos _neg : List DataRange) : Bool :=
+  if a == .datatype literalDatatype then false
+  else if (match extractIntAtomBounds a with
+    | some ba =>
+      pos.any (fun b => match extractIntAtomBounds b with | some bb => intBoundsSubset bb ba | none => false)
+    | none => false) then false
+  else if pos.any (fun
+    | .oneOf ls =>
+      match decodeLiteralsList ls with
+      | some vs => vs.all (fun v => evalAtom a v)
+      | none => false
+    | _ => false) then false
+  else true
+
+def prunedExactPartitionsAux : List DataRange → List DataRange → List DataRange →
+    List (List DataRange × List DataRange)
+  | [], pos, neg => [(pos, neg)]
+  | a :: rest, pos, neg =>
+    (if canAddPosExact a pos neg then prunedExactPartitionsAux rest (a :: pos) neg else []) ++
+    (if canAddNegExact a pos neg then prunedExactPartitionsAux rest pos (a :: neg) else [])
+
+def prunedExactPartitions (atoms : List DataRange) : List (List DataRange × List DataRange) :=
+  prunedExactPartitionsAux atoms [] []
+
+private theorem mem_ite_nil {α : Type} {c : Prop} [Decidable c] {x : α} {l : List α}
+    (h : x ∈ (if c then l else [])) : c ∧ x ∈ l := by
+  split at h
+  · exact ⟨‹_›, h⟩
+  · cases h
+
+private theorem mem_prunedExactPartitionsAux_sub :
+    ∀ (rest ps ns p n : List DataRange),
+      (p, n) ∈ prunedExactPartitionsAux rest ps ns →
+      (∀ x ∈ p, x ∈ rest ∨ x ∈ ps) ∧
+      (∀ x ∈ n, x ∈ rest ∨ x ∈ ns) ∧
+      (∀ x ∈ rest, x ∈ p ∨ x ∈ n) ∧
+      (∀ x ∈ ps, x ∈ p) ∧ (∀ x ∈ ns, x ∈ n)
+  | [], ps, ns, p, n, h => by
+    simp only [prunedExactPartitionsAux, List.mem_singleton, Prod.mk.injEq] at h
+    obtain ⟨rfl, rfl⟩ := h
+    refine ⟨fun _ hx => .inr hx, fun _ hx => .inr hx, fun x hx => ?_,
+      fun _ hx => hx, fun _ hx => hx⟩
+    exact absurd hx List.not_mem_nil
+  | a :: rest, ps, ns, p, n, h => by
+    simp only [prunedExactPartitionsAux, List.mem_append] at h
+    rcases h with h | h
+    · obtain ⟨hp, hn, hcov, hps, hns⟩ :=
+        mem_prunedExactPartitionsAux_sub rest (a :: ps) ns p n (mem_ite_nil h).2
+      refine ⟨fun x hx => ?_, fun x hx => ?_, fun x hx => ?_,
+        fun x hx => hps x (List.mem_cons_of_mem _ hx), hns⟩
+      · rcases hp x hx with h1 | h2
+        · exact .inl (List.mem_cons_of_mem _ h1)
+        · rcases List.mem_cons.mp h2 with h3 | h3
+          · exact .inl (h3 ▸ List.mem_cons_self ..)
+          · exact .inr h3
+      · rcases hn x hx with h1 | h2
+        · exact .inl (List.mem_cons_of_mem _ h1)
+        · exact .inr h2
+      · rcases List.mem_cons.mp hx with h3 | h3
+        · exact .inl (h3 ▸ hps a (List.mem_cons_self ..))
+        · exact hcov x h3
+    · obtain ⟨hp, hn, hcov, hps, hns⟩ :=
+        mem_prunedExactPartitionsAux_sub rest ps (a :: ns) p n (mem_ite_nil h).2
+      refine ⟨fun x hx => ?_, fun x hx => ?_, fun x hx => ?_, hps,
+        fun x hx => hns x (List.mem_cons_of_mem _ hx)⟩
+      · rcases hp x hx with h1 | h2
+        · exact .inl (List.mem_cons_of_mem _ h1)
+        · exact .inr h2
+      · rcases hn x hx with h1 | h2
+        · exact .inl (List.mem_cons_of_mem _ h1)
+        · rcases List.mem_cons.mp h2 with h3 | h3
+          · exact .inl (h3 ▸ List.mem_cons_self ..)
+          · exact .inr h3
+      · rcases List.mem_cons.mp hx with h3 | h3
+        · exact .inr (h3 ▸ hns a (List.mem_cons_self ..))
+        · exact hcov x h3
+
+theorem mem_prunedExactPartitions_sub {atoms pos neg : List DataRange}
+    (h : (pos, neg) ∈ prunedExactPartitions atoms) :
+    (∀ a ∈ pos, a ∈ atoms) ∧ (∀ a ∈ neg, a ∈ atoms) ∧
+    (∀ a ∈ atoms, a ∈ pos ∨ a ∈ neg) := by
+  obtain ⟨hp, hn, hcov, _, _⟩ := mem_prunedExactPartitionsAux_sub atoms [] [] pos neg h
+  exact ⟨fun a ha => (hp a ha).elim id (fun h => by cases h),
+         fun a ha => (hn a ha).elim id (fun h => by cases h), hcov⟩
+
+private theorem prunedExactPartitionsAux_unique {dm : DatatypeMap} {i : Interpretation dm} {y : i.Data} :
+    ∀ (rest ps ns p₁ n₁ p₂ n₂ : List DataRange),
+      (p₁, n₁) ∈ prunedExactPartitionsAux rest ps ns →
+      (p₂, n₂) ∈ prunedExactPartitionsAux rest ps ns →
+      (∀ a ∈ p₁, dataHolds i y a) → (∀ a ∈ n₁, ¬ dataHolds i y a) →
+      (∀ a ∈ p₂, dataHolds i y a) → (∀ a ∈ n₂, ¬ dataHolds i y a) →
+      (p₁, n₁) = (p₂, n₂)
+  | [], ps, ns, p₁, n₁, p₂, n₂, hm₁, hm₂, _, _, _, _ => by
+    simp only [prunedExactPartitionsAux, List.mem_singleton] at hm₁ hm₂
+    exact hm₁.trans hm₂.symm
+  | a :: rest, ps, ns, p₁, n₁, p₂, n₂, hm₁, hm₂, hp₁, hn₁, hp₂, hn₂ => by
+    simp only [prunedExactPartitionsAux, List.mem_append] at hm₁ hm₂
+    rcases hm₁ with h1 | h1 <;> rcases hm₂ with h2 | h2
+    · exact prunedExactPartitionsAux_unique rest (a :: ps) ns p₁ n₁ p₂ n₂
+        (mem_ite_nil h1).2 (mem_ite_nil h2).2 hp₁ hn₁ hp₂ hn₂
+    · have ha1 := hp₁ a ((mem_prunedExactPartitionsAux_sub rest (a :: ps) ns p₁ n₁
+        (mem_ite_nil h1).2).2.2.2.1 a (List.mem_cons_self ..))
+      have ha2 := hn₂ a ((mem_prunedExactPartitionsAux_sub rest ps (a :: ns) p₂ n₂
+        (mem_ite_nil h2).2).2.2.2.2 a (List.mem_cons_self ..))
+      exact (ha2 ha1).elim
+    · have ha1 := hn₁ a ((mem_prunedExactPartitionsAux_sub rest ps (a :: ns) p₁ n₁
+        (mem_ite_nil h1).2).2.2.2.2 a (List.mem_cons_self ..))
+      have ha2 := hp₂ a ((mem_prunedExactPartitionsAux_sub rest (a :: ps) ns p₂ n₂
+        (mem_ite_nil h2).2).2.2.2.1 a (List.mem_cons_self ..))
+      exact (ha1 ha2).elim
+    · exact prunedExactPartitionsAux_unique rest ps (a :: ns) p₁ n₁ p₂ n₂
+        (mem_ite_nil h1).2 (mem_ite_nil h2).2 hp₁ hn₁ hp₂ hn₂
+
+theorem prunedExactPartitions_unique {dm : DatatypeMap} {i : Interpretation dm} {y : i.Data}
+    {atoms : List DataRange} {pq₁ pq₂ : List DataRange × List DataRange}
+    (hm₁ : pq₁ ∈ prunedExactPartitions atoms) (hm₂ : pq₂ ∈ prunedExactPartitions atoms)
+    (h₁ : dataHolds i y (partitionRange pq₁.1 pq₁.2))
+    (h₂ : dataHolds i y (partitionRange pq₂.1 pq₂.2)) : pq₁ = pq₂ := by
+  rcases pq₁ with ⟨p₁, n₁⟩
+  rcases pq₂ with ⟨p₂, n₂⟩
+  obtain ⟨hp₁, hn₁⟩ := (dataHolds_partitionRange_iff i y p₁ n₁).mp h₁
+  obtain ⟨hp₂, hn₂⟩ := (dataHolds_partitionRange_iff i y p₂ n₂).mp h₂
+  exact prunedExactPartitionsAux_unique atoms [] [] p₁ n₁ p₂ n₂ hm₁ hm₂ hp₁ hn₁ hp₂ hn₂
+
+theorem evalOnPartition_iff_pruned {dm : DatatypeMap} {i : Interpretation dm} {y : i.Data}
+    {atoms pos neg : List DataRange}
+    (hpart : (pos, neg) ∈ prunedExactPartitions atoms)
+    (hy : dataHolds i y (partitionRange pos neg))
+    {d : DataRange} (hd : ∀ a ∈ atomsOfDataRange d, a ∈ atoms) :
+    evalOnPartition pos d = true ↔ dataHolds i y d := by
+  obtain ⟨_, _, hcov⟩ := mem_prunedExactPartitions_sub hpart
+  obtain ⟨hpos, hneg⟩ := (dataHolds_partitionRange_iff i y pos neg).mp hy
+  induction d with
+  | complement r ih =>
+    simp only [evalOnPartition, Bool.not_eq_true', Bool.eq_false_iff, dataHolds]
+    exact not_congr (ih hd)
+  | intersection a b iha ihb =>
+    simp only [evalOnPartition, Bool.and_eq_true, dataHolds]
+    refine and_congr (iha fun x hx => hd x ?_) (ihb fun x hx => hd x ?_)
+    · exact List.mem_eraseDups.mpr (List.mem_append_left _ hx)
+    · exact List.mem_eraseDups.mpr (List.mem_append_right _ hx)
+  | union a b iha ihb =>
+    simp only [evalOnPartition, Bool.or_eq_true, dataHolds]
+    refine or_congr (iha fun x hx => hd x ?_) (ihb fun x hx => hd x ?_)
+    · exact List.mem_eraseDups.mpr (List.mem_append_left _ hx)
+    · exact List.mem_eraseDups.mpr (List.mem_append_right _ hx)
+  | datatype t =>
+    have hmem : .datatype t ∈ atoms := hd _ (List.mem_singleton_self _)
+    simp only [evalOnPartition, List.contains_iff_mem]
+    exact ⟨fun hp => hpos _ hp, fun hh => (hcov _ hmem).resolve_right fun hn => hneg _ hn hh⟩
+  | restriction t fs =>
+    have hmem : .restriction t fs ∈ atoms := hd _ (List.mem_singleton_self _)
+    simp only [evalOnPartition, List.contains_iff_mem]
+    exact ⟨fun hp => hpos _ hp, fun hh => (hcov _ hmem).resolve_right fun hn => hneg _ hn hh⟩
+  | oneOf ls =>
+    have hmem : .oneOf ls ∈ atoms := hd _ (List.mem_singleton_self _)
+    simp only [evalOnPartition, List.contains_iff_mem]
+    exact ⟨fun hp => hpos _ hp, fun hh => (hcov _ hmem).resolve_right fun hn => hneg _ hn hh⟩
+
+private theorem int_eq_of_holds {a : DataRange} {ba : IntegerBounds}
+    (hba : extractIntAtomBounds a = some ba) (haEx : isExactAtomicDataRange a = true)
+    {i : Interpretation datatypeMap} {z : Int}
+    (h : dataHolds i (i.embedValue (.integer z)) a) : ba.contains z := by
+  have hev := (evalAtom_iff haEx i _).mpr h
+  obtain ⟨z', hz', heq⟩ := (extractIntAtomBounds_evalAtom_iff hba _).mp hev
+  have hzeq : z' = z := (congrArg Rat.num (Value.number.inj heq)).symm
+  subst hzeq; exact hz'
+
+theorem exists_prunedExactPartition (i : Interpretation datatypeMap) (y : i.Data)
+    {atoms : List DataRange} (hExact : ∀ a ∈ atoms, isExactAtomicDataRange a = true) :
+    ∃ pq ∈ prunedExactPartitions atoms, dataHolds i y (partitionRange pq.1 pq.2) := by
+  classical
+  have haux : ∀ (rest ps ns : List DataRange),
+      (∀ a ∈ rest, isExactAtomicDataRange a = true) →
+      (∀ a ∈ ps, isExactAtomicDataRange a = true) →
+      (∀ a ∈ ps, dataHolds i y a) →
+      (∀ a ∈ ns, ¬ dataHolds i y a) →
+      ∃ pq ∈ prunedExactPartitionsAux rest ps ns,
+        dataHolds i y (partitionRange pq.1 pq.2) := by
+    intro rest
+    induction rest with
+    | nil =>
+      intro ps ns _ _ hholdP hholdN
+      exact ⟨(ps, ns), List.mem_singleton_self _,
+        (dataHolds_partitionRange_iff i y ps ns).mpr ⟨hholdP, hholdN⟩⟩
+    | cons a rest ih =>
+      intro ps ns hrem hps hholdP hholdN
+      have haEx : isExactAtomicDataRange a = true := hrem a (List.mem_cons_self ..)
+      -- every oneOf member of `ps` pins `y` to a decoded value
+      have hOne : ∀ ls vs, DataRange.oneOf ls ∈ ps → decodeLiteralsList ls = some vs →
+          ∃ v ∈ vs, i.embedValue v = y := fun ls vs hb hdl =>
+        (decodeLiteralsList_iff hdl i y).mp (hholdP _ hb)
+      by_cases ha : dataHolds i y a
+      · have hcan : canAddPosExact a ps ns = true := by
+          unfold canAddPosExact
+          split
+          · rename_i hEmpty
+            have hEq := beq_iff_eq.mp hEmpty; subst hEq
+            simp [dataHolds] at ha
+          · split
+            · rename_i hfam
+              exfalso
+              obtain ⟨b, hb, hbf⟩ := List.any_eq_true.mp hfam
+              cases hfb : exactAtomFamily? b with
+              | none => simp [hfb] at hbf
+              | some f1 =>
+                cases hfa : exactAtomFamily? a with
+                | none => simp [hfb, hfa] at hbf
+                | some f2 =>
+                  simp only [hfb, hfa, bne_iff_ne, ne_eq] at hbf
+                  have hbne : b ≠ .datatype literalDatatype := by
+                    intro h; subst h
+                    have : exactAtomFamily? (.datatype literalDatatype) = none := by decide
+                    rw [this] at hfb; cases hfb
+                  obtain ⟨v, hvy⟩ := embedded_of_nonLiteral_atom (hps b hb) hbne (hholdP b hb)
+                  have hb' := hholdP b hb
+                  rw [← hvy] at hb'
+                  have ha' := ha
+                  rw [← hvy] at ha'
+                  have e1 := exactAtomFamily_eval hfb ((evalAtom_iff (hps b hb) i v).mpr hb')
+                  have e2 := exactAtomFamily_eval hfa ((evalAtom_iff haEx i v).mpr ha')
+                  rw [e1] at e2
+                  exact hbf (Option.some.inj e2)
+            · cases hba : extractIntAtomBounds a with
+              | none =>
+                dsimp only
+                split
+                · rename_i hc; simp at hc
+                · split
+                  · rename_i hone
+                    exfalso
+                    obtain ⟨b, hb, hbo⟩ := List.any_eq_true.mp hone
+                    cases b with
+                    | oneOf ls =>
+                      dsimp only at hbo
+                      cases hdl : decodeLiteralsList ls with
+                      | none => rw [hdl] at hbo; cases hbo
+                      | some vs =>
+                        rw [hdl] at hbo
+                        obtain ⟨v, hv, hvy⟩ := hOne ls vs hb hdl
+                        have ha' := ha
+                        rw [← hvy] at ha'
+                        have hfa := List.all_eq_true.mp hbo v hv
+                        have hta := (evalAtom_iff haEx i v).mpr ha'
+                        simp [hta] at hfa
+                    | _ => simp at hbo
+                  · rfl
+              | some ba =>
+                dsimp only
+                obtain ⟨z, hza, hzy⟩ := (extractIntAtomBounds_iff hba i y).mp ha
+                split
+                · rename_i hbad
+                  exfalso
+                  rcases Bool.or_eq_true_iff.mp hbad with hdisj | hsub
+                  · obtain ⟨b, hb, hbd⟩ := List.any_eq_true.mp hdisj
+                    cases hbb : extractIntAtomBounds b with
+                    | none => rw [hbb] at hbd; cases hbd
+                    | some bb =>
+                      simp only [hbb] at hbd
+                      have hb' := hholdP b hb
+                      rw [← hzy] at hb'
+                      exact intBoundsDisjoint_sound hbd hza (int_eq_of_holds hbb (hps b hb) hb')
+                  · obtain ⟨b, hb, hbs⟩ := List.any_eq_true.mp hsub
+                    cases hbb : extractIntAtomBounds b with
+                    | none => rw [hbb] at hbs; cases hbs
+                    | some bb =>
+                      simp only [hbb] at hbs
+                      exact hholdN b hb ((extractIntAtomBounds_iff hbb i y).mpr
+                        ⟨z, intBoundsSubset_sound hbs hza, hzy⟩)
+                · split
+                  · rename_i hone
+                    exfalso
+                    obtain ⟨b, hb, hbo⟩ := List.any_eq_true.mp hone
+                    cases b with
+                    | oneOf ls =>
+                      dsimp only at hbo
+                      cases hdl : decodeLiteralsList ls with
+                      | none => rw [hdl] at hbo; cases hbo
+                      | some vs =>
+                        rw [hdl] at hbo
+                        obtain ⟨v, hv, hvy⟩ := hOne ls vs hb hdl
+                        have ha' := ha
+                        rw [← hvy] at ha'
+                        have hfa := List.all_eq_true.mp hbo v hv
+                        have hta := (evalAtom_iff haEx i v).mpr ha'
+                        simp [hta] at hfa
+                    | _ => simp at hbo
+                  · rfl
+        obtain ⟨pq, hpq, hholds⟩ := ih (a :: ps) ns
+          (fun x hx => hrem x (List.mem_cons_of_mem _ hx))
+          (fun x hx => by
+            rcases List.mem_cons.mp hx with h | h
+            · exact h ▸ haEx
+            · exact hps x h)
+          (fun x hx => by
+            rcases List.mem_cons.mp hx with h | h
+            · exact h ▸ ha
+            · exact hholdP x h)
+          hholdN
+        refine ⟨pq, ?_, hholds⟩
+        simp only [prunedExactPartitionsAux, hcan, ↓reduceIte, List.mem_append]
+        exact .inl hpq
+      · have hcan : canAddNegExact a ps ns = true := by
+          unfold canAddNegExact
+          split
+          · rename_i hlit
+            have hEq := beq_iff_eq.mp hlit; subst hEq
+            exact (ha (i.literalDatatypeExt y)).elim
+          · cases hba : extractIntAtomBounds a with
+            | none =>
+              dsimp only
+              split
+              · rename_i hc; simp at hc
+              · split
+                · rename_i hone
+                  exfalso
+                  obtain ⟨b, hb, hbo⟩ := List.any_eq_true.mp hone
+                  cases b with
+                  | oneOf ls =>
+                    dsimp only at hbo
+                    cases hdl : decodeLiteralsList ls with
+                    | none => rw [hdl] at hbo; cases hbo
+                    | some vs =>
+                      rw [hdl] at hbo
+                      obtain ⟨v, hv, hvy⟩ := hOne ls vs hb hdl
+                      have hta := List.all_eq_true.mp hbo v hv
+                      have hh := (evalAtom_iff haEx i v).mp hta
+                      rw [hvy] at hh
+                      exact ha hh
+                  | _ => simp at hbo
+                · rfl
+            | some ba =>
+              dsimp only
+              split
+              · rename_i hsub
+                exfalso
+                obtain ⟨b, hb, hbs⟩ := List.any_eq_true.mp hsub
+                cases hbb : extractIntAtomBounds b with
+                | none => rw [hbb] at hbs; cases hbs
+                | some bb =>
+                  simp only [hbb] at hbs
+                  obtain ⟨z, hzb, hzy⟩ := (extractIntAtomBounds_iff hbb i y).mp (hholdP b hb)
+                  exact ha ((extractIntAtomBounds_iff hba i y).mpr
+                    ⟨z, intBoundsSubset_sound hbs hzb, hzy⟩)
+              · split
+                · rename_i hone
+                  exfalso
+                  obtain ⟨b, hb, hbo⟩ := List.any_eq_true.mp hone
+                  cases b with
+                  | oneOf ls =>
+                    dsimp only at hbo
+                    cases hdl : decodeLiteralsList ls with
+                    | none => rw [hdl] at hbo; cases hbo
+                    | some vs =>
+                      rw [hdl] at hbo
+                      obtain ⟨v, hv, hvy⟩ := hOne ls vs hb hdl
+                      have hta := List.all_eq_true.mp hbo v hv
+                      have hh := (evalAtom_iff haEx i v).mp hta
+                      rw [hvy] at hh
+                      exact ha hh
+                  | _ => simp at hbo
+                · rfl
+        obtain ⟨pq, hpq, hholds⟩ := ih ps (a :: ns)
+          (fun x hx => hrem x (List.mem_cons_of_mem _ hx))
+          hps hholdP
+          (fun x hx => by
+            rcases List.mem_cons.mp hx with h | h
+            · exact h ▸ ha
+            · exact hholdN x h)
+        refine ⟨pq, ?_, hholds⟩
+        simp only [prunedExactPartitionsAux, hcan, ↓reduceIte, List.mem_append]
+        exact .inr hpq
+  exact haux atoms [] [] hExact (fun _ h => by cases h) (fun _ h => by cases h)
+    (fun _ h => by cases h)
 
 #print axioms samplePartition_nodup
 #print axioms samplePartition_length_le
@@ -1426,6 +2080,8 @@ theorem samplePartition_complete_of_lt {K : Nat} {pos neg : List DataRange}
 #print axioms evalOnPartition_iff
 #print axioms exists_vennPartition
 #print axioms vennPartitions_unique
+#print axioms exists_prunedExactPartition
+#print axioms prunedExactPartitions_unique
 
 end Termination
 end Sabrina.OWL2.SROIQD

@@ -254,16 +254,22 @@ private def runConsistency (id ofnText : String) (lib : List (IRI × String))
   let hasOrderedData := p.allDataAtoms.any SROIQD.Termination.WiderData.isOrderedExactAtom
   let hasStringFacets := p.allDataAtoms.any SROIQD.Termination.WiderData.isStringFacetExtraAtom
   let hasBuiltInDataProp := p.allDataProps.any fun dp => dp == topDataProperty || dp == bottomDataProperty
-  if allowExact && (hasReal || hasOrderedData || hasStringFacets || hasBuiltInDataProp) then
+  let widerAdmissibleForReal : Bool :=
+    !hasReal ||
+    (p.allDataLiterals.all (fun l => (Datatypes.decodeLiteral l).isSome) &&
+     SROIQD.Termination.WiderData.widerAtomsAdmissible (.oneOf p.allDataLiterals :: p.allDataAtoms))
+  let exactBasis? : Option String :=
+    if hasReal then some "sroiqd-real-reduction"
+    else if hasOrderedData then some "sroiqd-ordered-data"
+    else if hasStringFacets then some "sroiqd-string-facets"
+    else if hasBuiltInDataProp then some "sroiqd-builtin-data-prop"
+    else none
+  if allowExact && (hasBuiltInDataProp || !widerAdmissibleForReal) then
     let exactSat :=
       (SROIQD.Termination.SourceImport.decideRealSourceClosure? ofnText lib).map Prod.snd <|>
       SROIQD.Termination.WiderData.decideRealOntology? ont
     if let some sat := exactSat then
-      let basis :=
-        if hasReal then "sroiqd-real-reduction"
-        else if hasOrderedData then "sroiqd-ordered-data"
-        else if hasStringFacets then "sroiqd-string-facets"
-        else "sroiqd-builtin-data-prop"
+      let basis := exactBasis?.getD "sroiqd-exact-consistency"
       let verdict := if sat then "SATISFIABLE" else "INCONSISTENT_ONTOLOGY"
       return (0, response verdict true
         (("decision_basis", toJson (basis ++ "-v1")) ::
@@ -278,17 +284,21 @@ private def runConsistency (id ofnText : String) (lib : List (IRI × String))
         (SROIQD.Termination.SourceImport.decideRealSourceClosure? ofnText lib).map Prod.snd <|>
         SROIQD.Termination.WiderData.decideRealOntology? ont
       if let some sat := exactSat then
+        let basis := exactBasis?.getD "sroiqd-exact-consistency"
         let verdict := if sat then "SATISFIABLE" else "INCONSISTENT_ONTOLOGY"
         return (0, response verdict true
-          (("decision_basis", toJson "sroiqd-exact-consistency-v1") ::
-            ("profile", encodeProfile qp "sroiqd-exact-consistency") :: context))
+          (("decision_basis", toJson (basis ++ "-v1")) ::
+            ("profile", encodeProfile qp basis) :: context))
     return (2, response "UNKNOWN" false
       (("reason", toJson "SROIQ(D) search could not certify consistency within interactive limits") ::
        ("limits", encodeLimits limits) :: ctx))
   if !checkConsistency p limits.worlds ev then
     return (1, response "REJECTED" false (("reason", toJson "SROIQ(D) evidence failed checking") :: ctx))
   let verdict := if ev.isModel then "SATISFIABLE" else "INCONSISTENT_ONTOLOGY"
-  return (0, response verdict true (("certificate", encodeEvidence limits ev) :: ctx))
+  let basisFields := match exactBasis? with
+    | some basis => [("decision_basis", toJson (basis ++ "-v1"))]
+    | none => []
+  return (0, response verdict true (basisFields ++ ("certificate", encodeEvidence limits ev) :: ctx))
 
 private def tryELQuery (elAxs : List ELAxiom) (qAx : Axiom) : Option (String × Json) :=
   match qAx with
@@ -409,13 +419,22 @@ private def runQuery (id ofnText queryText : String) (lib : List (IRI × String)
     pr.allDataAtoms.any SROIQD.Termination.WiderData.isStringFacetExtraAtom
   let hasBuiltInDataProp := probeProblems.any fun pr =>
     pr.allDataProps.any fun dp => dp == topDataProperty || dp == bottomDataProperty
-  if allowExact && (hasReal || hasOrderedData || hasStringFacets || hasBuiltInDataProp) then
-    let basis :=
-      if hasReal then "sroiqd-real-query"
-      else if hasOrderedData then "sroiqd-ordered-data-query"
-      else if hasStringFacets then "sroiqd-string-facets-query"
-      else "sroiqd-builtin-data-prop-query"
-    if let some res := tryExactQuery ofnText queryText lib ont qAx qp context basis then
+  let widerAdmissibleForReal : Bool :=
+    !hasReal ||
+    probeProblems.all fun pr =>
+      pr.allDataLiterals.all (fun l => (Datatypes.decodeLiteral l).isSome) &&
+      SROIQD.Termination.WiderData.widerAtomsAdmissible (.oneOf pr.allDataLiterals :: pr.allDataAtoms)
+  let exactBasis? : Option String :=
+    if hasReal then some "sroiqd-real-query"
+    else if hasOrderedData then some "sroiqd-ordered-data-query"
+    else if hasStringFacets then some "sroiqd-string-facets-query"
+    else if hasBuiltInDataProp then some "sroiqd-builtin-data-prop-query"
+    else none
+  let basisFields : List (String × Json) := match exactBasis? with
+    | some b => [("decision_basis", toJson (b ++ "-v1"))]
+    | none => []
+  if allowExact && (hasBuiltInDataProp || !widerAdmissibleForReal) then
+    if let some res := tryExactQuery ofnText queryText lib ont qAx qp context (exactBasis?.getD "sroiqd-exact-query") then
       return res
   match incs with
   | [q] =>
@@ -428,7 +447,7 @@ private def runQuery (id ofnText queryText : String) (lib : List (IRI × String)
       return (⟨a, b⟩ : InclusionEvidence)
     let some ev := pair | do
       if allowExact then
-        if let some res := tryExactQuery ofnText queryText lib ont qAx qp context "sroiqd-exact-query" then
+        if let some res := tryExactQuery ofnText queryText lib ont qAx qp context (exactBasis?.getD "sroiqd-exact-query") then
           return res
       return (2, response "UNKNOWN" false
         (("reason", toJson "SROIQ(D) search could not produce both certificates within interactive limits") ::
@@ -438,7 +457,7 @@ private def runQuery (id ofnText queryText : String) (lib : List (IRI × String)
     let cert := Json.mkObj [
       ("counterexample", encodeEvidence limits ev.counterexample),
       ("inclusion", encodeEvidence limits ev.inclusion)]
-    return (0, response (verdictName ev.verdict) true (("certificate", cert) :: ctx))
+    return (0, response (verdictName ev.verdict) true (basisFields ++ ("certificate", cert) :: ctx))
   | [q1, q2] =>
     for q in [q1, q2] do
       if let some err := checkRoleRestrictions (inclusionProblem p q) then
@@ -449,7 +468,7 @@ private def runQuery (id ofnText queryText : String) (lib : List (IRI × String)
       return (⟨← propose (counterProblem p q2) limits, ← propose (inclusionProblem p q2) limits⟩ : InclusionEvidence)
     let (some ev1, some ev2) := (pair1, pair2) | do
       if allowExact then
-        if let some res := tryExactQuery ofnText queryText lib ont qAx qp context "sroiqd-exact-query" then
+        if let some res := tryExactQuery ofnText queryText lib ont qAx qp context (exactBasis?.getD "sroiqd-exact-query") then
           return res
       return (2, response "UNKNOWN" false
         (("reason", toJson "SROIQ(D) search could not certify equivalence within interactive limits") ::

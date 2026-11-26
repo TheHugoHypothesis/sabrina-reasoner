@@ -28,6 +28,7 @@ private structure MapState where
   annotProps : List IRI := []
   namedInds : List IRI := []
   -- Output structural items
+  ontologyHeaderTerm : Option RDFTerm := none
   ontologyIRI : Option IRI := none
   versionIRI : Option IRI := none
   imports : List IRI := []
@@ -76,6 +77,14 @@ private def isObjPropIRI (st : MapState) (iri : IRI) : Bool :=
 
 private def isDataPropIRI (st : MapState) (iri : IRI) : Bool :=
   isBuiltInDataProp iri || st.dataProps.contains iri
+
+private def isKnownMetadataVocab (iri : IRI) : Bool :=
+  iri.startsWith "http://purl.org/dc/terms/" ||
+  iri.startsWith "http://purl.org/dc/elements/1.1/" ||
+  iri.startsWith "http://www.w3.org/2004/02/skos/core#" ||
+  iri.startsWith "http://purl.org/vocab/vann/" ||
+  iri.startsWith "http://www.geneontology.org/formats/oboInOwl#" ||
+  iri.startsWith "http://xmlns.com/foaf/0.1/"
 
 private def isAnnotPropIRI (st : MapState) (iri : IRI) : Bool :=
   isBuiltInAnnotProp iri || st.annotProps.contains iri
@@ -384,6 +393,7 @@ private def passHeaderAndReification : MapM Unit := do
     throw "multiple owl:Ontology headers in a single RDF graph"
   if let [(iHdr, hdrTerm)] := headers then
     markConsumed iHdr
+    modify fun st => { st with ontologyHeaderTerm := some hdrTerm }
     if let .iri ontIRI := hdrTerm then
       modify fun st => { st with ontologyIRI := some ontIRI }
     for (i, obj) in ← findActiveBySP hdrTerm owlVersionIRI do
@@ -413,11 +423,13 @@ private def passDeclarations : MapM Unit := do
           markConsumed i; addDecl .annotationProperty iri
         else if t.object == .iri owlNamedIndividual then
           markConsumed i; addDecl .namedIndividual iri
-  -- Consume ontology-header annotations (where subject is the ontology IRI or blank header)
+  -- Consume ALL ontology-header annotations (W3C OWL 2 RDF Mapping Table 4):
+  -- any remaining non-rdf:type triple whose subject is the owl:Ontology header
+  -- node (IRI or blank node) is an ontology annotation, never a logical assertion.
   let st ← get
-  if let some ontIRI := st.ontologyIRI then
-    for (i, t) in ← findActiveByS (.iri ontIRI) do
-      if isAnnotPropIRI st t.predicate then
+  if let some hdrTerm := st.ontologyHeaderTerm then
+    for (i, t) in ← findActiveByS hdrTerm do
+      if t.predicate != rdfType then
         markConsumed i
 
 /-- Pass 3: Blank-node multi-triple axioms (`owl:AllDisjointClasses`,
@@ -687,6 +699,13 @@ private def passAssertions (fuel : Nat) : MapM Unit := do
       let sInd ← match termToIndividual docId t.subject with | .ok x => pure x | .error e => throw e
       let oInd ← match termToIndividual docId t.object with | .ok x => pure x | .error e => throw e
       addAxiom (.objectAssertion (.named t.predicate) sInd oInd)
+    else if isKnownMetadataVocab t.predicate then
+      -- Undeclared standard metadata predicate (Dublin Core, SKOS, VANN, oboInOwl, FOAF):
+      -- preserve as annotation assertion rather than a logical data/object property assertion.
+      markConsumed i
+      let subj ← match termToAnnotationSubject docId t.subject with | .ok x => pure x | .error e => throw e
+      let val ← match termToAnnotationValue docId t.object with | .ok x => pure x | .error e => throw e
+      addAnnot (.assertion t.predicate subj val)
     else if !WellFormed.isReservedPrefix t.predicate then
       -- Undeclared non-reserved predicate: dispatch by object kind (literal → data assertion,
       -- IRI/bnode → object assertion), letting StrictTyping enforce §5.8.2 declarations in strict mode.
@@ -700,16 +719,29 @@ private def passAssertions (fuel : Nat) : MapM Unit := do
         let oInd ← match termToIndividual docId t.object with | .ok x => pure x | .error e => throw e
         addAxiom (.objectAssertion (.named t.predicate) sInd oInd)
 
+private def seedImportedDecls (st : MapState) (decls : List EntityDecl) : MapState :=
+  decls.foldl (fun acc d =>
+    match d.kind with
+    | .cls => { acc with classes := d.iri :: acc.classes }
+    | .datatype => { acc with datatypes := d.iri :: acc.datatypes }
+    | .objectProperty => { acc with objProps := d.iri :: acc.objProps }
+    | .dataProperty => { acc with dataProps := d.iri :: acc.dataProps }
+    | .annotationProperty => { acc with annotProps := d.iri :: acc.annotProps }
+    | .namedIndividual => { acc with namedInds := d.iri :: acc.namedInds }) st
+
 /-- Map a parsed `RDFGraph` to a SABRINA `ParsedDocument` per W3C OWL 2 Mapping
     to RDF Graphs (Tables 3–18). When `strictUnconsumed` is `true`, rejects any
-    unconsumed or malformed RDF triples. -/
-def mapRDFGraph (docId : String) (g : RDFGraph) (strictUnconsumed : Bool := true) :
+    unconsumed or malformed RDF triples. Optional `importedDecls` seeds entity
+    typing from the enclosing import closure (W3C §3.1.2 Table 5 `AllDecl(G)`). -/
+def mapRDFGraph (docId : String) (g : RDFGraph) (strictUnconsumed : Bool := true)
+    (importedDecls : List EntityDecl := []) :
     Except String ParsedDocument := do
-  let initSt : MapState := {
+  let baseSt : MapState := {
     docId := docId
     triples := g.triples.toArray
     consumed := Array.replicate g.triples.length false
   }
+  let initSt := if importedDecls.isEmpty then baseSt else seedImportedDecls baseSt importedDecls
   let fuel := g.triples.length + 32
   let ((), st) ← (do
     passHeaderAndReification
@@ -796,19 +828,89 @@ def parseDocumentAutoWithId (docId : String) (input : String)
 def parseDocumentAuto (input : String) (strictRDF : Bool := true) : Except String ParsedDocument :=
   parseDocumentAutoWithId "doc:0" input strictRDF
 
+private inductive RawParsedDoc where
+  | fss (doc : ParsedDocument)
+  | rdf (docId : String) (g : RDFGraph)
+      (ontologyIRI : Option IRI) (versionIRI : Option IRI)
+      (imports : List IRI) (decls : List EntityDecl)
+
+private def scanRDFHeaderAndDecls (g : RDFGraph) :
+    Option IRI × Option IRI × List IRI × List EntityDecl := Id.run do
+  let mut hdrTerm : Option RDFTerm := none
+  let mut ontIRI : Option IRI := none
+  let mut verIRI : Option IRI := none
+  let mut imps : List IRI := []
+  let mut decls : List EntityDecl := []
+  for t in g.triples do
+    if t.predicate == rdfType then
+      if t.object == .iri owlOntology then
+        hdrTerm := some t.subject
+        if let .iri i := t.subject then ontIRI := some i
+      else if let .iri i := t.subject then
+        if t.object == .iri owlClass then decls := ⟨.cls, i⟩ :: decls
+        else if t.object == .iri rdfsDatatype then decls := ⟨.datatype, i⟩ :: decls
+        else if t.object == .iri owlObjectProperty then decls := ⟨.objectProperty, i⟩ :: decls
+        else if t.object == .iri owlDatatypeProperty then decls := ⟨.dataProperty, i⟩ :: decls
+        else if t.object == .iri owlAnnotationProperty then decls := ⟨.annotationProperty, i⟩ :: decls
+        else if t.object == .iri owlNamedIndividual then decls := ⟨.namedIndividual, i⟩ :: decls
+  if let some ht := hdrTerm then
+    for t in g.triples do
+      if t.subject == ht then
+        if t.predicate == owlVersionIRI then
+          if let .iri v := t.object then verIRI := some v
+        else if t.predicate == owlImports then
+          if let .iri imp := t.object then imps := imp :: imps
+  return (ontIRI, verIRI, imps.reverse, decls.reverse)
+
+private def parseRawAutoWithId (docId : String) (input : String) : Except String RawParsedDoc := do
+  match detectSyntax input with
+  | .fss =>
+    let d ← parseDocumentWithId docId input
+    return .fss d
+  | .rdfxml =>
+    let g ← XML.parseRDFXML input
+    let (oi, vi, imps, ds) := scanRDFHeaderAndDecls g
+    return .rdf docId g oi vi imps ds
+  | .turtle =>
+    let g ← Turtle.parseTurtle input
+    let (oi, vi, imps, ds) := scanRDFHeaderAndDecls g
+    return .rdf docId g oi vi imps ds
+
+private def RawParsedDoc.ontologyIRI : RawParsedDoc → Option IRI
+  | .fss d => d.ontologyIRI
+  | .rdf _ _ oi _ _ _ => oi
+
+private def RawParsedDoc.versionIRI : RawParsedDoc → Option IRI
+  | .fss d => d.versionIRI
+  | .rdf _ _ _ vi _ _ => vi
+
+private def RawParsedDoc.imports : RawParsedDoc → List IRI
+  | .fss d => d.imports
+  | .rdf _ _ _ _ imps _ => imps
+
+private def RawParsedDoc.decls : RawParsedDoc → List EntityDecl
+  | .fss d => d.declarations
+  | .rdf _ _ _ _ _ ds => ds
+
+private def RawParsedDoc.finalize (strictRDF : Bool) (closureDecls : List EntityDecl) :
+    RawParsedDoc → Except String ParsedDocument
+  | .fss d => .ok d
+  | .rdf docId g _ _ _ _ => mapRDFGraph docId g strictRDF closureDecls
+
 /-- Resolve transitive `Import(...)` / `owl:imports` closure across mixed-syntax
-    documents (FSS, RDF/XML, and Turtle). -/
+    documents (FSS, RDF/XML, and Turtle), sharing entity declarations across the
+    entire import closure before mapping RDF graphs (W3C §3.1.2 Table 5 `AllDecl(G)`). -/
 def resolveImportClosureAuto (rootText : String) (library : List (IRI × String))
     (strictRDF : Bool := true) : Except String ResolvedOFNClosure := do
-  let rootDoc ← parseDocumentAutoWithId "doc:0" rootText strictRDF
-  let mut parsedLib : List (IRI × ParsedDocument) := []
+  let rootRaw ← parseRawAutoWithId "doc:0" rootText
+  let mut parsedLib : List (IRI × RawParsedDoc) := []
   let mut idx := 1
   for (key, text) in library do
-    let doc ← parseDocumentAutoWithId s!"doc:{idx}" text strictRDF
-    parsedLib := (key, doc) :: parsedLib
+    let raw ← parseRawAutoWithId s!"doc:{idx}" text
+    parsedLib := (key, raw) :: parsedLib
     idx := idx + 1
   parsedLib := parsedLib.reverse
-  let findDoc (target : IRI) : Option ParsedDocument :=
+  let findRaw (target : IRI) : Option RawParsedDoc :=
     match parsedLib.find? (fun (k, _) => k == target) with
     | some (_, d) => some d
     | none =>
@@ -818,13 +920,13 @@ def resolveImportClosureAuto (rootText : String) (library : List (IRI × String)
         match parsedLib.find? (fun (_, d) => d.ontologyIRI == some target) with
         | some (_, d) => some d
         | none => none
+  -- Phase 1: Walk transitive import closure and collect AllDecl(G)
   let mut visited : List IRI := []
-  if let some iri := rootDoc.ontologyIRI then visited := iri :: visited
-  if let some iri := rootDoc.versionIRI then visited := iri :: visited
-  let mut queue : List IRI := rootDoc.imports
-  let mut allDecls : List EntityDecl := rootDoc.declarations
-  let mut allAnnots : List AnnotationAxiom := rootDoc.annotationAxioms
-  let mut allAxioms : Ontology := rootDoc.ontology
+  if let some iri := rootRaw.ontologyIRI then visited := iri :: visited
+  if let some iri := rootRaw.versionIRI then visited := iri :: visited
+  let mut queue : List IRI := rootRaw.imports
+  let mut reachable : List RawParsedDoc := [rootRaw]
+  let mut closureDecls : List EntityDecl := rootRaw.decls
   let mut fuel := (parsedLib.length + 1) * (parsedLib.length + 2) + 64
   while !queue.isEmpty && fuel > 0 do
     fuel := fuel - 1
@@ -833,16 +935,28 @@ def resolveImportClosureAuto (rootText : String) (library : List (IRI × String)
     | imp :: rest =>
       queue := rest
       if visited.contains imp then continue
-      match findDoc imp with
+      match findRaw imp with
       | none => throw s!"missing imported ontology: {imp}"
-      | some doc =>
+      | some raw =>
         visited := imp :: visited
-        if let some iri := doc.ontologyIRI then visited := iri :: visited
-        if let some iri := doc.versionIRI then visited := iri :: visited
-        allDecls := allDecls ++ doc.declarations
-        allAnnots := allAnnots ++ doc.annotationAxioms
-        allAxioms := allAxioms ++ doc.ontology
-        queue := queue ++ doc.imports
+        if let some iri := raw.ontologyIRI then visited := iri :: visited
+        if let some iri := raw.versionIRI then visited := iri :: visited
+        reachable := raw :: reachable
+        closureDecls := closureDecls ++ raw.decls
+        queue := queue ++ raw.imports
+  -- Phase 2: Map each reachable RDF graph with full import-closure declarations
+  let reachableOrd := reachable.reverse
+  let mut rootDoc? : Option ParsedDocument := none
+  let mut allDecls : List EntityDecl := []
+  let mut allAnnots : List AnnotationAxiom := []
+  let mut allAxioms : Ontology := []
+  for raw in reachableOrd do
+    let doc ← raw.finalize strictRDF closureDecls
+    if rootDoc?.isNone then rootDoc? := some doc
+    allDecls := allDecls ++ doc.declarations
+    allAnnots := allAnnots ++ doc.annotationAxioms
+    allAxioms := allAxioms ++ doc.ontology
+  let rootDoc := rootDoc?.getD { prefixes := [], ontology := [] }
   return {
     prefixes := rootDoc.prefixes
     declarations := allDecls

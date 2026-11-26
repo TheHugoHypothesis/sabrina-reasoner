@@ -841,7 +841,9 @@ def SolvedRange.finiteValues? : SolvedRange r → Option (List Value)
     match i.bounds.lower, i.bounds.upper with
     | some lo, some hi =>
       if hi < lo then some []
-      else some ((List.range ((hi - lo).toNat + 1)).map fun (k : Nat) => Value.integer (lo + (k : Int)))
+      else if (hi - lo).toNat < 1024 then
+        some ((List.range ((hi - lo).toNat + 1)).map fun (k : Nat) => Value.integer (lo + (k : Int)))
+      else none
     | _, _ => none
   | .ratInterval i =>
     if i.bounds.isEmpty i.decimalOnly then some [] else none
@@ -871,14 +873,16 @@ theorem SolvedRange.finiteValues?_sound {r : DataRange} (sr : SolvedRange r) {vs
         split at hvs
         · rename_i hlt
           exact False.elim (iv.empty_sound hlo hhi hlt i y hy)
-        · cases hvs
-          obtain ⟨z, hz, rfl⟩ := iv.member_bounds i y hy
-          simp only [IntegerBounds.contains, hlo, hhi, Option.elim] at hz
-          refine ⟨.integer z, ?_, rfl⟩
-          rw [List.mem_map]
-          refine ⟨(z - lo).toNat, ?_, ?_⟩
-          · rw [List.mem_range]; omega
-          · congr 1; omega
+        · split at hvs
+          · cases hvs
+            obtain ⟨z, hz, rfl⟩ := iv.member_bounds i y hy
+            simp only [IntegerBounds.contains, hlo, hhi, Option.elim] at hz
+            refine ⟨.integer z, ?_, rfl⟩
+            rw [List.mem_map]
+            refine ⟨(z - lo).toNat, ?_, ?_⟩
+            · rw [List.mem_range]; omega
+            · congr 1; omega
+          · cases hvs
   | ratInterval rv =>
     simp only [SolvedRange.finiteValues?] at hvs
     split at hvs

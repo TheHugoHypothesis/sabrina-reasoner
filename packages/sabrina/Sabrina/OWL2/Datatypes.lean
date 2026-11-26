@@ -562,6 +562,45 @@ theorem valueSpace_xmlLiteral_iff (v : Value) :
   · rintro ⟨s, hs, rfl⟩
     exact ⟨.xmlLiteral, hfind, hs⟩
 
+theorem valueSpace_hexBinary_iff (v : Value) :
+    valueSpace (xsd "hexBinary") v ↔ ∃ bs : List UInt8, v = .hexBinary bs := by
+  have hfind : findDatatype (xsd "hexBinary") = some .hexBinary := rfl
+  constructor
+  · rintro ⟨dt, hdt, hcon⟩
+    rw [hfind] at hdt; cases hdt
+    cases v with
+    | hexBinary bs => exact ⟨bs, rfl⟩
+    | _ => exact False.elim hcon
+  · rintro ⟨bs, rfl⟩
+    exact ⟨.hexBinary, hfind, trivial⟩
+
+theorem valueSpace_base64Binary_iff (v : Value) :
+    valueSpace (xsd "base64Binary") v ↔ ∃ bs : List UInt8, v = .base64Binary bs := by
+  have hfind : findDatatype (xsd "base64Binary") = some .base64Binary := rfl
+  constructor
+  · rintro ⟨dt, hdt, hcon⟩
+    rw [hfind] at hdt; cases hdt
+    cases v with
+    | base64Binary bs => exact ⟨bs, rfl⟩
+    | _ => exact False.elim hcon
+  · rintro ⟨bs, rfl⟩
+    exact ⟨.base64Binary, hfind, trivial⟩
+
+theorem valueSpace_plainLiteral_is_plain {v : Value} (hv : valueSpace (rdf "PlainLiteral") v) :
+    ∃ s lang : String, v = .plainLiteral s lang := by
+  have hfind : findDatatype (rdf "PlainLiteral") = some (.str .plainLiteral) := rfl
+  obtain ⟨dt, hdt, hcon⟩ := hv
+  rw [hfind] at hdt; cases hdt
+  cases v with
+  | plainLiteral s lang => exact ⟨s, lang, rfl⟩
+  | _ => exact False.elim hcon
+
+theorem valueSpace_string_to_plainLiteral {v : Value} (hv : valueSpace (xsd "string") v) :
+    valueSpace (rdf "PlainLiteral") v := by
+  obtain ⟨s, rfl⟩ := (valueSpace_string_iff v).mp hv
+  have hfind : findDatatype (rdf "PlainLiteral") = some (.str .plainLiteral) := rfl
+  exact ⟨.str .plainLiteral, hfind, by simp [Datatype.contains, StringKind.accepts]⟩
+
 theorem decodeXMLLiteral_iff (raw s : String) :
     decodeLiteral ⟨raw, rdf "XMLLiteral"⟩ = some (.xmlLiteral s) ↔
       raw = s ∧ checkCanonicalXMLLiteral raw = true := by

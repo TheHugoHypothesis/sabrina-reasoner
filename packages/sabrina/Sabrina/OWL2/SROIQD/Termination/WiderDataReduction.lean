@@ -243,72 +243,585 @@ def _root_.Sabrina.OWL2.SROIQD.Problem.widerWitnessCap (p : Problem) : Nat :=
   let mult := if p.keys.all (fun k => k.dataProps.isEmpty) then 1 else 1 + p.nominals.length
   max 1 (mult * p.localDataDemand)
 
-private theorem allPartitions_mem_sub {atoms pos neg : List DataRange}
-    (hmem : (pos, neg) ∈ allPartitions atoms) :
+/-! ### 2b. Family- and Subtype-Pruned Venn Partition Construction -/
+
+/-- Pairwise-disjoint primitive OWL 2 value-space families. -/
+inductive DataFamily where
+  | numeric
+  | float
+  | double
+  | string
+  | boolean
+  | dateTime
+  | hexBinary
+  | base64
+  | anyURI
+  | xmlLiteral
+  deriving DecidableEq, Repr
+
+def valueFamily : Value → DataFamily
+  | .number _ | .irrational _ => .numeric
+  | .float _ => .float
+  | .double _ => .double
+  | .plainLiteral _ _ => .string
+  | .boolean _ => .boolean
+  | .dateTime _ => .dateTime
+  | .hexBinary _ => .hexBinary
+  | .base64Binary _ => .base64
+  | .anyURI _ => .anyURI
+  | .xmlLiteral _ => .xmlLiteral
+
+def datatypeFamily? (t : IRI) : Option DataFamily :=
+  if t == xsd "float" then some .float
+  else if t == xsd "double" then some .double
+  else if t == xsd "boolean" then some .boolean
+  else if t == xsd "dateTime" || t == xsd "dateTimeStamp" then some .dateTime
+  else if t == xsd "hexBinary" then some .hexBinary
+  else if t == xsd "base64Binary" then some .base64
+  else if t == xsd "anyURI" then some .anyURI
+  else if t == rdf "XMLLiteral" then some .xmlLiteral
+  else if t == owlReal || t == owlRational || t == xsd "decimal" || (integerBounds t).isSome then
+    some .numeric
+  else if isStringDatatype t then some .string
+  else none
+
+def atomDatatypeW : DataRange → Option IRI
+  | .datatype t | .restriction t _ => some t
+  | _ => none
+
+def atomFamily? : DataRange → Option DataFamily
+  | .datatype t | .restriction t _ => datatypeFamily? t
+  | .oneOf ls =>
+    match decodeLiteralsList ls with
+    | some (v :: vs) =>
+      let f := valueFamily v
+      if vs.all (fun w => valueFamily w == f) then some f else none
+    | _ => none
+  | _ => none
+
+/-- Reflexive-transitive subtype check across OWL 2 numeric, string, and dateTime
+    datatype hierarchies (verified sound by `checkValue_of_isSubtypeDatatype`). -/
+def isSubtypeDatatype (sub sup : IRI) : Bool :=
+  if sub == sup then true
+  else if sup == owlReal then datatypeFamily? sub == some .numeric
+  else if sup == owlRational then sub != owlReal && datatypeFamily? sub == some .numeric
+  else if sup == xsd "decimal" then
+    sub != owlReal && sub != owlRational && datatypeFamily? sub == some .numeric
+  else if sup == xsd "integer" then (integerBounds sub).isSome
+  else if sup == rdf "PlainLiteral" then datatypeFamily? sub == some .string
+  else if sup == xsd "string" then sub != rdf "PlainLiteral" && datatypeFamily? sub == some .string
+  else if sup == xsd "dateTime" then sub == xsd "dateTimeStamp"
+  else
+    match integerBounds sub, integerBounds sup with
+    | some b1, some b2 =>
+      (match b2.lower with
+       | none => true
+       | some lo2 => match b1.lower with | some lo1 => lo2 ≤ lo1 | none => false) &&
+      (match b2.upper with
+       | none => true
+       | some hi2 => match b1.upper with | some hi1 => hi1 ≤ hi2 | none => false)
+    | _, _ => false
+
+private theorem checkValue_family {t : IRI} {f : DataFamily} {v : Value}
+    (hf : datatypeFamily? t = some f) (hc : checkValue t v = true) :
+    valueFamily v = f := by
+  have hvs := (checkValue_iff t v).mp hc
+  unfold datatypeFamily? at hf
+  split at hf
+  · rename_i h; have ht := beq_iff_eq.mp h; subst ht; cases hf
+    cases v with
+    | float _ => rfl
+    | double fv => have := ((valueSpace_double_iff _ fv).mp hvs).1; simp [xsd] at this
+    | dateTime dt => rcases ((valueSpace_dateTime_iff _ dt).mp hvs).2 with h1 | ⟨h1, _⟩ <;> simp [xsd] at h1
+    | _ => rw [checkValue_ordered_false (by decide : isOrderedDatatype (xsd "float") = true) rfl] at hc; cases hc
+  · split at hf
+    · rename_i h; have ht := beq_iff_eq.mp h; subst ht; cases hf
+      cases v with
+      | double _ => rfl
+      | float fv => have := ((valueSpace_float_iff _ fv).mp hvs).1; simp [xsd] at this
+      | dateTime dt => rcases ((valueSpace_dateTime_iff _ dt).mp hvs).2 with h1 | ⟨h1, _⟩ <;> simp [xsd] at h1
+      | _ => rw [checkValue_ordered_false (by decide : isOrderedDatatype (xsd "double") = true) rfl] at hc; cases hc
+    · split at hf
+      · rename_i h; have ht := beq_iff_eq.mp h; subst ht; cases hf
+        obtain ⟨_, rfl⟩ := (valueSpace_boolean_iff v).mp hvs; rfl
+      · split at hf
+        · rename_i h; cases hf
+          simp only [Bool.or_eq_true, beq_iff_eq] at h
+          cases v with
+          | dateTime _ => rfl
+          | float fv =>
+            have h1 := ((valueSpace_float_iff _ fv).mp hvs).1
+            rcases h with rfl | rfl <;> simp [xsd] at h1
+          | double fv =>
+            have h1 := ((valueSpace_double_iff _ fv).mp hvs).1
+            rcases h with rfl | rfl <;> simp [xsd] at h1
+          | _ =>
+            rcases h with rfl | rfl
+            · rw [checkValue_ordered_false (by decide : isOrderedDatatype (xsd "dateTime") = true) rfl] at hc; cases hc
+            · rw [checkValue_ordered_false (by decide : isOrderedDatatype (xsd "dateTimeStamp") = true) rfl] at hc; cases hc
+        · split at hf
+          · rename_i h; have ht := beq_iff_eq.mp h; subst ht; cases hf
+            obtain ⟨_, rfl⟩ := (valueSpace_hexBinary_iff v).mp hvs; rfl
+          · split at hf
+            · rename_i h; have ht := beq_iff_eq.mp h; subst ht; cases hf
+              obtain ⟨_, rfl⟩ := (valueSpace_base64Binary_iff v).mp hvs; rfl
+            · split at hf
+              · rename_i h; have ht := beq_iff_eq.mp h; subst ht; cases hf
+                cases v with
+                | anyURI _ => rfl
+                | plainLiteral _ _ =>
+                  rcases valueSpace_plainLiteral_iri hvs with h1 | h1 | h1 | h1 | h1 | h1 | h1 | h1 <;>
+                    simp [rdf, xsd] at h1
+                | _ => rw [checkValue_lexical_false (by decide : isLexicalDatatype (xsd "anyURI") = true) rfl] at hc; cases hc
+              · split at hf
+                · rename_i h; have ht := beq_iff_eq.mp h; subst ht; cases hf
+                  obtain ⟨_, _, rfl⟩ := (valueSpace_xmlLiteral_iff v).mp hvs; rfl
+                · split at hf
+                  · rename_i h; cases hf
+                    simp only [Bool.or_eq_true, beq_iff_eq] at h
+                    rcases h with ((rfl | rfl) | rfl) | hib
+                    · rcases (valueSpace_real_iff v).mp hvs with ⟨_, rfl⟩ | ⟨_, _, _, rfl⟩ <;> rfl
+                    · obtain ⟨_, rfl⟩ := (valueSpace_rational_iff v).mp hvs; rfl
+                    · obtain ⟨_, _, rfl⟩ := (valueSpace_decimal_iff v).mp hvs; rfl
+                    · obtain ⟨bs, hbs⟩ := Option.isSome_iff_exists.mp hib
+                      obtain ⟨_, _, rfl⟩ := (valueSpace_integerSubtype_iff hbs v).mp hvs; rfl
+                  · split at hf
+                    · rename_i h; cases hf
+                      simp only [isStringDatatype, Bool.or_eq_true, beq_iff_eq] at h
+                      rcases h with (((((((rfl | rfl) | rfl) | rfl) | rfl) | rfl) | rfl) | rfl)
+                      · obtain ⟨_, _, rfl⟩ := valueSpace_plainLiteral_is_plain hvs; rfl
+                      · obtain ⟨_, rfl⟩ := (valueSpace_string_iff v).mp hvs; rfl
+                      · obtain ⟨_, rfl⟩ := (valueSpace_string_iff v).mp (valueSpace_string_of_subtype (by decide) hvs); rfl
+                      · obtain ⟨_, rfl⟩ := (valueSpace_string_iff v).mp (valueSpace_string_of_subtype (by decide) hvs); rfl
+                      · obtain ⟨_, rfl⟩ := (valueSpace_string_iff v).mp (valueSpace_string_of_subtype (by decide) hvs); rfl
+                      · obtain ⟨_, rfl⟩ := (valueSpace_string_iff v).mp (valueSpace_string_of_subtype (by decide) hvs); rfl
+                      · obtain ⟨_, rfl⟩ := (valueSpace_string_iff v).mp (valueSpace_string_of_subtype (by decide) hvs); rfl
+                      · obtain ⟨_, rfl⟩ := (valueSpace_string_iff v).mp (valueSpace_string_of_subtype (by decide) hvs); rfl
+                    · cases hf
+
+private theorem datatypeFamily_literal_none : datatypeFamily? literalDatatype = none := by
+  decide
+
+private theorem evalWiderAtom_family {a : DataRange} {f : DataFamily} {v : Value}
+    (hf : atomFamily? a = some f) (hev : evalWiderAtom a v = true) :
+    valueFamily v = f := by
+  cases a with
+  | datatype t =>
+    have hne : t ≠ literalDatatype := by
+      intro he; subst he
+      simp [atomFamily?, datatypeFamily_literal_none] at hf
+    have hc : checkValue t v = true := by simpa [evalWiderAtom, hne] using hev
+    exact checkValue_family hf hc
+  | restriction t fs =>
+    have hc : checkValue t v = true := (Bool.and_eq_true_iff.mp hev).1
+    exact checkValue_family hf hc
+  | oneOf ls =>
+    simp only [atomFamily?] at hf
+    cases hdl : decodeLiteralsList ls with
+    | none => rw [hdl] at hf; cases hf
+    | some vs =>
+      rw [hdl] at hf
+      cases vs with
+      | nil => cases hf
+      | cons v0 rest =>
+        simp only [] at hf
+        split at hf
+        · rename_i hall
+          cases hf
+          have hvMem : v ∈ v0 :: rest := by
+            simp only [evalWiderAtom, hdl] at hev
+            exact List.contains_iff_mem.mp hev
+          rcases List.mem_cons.mp hvMem with rfl | hrest
+          · rfl
+          · exact beq_iff_eq.mp (List.all_eq_true.mp hall v hrest)
+        · cases hf
+  | _ => simp [atomFamily?] at hf
+
+private theorem atomFamily_ne_literal {a : DataRange} {f : DataFamily}
+    (hf : atomFamily? a = some f) : a ≠ .datatype literalDatatype := by
+  intro he; subst he
+  simp [atomFamily?, datatypeFamily_literal_none] at hf
+
+private theorem checkValue_of_isSubtypeDatatype {sub sup : IRI} {v : Value}
+    (hsub : isSubtypeDatatype sub sup = true) (hc : checkValue sub v = true) :
+    checkValue sup v = true := by
+  have hvs := (checkValue_iff sub v).mp hc
+  rw [checkValue_iff]
+  unfold isSubtypeDatatype at hsub
+  split at hsub
+  · exact beq_iff_eq.mp ‹_› ▸ hvs
+  · split at hsub
+    · rename_i h1; have hsup := beq_iff_eq.mp h1; subst hsup
+      have hfam := checkValue_family (beq_iff_eq.mp hsub) hc
+      cases v with
+      | number q => exact (valueSpace_real_iff _).mpr (Or.inl ⟨q, rfl⟩)
+      | irrational q =>
+        have hsubReal : sub = owlReal := ((valueSpace_irrational_iff sub q).mp hvs).1
+        exact hsubReal ▸ hvs
+      | _ => simp [valueFamily] at hfam
+    · split at hsub
+      · rename_i h2; have hsup := beq_iff_eq.mp h2; subst hsup
+        simp only [Bool.and_eq_true, bne_iff_ne, beq_iff_eq] at hsub
+        have hfam := checkValue_family hsub.2 hc
+        cases v with
+        | number q => exact (valueSpace_rational_iff _).mpr ⟨q, rfl⟩
+        | irrational q =>
+          have hsubReal : sub = owlReal := ((valueSpace_irrational_iff sub q).mp hvs).1
+          exact (hsub.1 hsubReal).elim
+        | _ => simp [valueFamily] at hfam
+      · split at hsub
+        · rename_i h3; have hsup := beq_iff_eq.mp h3; subst hsup
+          simp only [Bool.and_eq_true, bne_iff_ne, beq_iff_eq] at hsub
+          have hnum : sub = xsd "decimal" ∨ (integerBounds sub).isSome = true := by
+            have hfam := hsub.2
+            unfold datatypeFamily? at hfam
+            split at hfam
+            · cases hfam
+            · split at hfam
+              · cases hfam
+              · split at hfam
+                · cases hfam
+                · split at hfam
+                  · cases hfam
+                  · split at hfam
+                    · cases hfam
+                    · split at hfam
+                      · cases hfam
+                      · split at hfam
+                        · cases hfam
+                        · split at hfam
+                          · cases hfam
+                          · split at hfam
+                            · rename_i h9
+                              simp only [Bool.or_eq_true, beq_iff_eq] at h9
+                              rcases h9 with ((rfl | rfl) | rfl) | hib
+                              · exact (hsub.1.1 rfl).elim
+                              · exact (hsub.1.2 rfl).elim
+                              · exact .inl rfl
+                              · exact .inr hib
+                            · split at hfam <;> cases hfam
+          rcases hnum with rfl | hib
+          · exact hvs
+          · obtain ⟨bs, hbs⟩ := Option.isSome_iff_exists.mp hib
+            obtain ⟨z, _, rfl⟩ := (valueSpace_integerSubtype_iff hbs _).mp hvs
+            exact (valueSpace_decimal_iff _).mpr ⟨Rat.ofInt z, ⟨z, 0, by apply Rat.ext <;> simp [Rat.num_mkRat, Rat.den_mkRat]⟩, rfl⟩
+        · split at hsub
+          · rename_i h4; have hsup := beq_iff_eq.mp h4; subst hsup
+            obtain ⟨bs, hbs⟩ := Option.isSome_iff_exists.mp hsub
+            obtain ⟨z, _, rfl⟩ := (valueSpace_integerSubtype_iff hbs _).mp hvs
+            exact (valueSpace_integer_iff _).mpr ⟨z, rfl⟩
+          · split at hsub
+            · rename_i h5; have hsup := beq_iff_eq.mp h5; subst hsup
+              have hfam := checkValue_family (beq_iff_eq.mp hsub) hc
+              cases v with
+              | plainLiteral s lang =>
+                rcases valueSpace_plainLiteral_iri hvs with
+                  rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+                · exact hvs
+                · exact valueSpace_string_to_plainLiteral hvs
+                · exact valueSpace_string_to_plainLiteral (valueSpace_string_of_subtype (by decide) hvs)
+                · exact valueSpace_string_to_plainLiteral (valueSpace_string_of_subtype (by decide) hvs)
+                · exact valueSpace_string_to_plainLiteral (valueSpace_string_of_subtype (by decide) hvs)
+                · exact valueSpace_string_to_plainLiteral (valueSpace_string_of_subtype (by decide) hvs)
+                · exact valueSpace_string_to_plainLiteral (valueSpace_string_of_subtype (by decide) hvs)
+                · exact valueSpace_string_to_plainLiteral (valueSpace_string_of_subtype (by decide) hvs)
+              | _ => simp [valueFamily] at hfam
+            · split at hsub
+              · rename_i h6; have hsup := beq_iff_eq.mp h6; subst hsup
+                simp only [Bool.and_eq_true, bne_iff_ne, beq_iff_eq] at hsub
+                have hfam := checkValue_family hsub.2 hc
+                cases v with
+                | plainLiteral s lang =>
+                  rcases valueSpace_plainLiteral_iri hvs with
+                    hpl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+                  · exact (hsub.1 hpl).elim
+                  · exact hvs
+                  · exact valueSpace_string_of_subtype (by decide) hvs
+                  · exact valueSpace_string_of_subtype (by decide) hvs
+                  · exact valueSpace_string_of_subtype (by decide) hvs
+                  · exact valueSpace_string_of_subtype (by decide) hvs
+                  · exact valueSpace_string_of_subtype (by decide) hvs
+                  · exact valueSpace_string_of_subtype (by decide) hvs
+                | _ => simp [valueFamily] at hfam
+              · split at hsub
+                · rename_i h7; have hsup := beq_iff_eq.mp h7; subst hsup
+                  have hsubEq := beq_iff_eq.mp hsub; subst hsubEq
+                  cases v with
+                  | dateTime dt =>
+                    obtain ⟨hval, _⟩ := (valueSpace_dateTime_iff _ dt).mp hvs
+                    exact (valueSpace_dateTime_iff _ dt).mpr ⟨hval, Or.inl rfl⟩
+                  | float fv => have := ((valueSpace_float_iff _ fv).mp hvs).1; simp [xsd] at this
+                  | double fv => have := ((valueSpace_double_iff _ fv).mp hvs).1; simp [xsd] at this
+                  | _ =>
+                    rw [checkValue_ordered_false (by decide : isOrderedDatatype (xsd "dateTimeStamp") = true) rfl] at hc
+                    cases hc
+                · cases hb1 : integerBounds sub with
+                  | none => rw [hb1] at hsub; cases hsub
+                  | some b1 =>
+                    cases hb2 : integerBounds sup with
+                    | none => rw [hb1, hb2] at hsub; cases hsub
+                    | some b2 =>
+                      rw [hb1, hb2] at hsub
+                      simp only [Bool.and_eq_true] at hsub
+                      obtain ⟨z, ⟨hzlo, hzhi⟩, rfl⟩ := (valueSpace_integerSubtype_iff hb1 _).mp hvs
+                      refine (valueSpace_integerSubtype_iff hb2 _).mpr ⟨z, ⟨?_, ?_⟩, rfl⟩
+                      · cases hlo2 : b2.lower with
+                        | none => trivial
+                        | some lo2 =>
+                          rw [hlo2] at hsub
+                          cases hlo1 : b1.lower with
+                          | none => rw [hlo1] at hsub; cases hsub.1
+                          | some lo1 =>
+                            rw [hlo1] at hsub hzlo
+                            have hle : lo2 ≤ lo1 := decide_eq_true_eq.mp hsub.1
+                            exact Int.le_trans hle hzlo
+                      · cases hhi2 : b2.upper with
+                        | none => trivial
+                        | some hi2 =>
+                          rw [hhi2] at hsub
+                          cases hhi1 : b1.upper with
+                          | none => rw [hhi1] at hsub; cases hsub.2
+                          | some hi1 =>
+                            rw [hhi1] at hsub hzhi
+                            have hle : hi1 ≤ hi2 := decide_eq_true_eq.mp hsub.2
+                            exact Int.le_trans hzhi hle
+
+/-- Decide whether placing `a` into `pos` is consistent with existing `(pos, neg)`
+    under disjoint datatype families, subtype chains, and finite `oneOf` sets. -/
+def canAddPos (a : DataRange) (pos neg : List DataRange) : Bool :=
+  if a == .oneOf [] then false
+  else if pos.any (fun b =>
+    match atomFamily? b, atomFamily? a with
+    | some f1, some f2 => f1 != f2
+    | _, _ => false) then false
+  else if pos.any (fun
+    | .oneOf ls =>
+      match decodeLiteralsList ls with
+      | some vs => vs.all (fun v => !evalWiderAtom a v)
+      | none => false
+    | _ => false) then false
+  else if (match atomDatatypeW a with
+    | some sub => neg.any (fun
+      | .datatype sup => isSubtypeDatatype sub sup
+      | _ => false)
+    | none => false) then false
+  else true
+
+/-- Decide whether placing `a` into `neg` is consistent with existing `(pos, neg)`
+    under `rdfs:Literal`, datatype subtype chains, and finite `oneOf` sets. -/
+def canAddNeg (a : DataRange) (pos _neg : List DataRange) : Bool :=
+  if a == .datatype literalDatatype then false
+  else if pos.any (fun
+    | .oneOf ls =>
+      match decodeLiteralsList ls with
+      | some vs => vs.all (fun v => evalWiderAtom a v)
+      | none => false
+    | _ => false) then false
+  else if (match a with
+    | .datatype sup => pos.any (fun b =>
+      match atomDatatypeW b with
+      | some sub => isSubtypeDatatype sub sup
+      | none => false)
+    | _ => false) then false
+  else true
+
+/-- Incremental family-, subtype-, and `oneOf`-pruned Venn partition generator.
+    Avoids exponential $2^N$ blowup across disjoint datatype families and
+    produces strictly duplicate-free partitions when `atoms.Nodup`. -/
+def prunedWiderPartitionsAux : List DataRange → List DataRange → List DataRange →
+    List (List DataRange × List DataRange)
+  | [], pos, neg => [(pos, neg)]
+  | a :: rest, pos, neg =>
+    let pBranch := if canAddPos a pos neg then prunedWiderPartitionsAux rest (a :: pos) neg else []
+    let nBranch := if canAddNeg a pos neg then prunedWiderPartitionsAux rest pos (a :: neg) else []
+    pBranch ++ nBranch
+
+def prunedWiderPartitions (atoms : List DataRange) : List (List DataRange × List DataRange) :=
+  prunedWiderPartitionsAux atoms [] []
+
+private theorem prunedWiderPartitionsAux_mem_sub {atoms pos0 neg0 pos neg : List DataRange}
+    (hmem : (pos, neg) ∈ prunedWiderPartitionsAux atoms pos0 neg0) :
+    (∀ a ∈ pos0, a ∈ pos) ∧ (∀ a ∈ neg0, a ∈ neg) ∧
+    (∀ a ∈ pos, a ∈ pos0 ∨ a ∈ atoms) ∧
+    (∀ a ∈ neg, a ∈ neg0 ∨ a ∈ atoms) ∧
+    (pos.length + neg.length = pos0.length + neg0.length + atoms.length) ∧
+    (∀ a ∈ atoms, a ∈ pos ∨ a ∈ neg) := by
+  induction atoms generalizing pos0 neg0 pos neg with
+  | nil =>
+    simp only [prunedWiderPartitionsAux, List.mem_singleton, Prod.mk.injEq] at hmem
+    obtain ⟨rfl, rfl⟩ := hmem
+    exact ⟨fun _ h => h, fun _ h => h, fun _ h => .inl h, fun _ h => .inl h, by simp, fun _ h => by cases h⟩
+  | cons a rest ih =>
+    simp only [prunedWiderPartitionsAux, List.mem_append] at hmem
+    rcases hmem with hp | hn
+    · split at hp
+      · obtain ⟨hp0, hn0, hpSub, hnSub, hlen, hcov⟩ := ih hp
+        refine ⟨fun x hx => hp0 x (List.mem_cons_of_mem _ hx), hn0, fun x hx => ?_, fun x hx => ?_, ?_, fun x hx => ?_⟩
+        · rcases hpSub x hx with hx' | hx'
+          · rcases List.mem_cons.mp hx' with rfl | hx''
+            · exact .inr (List.mem_cons_self ..)
+            · exact .inl hx''
+          · exact .inr (List.mem_cons_of_mem _ hx')
+        · rcases hnSub x hx with hx' | hx'
+          · exact .inl hx'
+          · exact .inr (List.mem_cons_of_mem _ hx')
+        · simp only [List.length_cons] at hlen ⊢; omega
+        · rcases List.mem_cons.mp hx with rfl | hx'
+          · exact .inl (hp0 x (List.mem_cons_self ..))
+          · exact hcov x hx'
+      · cases hp
+    · split at hn
+      · obtain ⟨hp0, hn0, hpSub, hnSub, hlen, hcov⟩ := ih hn
+        refine ⟨hp0, fun x hx => hn0 x (List.mem_cons_of_mem _ hx), fun x hx => ?_, fun x hx => ?_, ?_, fun x hx => ?_⟩
+        · rcases hpSub x hx with hx' | hx'
+          · exact .inl hx'
+          · exact .inr (List.mem_cons_of_mem _ hx')
+        · rcases hnSub x hx with hx' | hx'
+          · rcases List.mem_cons.mp hx' with rfl | hx''
+            · exact .inr (List.mem_cons_self ..)
+            · exact .inl hx''
+          · exact .inr (List.mem_cons_of_mem _ hx')
+        · simp only [List.length_cons] at hlen ⊢; omega
+        · rcases List.mem_cons.mp hx with rfl | hx'
+          · exact .inr (hn0 x (List.mem_cons_self ..))
+          · exact hcov x hx'
+      · cases hn
+
+private theorem prunedWiderPartitions_mem_sub {atoms pos neg : List DataRange}
+    (hpart : (pos, neg) ∈ prunedWiderPartitions atoms) :
     (∀ a ∈ pos, a ∈ atoms) ∧ (∀ a ∈ neg, a ∈ atoms) ∧
     (pos.length + neg.length = atoms.length) ∧
     (∀ a ∈ atoms, a ∈ pos ∨ a ∈ neg) := by
-  induction atoms generalizing pos neg with
-  | nil =>
-    simp only [allPartitions, List.mem_singleton, Prod.mk.injEq] at hmem
-    obtain ⟨rfl, rfl⟩ := hmem
-    simp
-  | cons a rest ih =>
-    simp only [allPartitions, List.mem_flatMap, List.mem_cons, List.not_mem_nil, or_false,
-      Prod.mk.injEq] at hmem
-    obtain ⟨⟨p', n'⟩, hpn, ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩⟩ := hmem
-    · obtain ⟨hp, hn, hlen, hcov⟩ := ih hpn
-      refine ⟨fun x hx => ?_, fun x hx => List.mem_cons_of_mem _ (hn x hx), by simp; omega, fun x hx => ?_⟩
-      · rcases List.mem_cons.mp hx with rfl | hx'
-        · exact List.mem_cons_self ..
-        · exact List.mem_cons_of_mem _ (hp x hx')
-      · rcases List.mem_cons.mp hx with rfl | hx'
-        · exact .inl (List.mem_cons_self ..)
-        · rcases hcov x hx' with h1 | h2
-          · exact .inl (List.mem_cons_of_mem _ h1)
-          · exact .inr h2
-    · obtain ⟨hp, hn, hlen, hcov⟩ := ih hpn
-      refine ⟨fun x hx => List.mem_cons_of_mem _ (hp x hx), fun x hx => ?_, by simp; omega, fun x hx => ?_⟩
-      · rcases List.mem_cons.mp hx with rfl | hx'
-        · exact List.mem_cons_self ..
-        · exact List.mem_cons_of_mem _ (hn x hx')
-      · rcases List.mem_cons.mp hx with rfl | hx'
-        · exact .inr (List.mem_cons_self ..)
-        · rcases hcov x hx' with h1 | h2
-          · exact .inl h1
-          · exact .inr (List.mem_cons_of_mem _ h2)
+  obtain ⟨_, _, hp, hn, hlen, hcov⟩ := prunedWiderPartitionsAux_mem_sub hpart
+  exact ⟨fun a ha => (hp a ha).resolve_left (by simp),
+         fun a ha => (hn a ha).resolve_left (by simp),
+         by simpa using hlen, hcov⟩
 
-private theorem vennPartitions_mem_sub {atoms pos neg : List DataRange}
-    (hpart : (pos, neg) ∈ vennPartitions atoms) :
-    (∀ a ∈ pos, a ∈ atoms) ∧ (∀ a ∈ neg, a ∈ atoms) ∧
-    (pos.length + neg.length = atoms.length) ∧
-    (∀ a ∈ atoms, a ∈ pos ∨ a ∈ neg) :=
-  allPartitions_mem_sub (List.mem_eraseDups.mp hpart)
-
-private theorem allOneOfValues_length_of_allPartitions {atoms pos neg : List DataRange}
-    (hmem : (pos, neg) ∈ allPartitions atoms) :
-    (allOneOfValues (pos ++ neg)).length = (allOneOfValues atoms).length := by
-  induction atoms generalizing pos neg with
-  | nil =>
-    simp only [allPartitions, List.mem_singleton, Prod.mk.injEq] at hmem
-    obtain ⟨rfl, rfl⟩ := hmem; rfl
+private theorem prunedWiderPartitionsAux_nodup {atoms pos0 neg0 : List DataRange}
+    (hnd : atoms.Nodup) (hdisj : ∀ a ∈ atoms, a ∉ pos0 ∧ a ∉ neg0) :
+    (prunedWiderPartitionsAux atoms pos0 neg0).Nodup := by
+  induction atoms generalizing pos0 neg0 with
+  | nil => exact List.nodup_cons.mpr ⟨by simp, List.nodup_nil⟩
   | cons a rest ih =>
-    simp only [allPartitions, List.mem_flatMap, List.mem_cons, List.not_mem_nil, or_false,
-      Prod.mk.injEq] at hmem
-    obtain ⟨⟨p', n'⟩, hpn, ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩⟩ := hmem
-    · have := ih hpn
-      simp only [allOneOfValues, List.flatMap_append, List.flatMap_cons, List.length_append] at this ⊢
-      omega
-    · have := ih hpn
-      simp only [allOneOfValues, List.flatMap_append, List.flatMap_cons, List.length_append] at this ⊢
-      omega
+    obtain ⟨hna, hndR⟩ := List.nodup_cons.mp hnd
+    have haDisj := hdisj a (List.mem_cons_self ..)
+    have hrestDisj : ∀ x ∈ rest, x ∉ pos0 ∧ x ∉ neg0 :=
+      fun x hx => hdisj x (List.mem_cons_of_mem _ hx)
+    have hndP : (if canAddPos a pos0 neg0 then prunedWiderPartitionsAux rest (a :: pos0) neg0 else []).Nodup := by
+      split
+      · exact ih hndR fun x hx => ⟨fun h => by
+          rcases List.mem_cons.mp h with rfl | h'
+          · exact hna hx
+          · exact (hrestDisj x hx).1 h', (hrestDisj x hx).2⟩
+      · exact List.nodup_nil
+    have hndN : (if canAddNeg a pos0 neg0 then prunedWiderPartitionsAux rest pos0 (a :: neg0) else []).Nodup := by
+      split
+      · exact ih hndR fun x hx => ⟨(hrestDisj x hx).1, fun h => by
+          rcases List.mem_cons.mp h with rfl | h'
+          · exact hna hx
+          · exact (hrestDisj x hx).2 h'⟩
+      · exact List.nodup_nil
+    unfold prunedWiderPartitionsAux
+    refine List.pairwise_append.mpr ⟨hndP, hndN, fun x hx y hy heq => ?_⟩
+    subst heq
+    split at hx
+    · split at hy
+      · have hxa : a ∈ x.1 := (prunedWiderPartitionsAux_mem_sub hx).1 a (List.mem_cons_self ..)
+        rcases (prunedWiderPartitionsAux_mem_sub hy).2.2.1 a hxa with h1 | h2
+        · exact haDisj.1 h1
+        · exact hna h2
+      · cases hy
+    · cases hx
+
+private theorem prunedWiderPartitions_nodup {atoms : List DataRange} (hnd : atoms.Nodup) :
+    (prunedWiderPartitions atoms).Nodup :=
+  prunedWiderPartitionsAux_nodup hnd (fun _ _ => ⟨by simp, by simp⟩)
+
+private theorem prunedWiderPartitionsAux_unique {dm : DatatypeMap} {i : Interpretation dm} {y : i.Data}
+    {atoms pos0 neg0 p₁ n₁ p₂ n₂ : List DataRange}
+    (hm₁ : (p₁, n₁) ∈ prunedWiderPartitionsAux atoms pos0 neg0)
+    (hm₂ : (p₂, n₂) ∈ prunedWiderPartitionsAux atoms pos0 neg0)
+    (h₁ : dataHolds i y (partitionRange p₁ n₁))
+    (h₂ : dataHolds i y (partitionRange p₂ n₂)) :
+    (p₁, n₁) = (p₂, n₂) := by
+  induction atoms generalizing pos0 neg0 with
+  | nil =>
+    simp only [prunedWiderPartitionsAux, List.mem_singleton] at hm₁ hm₂
+    exact hm₁.trans hm₂.symm
+  | cons a rest ih =>
+    simp only [prunedWiderPartitionsAux, List.mem_append] at hm₁ hm₂
+    obtain ⟨hp₁, hn₁⟩ := (dataHolds_partitionRange_iff i y p₁ n₁).mp h₁
+    obtain ⟨hp₂, hn₂⟩ := (dataHolds_partitionRange_iff i y p₂ n₂).mp h₂
+    rcases hm₁ with h1p | h1n <;> rcases hm₂ with h2p | h2n
+    · split at h1p
+      · rename_i hcp; simp only [hcp, ↓reduceIte] at h2p; exact ih h1p h2p
+      · cases h1p
+    · split at h1p
+      · split at h2n
+        · have ha1 : a ∈ p₁ := (prunedWiderPartitionsAux_mem_sub h1p).1 a (List.mem_cons_self ..)
+          have ha2 : a ∈ n₂ := (prunedWiderPartitionsAux_mem_sub h2n).2.1 a (List.mem_cons_self ..)
+          exact (hn₂ a ha2 (hp₁ a ha1)).elim
+        · cases h2n
+      · cases h1p
+    · split at h1n
+      · split at h2p
+        · have ha1 : a ∈ n₁ := (prunedWiderPartitionsAux_mem_sub h1n).2.1 a (List.mem_cons_self ..)
+          have ha2 : a ∈ p₂ := (prunedWiderPartitionsAux_mem_sub h2p).1 a (List.mem_cons_self ..)
+          exact (hn₁ a ha1 (hp₂ a ha2)).elim
+        · cases h2p
+      · cases h1n
+    · split at h1n
+      · rename_i hcn; simp only [hcn, ↓reduceIte] at h2n; exact ih h1n h2n
+      · cases h1n
+
+private theorem prunedWiderPartitions_unique {dm : DatatypeMap} {i : Interpretation dm} {y : i.Data}
+    {atoms : List DataRange} {pq₁ pq₂ : List DataRange × List DataRange}
+    (hm₁ : pq₁ ∈ prunedWiderPartitions atoms) (hm₂ : pq₂ ∈ prunedWiderPartitions atoms)
+    (h₁ : dataHolds i y (partitionRange pq₁.1 pq₁.2))
+    (h₂ : dataHolds i y (partitionRange pq₂.1 pq₂.2)) : pq₁ = pq₂ :=
+  prunedWiderPartitionsAux_unique hm₁ hm₂ h₁ h₂
+
+private theorem evalOnPartition_iff_pruned {dm : DatatypeMap} {i : Interpretation dm} {y : i.Data}
+    {atoms pos neg : List DataRange}
+    (hpart : (pos, neg) ∈ prunedWiderPartitions atoms)
+    (hy : dataHolds i y (partitionRange pos neg))
+    {d : DataRange} (hd : ∀ a ∈ atomsOfDataRange d, a ∈ atoms) :
+    evalOnPartition pos d = true ↔ dataHolds i y d := by
+  obtain ⟨_, _, _, hcov⟩ := prunedWiderPartitions_mem_sub hpart
+  obtain ⟨hpos, hneg⟩ := (dataHolds_partitionRange_iff i y pos neg).mp hy
+  induction d with
+  | complement r ih =>
+    simp only [evalOnPartition, Bool.not_eq_true', Bool.eq_false_iff, dataHolds]
+    exact not_congr (ih hd)
+  | intersection a b iha ihb =>
+    simp only [evalOnPartition, Bool.and_eq_true, dataHolds]
+    refine and_congr (iha fun x hx => hd x ?_) (ihb fun x hx => hd x ?_)
+    · exact List.mem_eraseDups.mpr (List.mem_append_left _ hx)
+    · exact List.mem_eraseDups.mpr (List.mem_append_right _ hx)
+  | union a b iha ihb =>
+    simp only [evalOnPartition, Bool.or_eq_true, dataHolds]
+    refine or_congr (iha fun x hx => hd x ?_) (ihb fun x hx => hd x ?_)
+    · exact List.mem_eraseDups.mpr (List.mem_append_left _ hx)
+    · exact List.mem_eraseDups.mpr (List.mem_append_right _ hx)
+  | datatype t =>
+    have hmem : .datatype t ∈ atoms := hd _ (List.mem_singleton_self _)
+    simp only [evalOnPartition, List.contains_iff_mem]
+    exact ⟨fun hp => hpos _ hp, fun hh => (hcov _ hmem).resolve_right fun hn => hneg _ hn hh⟩
+  | restriction t fs =>
+    have hmem : .restriction t fs ∈ atoms := hd _ (List.mem_singleton_self _)
+    simp only [evalOnPartition, List.contains_iff_mem]
+    exact ⟨fun hp => hpos _ hp, fun hh => (hcov _ hmem).resolve_right fun hn => hneg _ hn hh⟩
+  | oneOf ls =>
+    have hmem : .oneOf ls ∈ atoms := hd _ (List.mem_singleton_self _)
+    simp only [evalOnPartition, List.contains_iff_mem]
+    exact ⟨fun hp => hpos _ hp, fun hh => (hcov _ hmem).resolve_right fun hn => hneg _ hn hh⟩
 
 private theorem widerAtomsAdmissible_partition {lits : List Literal}
     {atoms pos neg : List DataRange}
     (hadm : widerAtomsAdmissible (.oneOf lits :: atoms) = true)
-    (hpart : (pos, neg) ∈ vennPartitions atoms) :
+    (hpart : (pos, neg) ∈ prunedWiderPartitions atoms) :
     widerAtomsAdmissible (pos ++ (.oneOf lits :: neg)) = true := by
-  obtain ⟨hpSub, hnSub, _, _⟩ := vennPartitions_mem_sub hpart
+  obtain ⟨hpSub, hnSub, _, _⟩ := prunedWiderPartitions_mem_sub hpart
   have hsub : ∀ a ∈ pos ++ (.oneOf lits :: neg), a ∈ DataRange.oneOf lits :: atoms := by
     intro a ha
     rcases List.mem_append.mp ha with h1 | h2
@@ -463,7 +976,7 @@ def buildWiderEncoding (p : Problem) : Option WiderEncoding :=
      lits.all (fun l => (decodeLiteral l).isSome) &&
      widerAtomsAdmissible (.oneOf lits :: atoms) then
     let litVals := (lits.filterMap decodeLiteral).eraseDups
-    let parts := vennPartitions atoms
+    let parts := prunedWiderPartitions atoms
     let (cells, totalSlots) := buildCellTable K lits litVals.length parts
     some ⟨K, lits, litVals, atoms, cells, totalSlots⟩
   else none
@@ -581,7 +1094,7 @@ private structure ValidEncoding (p : Problem) (enc : WiderEncoding) : Prop where
   hatoms : enc.atoms = p.allDataAtoms
   hlitVals : enc.litVals = (enc.lits.filterMap decodeLiteral).eraseDups
   htable : (enc.cells, enc.totalSlots) =
-    buildCellTable enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)
+    buildCellTable enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)
   hdprops : ∀ dp ∈ p.allDataProps, dp ≠ topDataProperty ∧ dp ≠ bottomDataProperty
   hdec : ∀ l ∈ enc.lits, (decodeLiteral l).isSome = true
   hadm : widerAtomsAdmissible (.oneOf enc.lits :: enc.atoms) = true
@@ -661,10 +1174,10 @@ private theorem slotVal_in_cell {p : Problem} {enc : WiderEncoding} (hv : ValidE
       | some ws =>
         if h' : n - cs.lo < ws.length then Sum.inl ws[n - cs.lo] else Sum.inr (Int.ofNat n)
       | none => Sum.inr (Int.ofNat n) := by
-  have hspec := buildCellTable_spec enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)
-  have hcellsEq : (buildCellTable enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)).1 = enc.cells :=
+  have hspec := buildCellTable_spec enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)
+  have hcellsEq : (buildCellTable enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)).1 = enc.cells :=
     congrArg Prod.fst hv.htable.symm
-  have htotEq : (buildCellTable enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)).2 = enc.totalSlots :=
+  have htotEq : (buildCellTable enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)).2 = enc.totalSlots :=
     congrArg Prod.snd hv.htable.symm
   rw [hcellsEq, htotEq] at hspec
   obtain ⟨hmem, hdisj, _, _⟩ := hspec
@@ -688,10 +1201,10 @@ private theorem slotVal_in_cell_some {p : Problem} {enc : WiderEncoding} (hv : V
     {cs : CellSpec} (hcs : cs ∈ enc.cells) {ws : List Value} (hvs : cs.values = some ws)
     {n : Nat} (hlo : cs.lo ≤ n) (hhi : n < cs.lo + cs.len) :
     ∃ h' : n - cs.lo < ws.length, slotVal enc n = Sum.inl ws[n - cs.lo] := by
-  have hspec := buildCellTable_spec enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)
-  have hcellsEq : (buildCellTable enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)).1 = enc.cells :=
+  have hspec := buildCellTable_spec enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)
+  have hcellsEq : (buildCellTable enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)).1 = enc.cells :=
     congrArg Prod.fst hv.htable.symm
-  have htotEq : (buildCellTable enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)).2 = enc.totalSlots :=
+  have htotEq : (buildCellTable enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)).2 = enc.totalSlots :=
     congrArg Prod.snd hv.htable.symm
   rw [hcellsEq, htotEq] at hspec
   have hlen := (hspec.1 cs hcs).2.2.2.2
@@ -713,7 +1226,7 @@ private theorem sampleWiderCell_not_mem_litVals {p : Problem} {enc : WiderEncodi
     v ∉ enc.litVals := by
   intro hlit
   obtain ⟨l, hl, hdl⟩ := (mem_litVals_iff hv v).mp hlit
-  have hev := (List.mem_filter.mp (List.mem_of_mem_take hmem)).2
+  have hev := sampleWiderCell_eval hmem
   simp only [evalWiderPartition, Bool.and_eq_true, List.all_eq_true, List.forall_mem_cons,
     Bool.not_eq_true'] at hev
   have hne := hev.2.1
@@ -821,14 +1334,14 @@ private theorem slotVal_cell_partitionHolds {p : Problem} {enc : WiderEncoding}
     {dm : DatatypeMap} (target : enc.Target dm)
     {cs : CellSpec} (hcs : cs ∈ enc.cells) {n : Nat} (hlo : cs.lo ≤ n) (hhi : n < cs.lo + cs.len) :
     dataHolds (decodeInterp i' enc target) (targetSlot target n) (partitionRange cs.pos cs.neg) := by
-  have hspec := buildCellTable_spec enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)
-  have hcellsEq : (buildCellTable enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)).1 = enc.cells :=
+  have hspec := buildCellTable_spec enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)
+  have hcellsEq : (buildCellTable enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)).1 = enc.cells :=
     congrArg Prod.fst hv.htable.symm
-  have htotEq : (buildCellTable enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)).2 = enc.totalSlots :=
+  have htotEq : (buildCellTable enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)).2 = enc.totalSlots :=
     congrArg Prod.snd hv.htable.symm
   rw [hcellsEq, htotEq] at hspec
   obtain ⟨hpart, _, _, hnegF, hvalSpec⟩ := hspec.1 cs hcs
-  obtain ⟨hpSub, hnSub, _, _⟩ := vennPartitions_mem_sub hpart
+  obtain ⟨hpSub, hnSub, _, _⟩ := prunedWiderPartitions_mem_sub hpart
   cases hvs : cs.values with
   | some ws =>
     rw [hvs] at hvalSpec
@@ -839,7 +1352,7 @@ private theorem slotVal_cell_partitionHolds {p : Problem} {enc : WiderEncoding}
       hwsEq ▸ List.getElem_mem hidx
     have hUsed : enc.UsesValue ws[n - cs.lo] :=
       .inr ⟨cs, hcs, ws, hvs, List.getElem_mem hidx⟩
-    have heval := (List.mem_filter.mp (List.mem_of_mem_take hmem)).2
+    have heval := sampleWiderCell_eval hmem
     simp only [evalWiderPartition, Bool.and_eq_true, List.all_eq_true, List.forall_mem_cons,
       Bool.not_eq_true', Bool.eq_false_iff] at heval
     change dataHolds (decodeInterp i' enc target)
@@ -882,10 +1395,10 @@ private theorem slotVal_inj {p : Problem} {enc : WiderEncoding} (hv : ValidEncod
     (i' : Interpretation datatypeMap) {n₁ n₂ : Nat}
     (h1 : n₁ < enc.totalSlots) (h2 : n₂ < enc.totalSlots)
     (heq : slotVal enc n₁ = slotVal enc n₂) : n₁ = n₂ := by
-  have hspec := buildCellTable_spec enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)
-  have hcellsEq : (buildCellTable enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)).1 = enc.cells :=
+  have hspec := buildCellTable_spec enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)
+  have hcellsEq : (buildCellTable enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)).1 = enc.cells :=
     congrArg Prod.fst hv.htable.symm
-  have htotEq : (buildCellTable enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)).2 = enc.totalSlots :=
+  have htotEq : (buildCellTable enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)).2 = enc.totalSlots :=
     congrArg Prod.snd hv.htable.symm
   rw [hcellsEq, htotEq] at hspec
   obtain ⟨hmem, hdisj, hcov, _⟩ := hspec
@@ -952,10 +1465,12 @@ private theorem slotVal_inj {p : Problem} {enc : WiderEncoding} (hv : ValidEncod
         have hp2 := slotVal_cell_partitionHolds hv i' (standardTarget hv) hc2 h2l h2h
         rw [targetSlot_standard] at hp1 hp2
         rw [heq] at hp1
-        have hpeq := vennPartitions_unique hpart1 hpart2 hp1 hp2
+        have hpeq := prunedWiderPartitions_unique hpart1 hpart2 hp1 hp2
         obtain ⟨hpEq, hnEq⟩ := Prod.mk.inj hpeq
         have hcEq : c1 = c2 := by
-          have hndParts : (vennPartitions enc.atoms).Nodup := nodup_eraseDups_list _
+          have hndParts : (prunedWiderPartitions enc.atoms).Nodup := by
+            apply prunedWiderPartitions_nodup
+            rw [hv.hatoms]; exact nodup_eraseDups_list _
           have haux : ∀ (off : Nat) (ps : List (List DataRange × List DataRange)),
               ps.Nodup → ∀ a ∈ (buildCellTable enc.K enc.lits off ps).1,
               ∀ b ∈ (buildCellTable enc.K enc.lits off ps).1,
@@ -987,7 +1502,7 @@ private theorem slotVal_inj {p : Problem} {enc : WiderEncoding} (hv : ValidEncod
                   · have hma := (buildCellTable_spec enc.K enc.lits (off + ws.length) rest).1 a ha'
                     dsimp only at hap han; rw [← hap, ← han] at hnpq; exact (hnpq hma.1).elim
                   · exact ih (off + ws.length) hnd' a ha' b hb' hap han
-          have := haux enc.litVals.length (vennPartitions enc.atoms) hndParts
+          have := haux enc.litVals.length (prunedWiderPartitions enc.atoms) hndParts
           rw [hcellsEq] at this
           exact this c1 hc1 c2 hc2 hpEq hnEq
         subst hcEq
@@ -1014,10 +1529,10 @@ private theorem dataHolds_encodeDataRange_slot_iff {p : Problem} {enc : WiderEnc
     {n : Nat} (hn : n < enc.totalSlots) :
     dataHolds i' (i'.embedValue (.integer (Int.ofNat n))) (enc.encodeDataRange d) ↔
       dataHolds (decodeInterp i' enc target) (targetSlot target n) d := by
-  have hspec := buildCellTable_spec enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)
-  have hcellsEq : (buildCellTable enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)).1 = enc.cells :=
+  have hspec := buildCellTable_spec enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)
+  have hcellsEq : (buildCellTable enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)).1 = enc.cells :=
     congrArg Prod.fst hv.htable.symm
-  have htotEq : (buildCellTable enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)).2 = enc.totalSlots :=
+  have htotEq : (buildCellTable enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)).2 = enc.totalSlots :=
     congrArg Prod.snd hv.htable.symm
   rw [hcellsEq, htotEq] at hspec
   obtain ⟨hmem, hdisj, hcov, _⟩ := hspec
@@ -1056,7 +1571,7 @@ private theorem dataHolds_encodeDataRange_slot_iff {p : Problem} {enc : WiderEnc
   · obtain ⟨cs, hcs, hlo, hhi⟩ := hcov n (by omega) hn
     have hpart := (hmem cs hcs).1
     have hcellHolds := slotVal_cell_partitionHolds hv i' target hcs hlo hhi
-    rw [← evalOnPartition_iff hpart hcellHolds hd]
+    rw [← evalOnPartition_iff_pruned hpart hcellHolds hd]
     constructor
     · rintro ⟨iv, ⟨idx, hidx, hfilt⟩ | ⟨cs', hcs', hfilt⟩, m, hil, hih, rfl⟩
       · simp only [hidx, ↓reduceDIte] at hfilt
@@ -1217,7 +1732,7 @@ private theorem holds_decodeInterp_iff {p : Problem} {enc : WiderEncoding}
     obtain ⟨v, hvMem, hdl⟩ := decodeLiteral_mem_litVals hv hl
     have hidxLt : idxOfList enc.litVals v < enc.litVals.length := idxOfList_lt hvMem
     have htotGe : enc.litVals.length ≤ enc.totalSlots := by
-      have := buildCellTable_total_ge enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)
+      have := buildCellTable_total_ge enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)
       rw [congrArg Prod.snd hv.htable.symm] at this; exact this
     have hidxTot : idxOfList enc.litVals v < enc.totalSlots := by omega
     have hlit' : i'.literalValue (enc.encodeLiteral l) =
@@ -1330,7 +1845,7 @@ private theorem encodeWiderData_sat_with_target {p : Problem} {enc : WiderEncodi
     have ⟨h1, h2, h3⟩ := mem_allConcepts_subs hv hc
     exact holds_decodeInterp_iff hv target hm' h1 h2 h3 x
   have htotGe : enc.litVals.length ≤ enc.totalSlots := by
-    have := buildCellTable_total_ge enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)
+    have := buildCellTable_total_ge enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)
     rw [congrArg Prod.snd hv.htable.symm] at this; exact this
   refine ⟨i, ?_, x₀, (hconc p.root (List.mem_cons_self ..) x₀).mp hx₀⟩
   refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
@@ -1624,20 +2139,307 @@ private noncomputable def buildSlotMap {p : Problem} {enc : WiderEncoding}
   let rawDups := raw.eraseDups
   have hrawDupsNd : rawDups.Nodup := nodup_eraseDups_list raw
   have hrawDupsLen : rawDups.length ≤ enc.K := Nat.le_trans (length_eraseDups_le raw) hrawLen
-  have hspec := buildCellTable_spec enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)
-  have hcellsEq : (buildCellTable enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)).1 = enc.cells :=
+  have hspec := buildCellTable_spec enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)
+  have hcellsEq : (buildCellTable enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)).1 = enc.cells :=
     congrArg Prod.fst hv.htable.symm
-  have htotEq : (buildCellTable enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)).2 = enc.totalSlots :=
+  have htotEq : (buildCellTable enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)).2 = enc.totalSlots :=
     congrArg Prod.snd hv.htable.symm
   rw [hcellsEq, htotEq] at hspec
   obtain ⟨hmem, hdisj, _, hhas⟩ := hspec
   have htotGe : enc.litVals.length ≤ enc.totalSlots := by
-    have := buildCellTable_total_ge enc.K enc.lits enc.litVals.length (vennPartitions enc.atoms)
+    have := buildCellTable_total_ge enc.K enc.lits enc.litVals.length (prunedWiderPartitions enc.atoms)
     rw [congrArg Prod.snd hv.htable.symm] at this; exact this
+  -- Any finite partition `(ps, ns)` of atoms in `enc.atoms` with a positive non-literal atom
+  -- that admits no `Value` witness cannot be satisfied by any `y : i.Data` (via `source.coverSmall`).
+  have hemptyImp : ∀ (ps ns : List DataRange),
+      (∀ a ∈ ps, a ∈ enc.atoms) → (∀ a ∈ ns, a ∈ enc.atoms) →
+      (∃ a ∈ ps, a ≠ .datatype literalDatatype) →
+      (∀ v : Value, evalWiderPartition ps ns v = false) →
+      ∀ y : i.Data, ¬ dataHolds i y (partitionRange ps ns) := by
+    intro ps ns hps hns hnonlit hnoval y hholds
+    have hadm : widerAtomsAdmissible (ps ++ ns) = true := by
+      refine List.all_eq_true.mpr fun a ha => ?_
+      rcases List.mem_append.mp ha with h1 | h2
+      · exact validEncoding_atoms_wider hv a (hps a h1)
+      · exact validEncoding_atoms_wider hv a (hns a h2)
+    have hempty : sampleWiderCell enc.K ps ns = [] := by
+      cases hsw : sampleWiderCell enc.K ps ns with
+      | nil => rfl
+      | cons v vs =>
+        have hmem : v ∈ sampleWiderCell enc.K ps ns := hsw ▸ List.mem_cons_self ..
+        have hsatV := sampleWiderCell_sound
+          (fun a ha => validEncoding_atoms_wider hv a (hps a ha))
+          (fun a ha => validEncoding_atoms_wider hv a (hns a ha))
+          hmem observationInterpretation
+        have hev := (evalWiderPartition_iff
+          (fun a ha => validEncoding_atoms_wider hv a (hps a ha))
+          (fun a ha => validEncoding_atoms_wider hv a (hns a ha))
+          observationInterpretation v).mpr hsatV
+        rw [hnoval v] at hev; cases hev
+    have hKpos : 0 < enc.K := by rw [hv.hK]; exact Nat.lt_of_lt_of_le (by decide : 0 < 1) (Nat.le_max_left ..)
+    have hlt : (sampleWiderCell enc.K ps ns).length < enc.K := by rw [hempty]; exact hKpos
+    obtain ⟨v, hvMem, _⟩ := source.coverSmall hadm hlt hnonlit y hholds
+    rw [hempty] at hvMem; cases hvMem
+  have exists_pruned (y : i.Data) :
+      ∃ pq ∈ prunedWiderPartitions enc.atoms, dataHolds i y (partitionRange pq.1 pq.2) := by
+    have go : ∀ (rem ps ns : List DataRange),
+        (∀ a ∈ rem, a ∈ enc.atoms) → (∀ a ∈ ps, a ∈ enc.atoms) → (∀ a ∈ ns, a ∈ enc.atoms) →
+        (∀ a ∈ ps, dataHolds i y a) → (∀ a ∈ ns, ¬ dataHolds i y a) →
+        ∃ pq ∈ prunedWiderPartitionsAux rem ps ns, dataHolds i y (partitionRange pq.1 pq.2) := by
+      intro rem
+      induction rem with
+      | nil =>
+        intro ps ns _ _ _ hps hns
+        exact ⟨(ps, ns), List.mem_singleton_self _, (dataHolds_partitionRange_iff i y ps ns).mpr ⟨hps, hns⟩⟩
+      | cons a rest ih =>
+        intro ps ns hrem hps hns hholdP hholdN
+        have haIn : a ∈ enc.atoms := hrem a (List.mem_cons_self ..)
+        by_cases ha : dataHolds i y a
+        · have hcan : canAddPos a ps ns = true := by
+            unfold canAddPos
+            split
+            · rename_i hemp
+              have heq := beq_iff_eq.mp hemp
+              subst heq; simp [dataHolds] at ha
+            · split
+              · rename_i hfam
+                obtain ⟨b, hb, hbf⟩ := List.any_eq_true.mp hfam
+                cases hfb : atomFamily? b with
+                | none => rw [hfb] at hbf; cases hbf
+                | some f1 =>
+                  cases hfa : atomFamily? a with
+                  | none => rw [hfb, hfa] at hbf; cases hbf
+                  | some f2 =>
+                    rw [hfb, hfa] at hbf
+                    have hne : f1 ≠ f2 := bne_iff_ne.mp hbf
+                    have hno : ∀ v : Value, evalWiderPartition [b, a] [] v = false := by
+                      intro v
+                      cases hev : evalWiderPartition [b, a] [] v with
+                      | false => rfl
+                      | true =>
+                        simp only [evalWiderPartition, List.all_cons, List.all_nil, Bool.and_true, Bool.and_eq_true] at hev
+                        have h1 := evalWiderAtom_family hfb hev.1
+                        have h2 := evalWiderAtom_family hfa hev.2
+                        exact (hne (h1.symm.trans h2)).elim
+                    exact absurd ((dataHolds_partitionRange_iff i y [b, a] []).mpr
+                      ⟨fun x hx => by simp only [List.mem_cons, List.not_mem_nil, or_false] at hx; rcases hx with rfl | rfl; exact hholdP x hb; exact ha,
+                       fun _ hx => by cases hx⟩)
+                      (hemptyImp [b, a] [] (fun x hx => by simp at hx; rcases hx with rfl | rfl; exact hps x hb; exact haIn)
+                        (fun _ hx => by cases hx) ⟨b, List.mem_cons_self .., atomFamily_ne_literal hfb⟩ hno y)
+              · split
+                · rename_i hone
+                  obtain ⟨b, hb, hbo⟩ := List.any_eq_true.mp hone
+                  cases b with
+                  | oneOf ls =>
+                    dsimp only at hbo
+                    cases hdl : decodeLiteralsList ls with
+                    | none => rw [hdl] at hbo; cases hbo
+                    | some vs =>
+                      rw [hdl] at hbo
+                      have hno : ∀ v : Value, evalWiderPartition [.oneOf ls, a] [] v = false := by
+                        intro v
+                        cases hev : evalWiderPartition [.oneOf ls, a] [] v with
+                        | false => rfl
+                        | true =>
+                          simp only [evalWiderPartition, List.all_cons, List.all_nil, Bool.and_true, Bool.and_eq_true] at hev
+                          have hvm : v ∈ vs := by simpa [evalWiderAtom, hdl, List.contains_iff_mem] using hev.1
+                          have hnf := List.all_eq_true.mp hbo v hvm
+                          simp [hev.2] at hnf
+                      exact absurd ((dataHolds_partitionRange_iff i y [.oneOf ls, a] []).mpr
+                        ⟨fun x hx => by simp only [List.mem_cons, List.not_mem_nil, or_false] at hx; rcases hx with rfl | rfl; exact hholdP _ hb; exact ha,
+                         fun _ hx => by cases hx⟩)
+                        (hemptyImp [.oneOf ls, a] [] (fun x hx => by simp at hx; rcases hx with rfl | rfl; exact hps _ hb; exact haIn)
+                          (fun _ hx => by cases hx) ⟨.oneOf ls, List.mem_cons_self .., by intro h; cases h⟩ hno y)
+                  | _ => simp at hbo
+                · cases hadt : atomDatatypeW a with
+                  | none => rfl
+                  | some sub =>
+                    dsimp only
+                    split
+                    · rename_i hsub
+                      obtain ⟨b, hb, hbs⟩ := List.any_eq_true.mp hsub
+                      cases b with
+                      | datatype sup =>
+                        dsimp only at hbs
+                        have hneLit : a ≠ .datatype literalDatatype := by
+                          intro h; subst h; simp [atomDatatypeW] at hadt; subst hadt
+                          have : dataHolds i y (.datatype literalDatatype) := i.literalDatatypeExt y
+                          have hsupEq : sup = literalDatatype := by
+                            unfold isSubtypeDatatype at hbs
+                            split at hbs
+                            · exact (beq_iff_eq.mp ‹_›).symm
+                            · split at hbs
+                              · simp [datatypeFamily_literal_none] at hbs
+                              · split at hbs
+                                · simp [datatypeFamily_literal_none] at hbs
+                                · split at hbs
+                                  · simp [datatypeFamily_literal_none] at hbs
+                                  · split at hbs
+                                    · have : integerBounds literalDatatype = none := by decide
+                                      simp [this] at hbs
+                                    · split at hbs
+                                      · simp [datatypeFamily_literal_none] at hbs
+                                      · split at hbs
+                                        · simp [datatypeFamily_literal_none] at hbs
+                                        · split at hbs
+                                          · simp [literalDatatype, xsd] at hbs
+                                          · have : integerBounds literalDatatype = none := by decide
+                                            simp [this] at hbs
+                          subst hsupEq; exact hholdN _ hb this
+                        have hno : ∀ v : Value, evalWiderPartition [a] [.datatype sup] v = false := by
+                          intro v
+                          cases hev : evalWiderPartition [a] [.datatype sup] v with
+                          | false => rfl
+                          | true =>
+                            simp only [evalWiderPartition, List.all_cons, List.all_nil, Bool.and_true,
+                              Bool.and_eq_true, Bool.not_eq_true'] at hev
+                            have hcSub : checkValue sub v = true := by
+                              cases a with
+                              | datatype t =>
+                                simp only [atomDatatypeW, Option.some.injEq] at hadt; subst hadt
+                                have hne' : t ≠ literalDatatype := fun h => hneLit (congrArg DataRange.datatype h)
+                                simpa [evalWiderAtom, hne'] using hev.1
+                              | restriction t fs =>
+                                simp only [atomDatatypeW, Option.some.injEq] at hadt; subst hadt
+                                exact (Bool.and_eq_true_iff.mp hev.1).1
+                              | _ => simp [atomDatatypeW] at hadt
+                            have hcSup := checkValue_of_isSubtypeDatatype hbs hcSub
+                            have hevSup : evalWiderAtom (.datatype sup) v = true := by
+                              simp only [evalWiderAtom]
+                              split
+                              · rfl
+                              · exact hcSup
+                            rw [hevSup] at hev; exact absurd hev.2 Bool.false_ne_true.symm
+                        exact absurd ((dataHolds_partitionRange_iff i y [a] [.datatype sup]).mpr
+                          ⟨fun x hx => by simp at hx; subst hx; exact ha,
+                           fun x hx => by simp at hx; subst hx; exact hholdN _ hb⟩)
+                          (hemptyImp [a] [.datatype sup]
+                            (fun x hx => by simp at hx; subst hx; exact haIn)
+                            (fun x hx => by simp at hx; subst hx; exact hns _ hb)
+                            ⟨a, List.mem_cons_self .., hneLit⟩ hno y)
+                      | _ => simp at hbs
+                    · rfl
+          obtain ⟨pq, hpq, hholds⟩ := ih (a :: ps) ns
+            (fun x hx => hrem x (List.mem_cons_of_mem _ hx))
+            (fun x hx => by rcases List.mem_cons.mp hx with rfl | hx'; exact haIn; exact hps x hx')
+            hns
+            (fun x hx => by rcases List.mem_cons.mp hx with rfl | hx'; exact ha; exact hholdP x hx')
+            hholdN
+          exact ⟨pq, List.mem_append_left _ (by simp [hcan, hpq]), hholds⟩
+        · have hcan : canAddNeg a ps ns = true := by
+            unfold canAddNeg
+            split
+            · rename_i hlit
+              have heq := beq_iff_eq.mp hlit
+              subst heq; exact (ha (i.literalDatatypeExt y)).elim
+            · split
+              · rename_i hone
+                obtain ⟨b, hb, hbo⟩ := List.any_eq_true.mp hone
+                cases b with
+                | oneOf ls =>
+                  dsimp only at hbo
+                  cases hdl : decodeLiteralsList ls with
+                  | none => rw [hdl] at hbo; cases hbo
+                  | some vs =>
+                    rw [hdl] at hbo
+                    have hno : ∀ v : Value, evalWiderPartition [.oneOf ls] [a] v = false := by
+                      intro v
+                      cases hev : evalWiderPartition [.oneOf ls] [a] v with
+                      | false => rfl
+                      | true =>
+                        simp only [evalWiderPartition, List.all_cons, List.all_nil, Bool.and_true,
+                          Bool.and_eq_true, Bool.not_eq_true'] at hev
+                        have hvm : v ∈ vs := by simpa [evalWiderAtom, hdl, List.contains_iff_mem] using hev.1
+                        have htf := List.all_eq_true.mp hbo v hvm
+                        rw [htf] at hev; exact absurd hev.2 Bool.false_ne_true.symm
+                    exact absurd ((dataHolds_partitionRange_iff i y [.oneOf ls] [a]).mpr
+                      ⟨fun x hx => by simp at hx; subst hx; exact hholdP _ hb,
+                       fun x hx => by simp at hx; subst hx; exact ha⟩)
+                      (hemptyImp [.oneOf ls] [a]
+                        (fun x hx => by simp at hx; subst hx; exact hps _ hb)
+                        (fun x hx => by simp at hx; subst hx; exact haIn)
+                        ⟨.oneOf ls, List.mem_cons_self .., by intro h; cases h⟩ hno y)
+                | _ => simp at hbo
+              · cases a with
+                | datatype sup =>
+                  dsimp only
+                  split
+                  · rename_i hsub
+                    obtain ⟨b, hb, hbs⟩ := List.any_eq_true.mp hsub
+                    cases hbdt : atomDatatypeW b with
+                    | none => rw [hbdt] at hbs; cases hbs
+                    | some sub =>
+                      simp only [hbdt] at hbs
+                      have hneLit : b ≠ .datatype literalDatatype := by
+                        intro h; subst h; simp [atomDatatypeW] at hbdt; subst hbdt
+                        have hsupEq : sup = literalDatatype := by
+                          unfold isSubtypeDatatype at hbs
+                          split at hbs
+                          · exact (beq_iff_eq.mp ‹_›).symm
+                          · split at hbs
+                            · simp [datatypeFamily_literal_none] at hbs
+                            · split at hbs
+                              · simp [datatypeFamily_literal_none] at hbs
+                              · split at hbs
+                                · simp [datatypeFamily_literal_none] at hbs
+                                · split at hbs
+                                  · have : integerBounds literalDatatype = none := by decide
+                                    simp [this] at hbs
+                                  · split at hbs
+                                    · simp [datatypeFamily_literal_none] at hbs
+                                    · split at hbs
+                                      · simp [datatypeFamily_literal_none] at hbs
+                                      · split at hbs
+                                        · simp [literalDatatype, xsd] at hbs
+                                        · have : integerBounds literalDatatype = none := by decide
+                                          simp [this] at hbs
+                        subst hsupEq; exact ha (i.literalDatatypeExt y)
+                      have hno : ∀ v : Value, evalWiderPartition [b] [.datatype sup] v = false := by
+                        intro v
+                        cases hev : evalWiderPartition [b] [.datatype sup] v with
+                        | false => rfl
+                        | true =>
+                          simp only [evalWiderPartition, List.all_cons, List.all_nil, Bool.and_true,
+                            Bool.and_eq_true, Bool.not_eq_true'] at hev
+                          have hcSub : checkValue sub v = true := by
+                            cases b with
+                            | datatype t =>
+                              simp only [atomDatatypeW, Option.some.injEq] at hbdt; subst hbdt
+                              have hne' : t ≠ literalDatatype := fun h => hneLit (congrArg DataRange.datatype h)
+                              simpa [evalWiderAtom, hne'] using hev.1
+                            | restriction t fs =>
+                              simp only [atomDatatypeW, Option.some.injEq] at hbdt; subst hbdt
+                              exact (Bool.and_eq_true_iff.mp hev.1).1
+                            | _ => simp [atomDatatypeW] at hbdt
+                          have hcSup := checkValue_of_isSubtypeDatatype hbs hcSub
+                          have hevSup : evalWiderAtom (.datatype sup) v = true := by
+                            simp only [evalWiderAtom]
+                            split
+                            · rfl
+                            · exact hcSup
+                          rw [hevSup] at hev; exact absurd hev.2 Bool.false_ne_true.symm
+                      exact absurd ((dataHolds_partitionRange_iff i y [b] [.datatype sup]).mpr
+                        ⟨fun x hx => by simp at hx; subst hx; exact hholdP _ hb,
+                         fun x hx => by simp at hx; subst hx; exact ha⟩)
+                        (hemptyImp [b] [.datatype sup]
+                          (fun x hx => by simp at hx; subst hx; exact hps _ hb)
+                          (fun x hx => by simp at hx; subst hx; exact haIn)
+                          ⟨b, List.mem_cons_self .., hneLit⟩ hno y)
+                  · rfl
+                | _ => rfl
+          obtain ⟨pq, hpq, hholds⟩ := ih ps (a :: ns)
+            (fun x hx => hrem x (List.mem_cons_of_mem _ hx))
+            hps
+            (fun x hx => by rcases List.mem_cons.mp hx with rfl | hx'; exact haIn; exact hns x hx')
+            hholdP
+            (fun x hx => by rcases List.mem_cons.mp hx with rfl | hx'; exact ha; exact hholdN x hx')
+          exact ⟨pq, List.mem_append_right _ (by simp [hcan, hpq]), hholds⟩
+    exact go enc.atoms [] [] (fun _ h => h) (fun _ h => by cases h) (fun _ h => by cases h)
+      (fun _ h => by cases h) (fun _ h => by cases h)
   -- For any y not in litVals, find its unique cell cs in enc.cells.
   have hcellOf (y : i.Data) :
       ∃ cs ∈ enc.cells, dataHolds i y (partitionRange cs.pos cs.neg) := by
-    obtain ⟨⟨pos, neg⟩, hpart, hholds⟩ := exists_vennPartition i y enc.atoms
+    obtain ⟨⟨pos, neg⟩, hpart, hholds⟩ := exists_pruned y
     have hnlit : neg.contains (.datatype literalDatatype) = false := by
       cases h : neg.contains (.datatype literalDatatype)
       · rfl
@@ -1827,7 +2629,7 @@ private noncomputable def buildSlotMap {p : Problem} {enc : WiderEncoding}
       have ⟨hlo, hhi⟩ := hφ_in_cell y hyRaw hlit
       have hcs := cellOf_mem y
       have hpart := (hmem (cellOf y) hcs).1
-      rw [← evalOnPartition_iff hpart (cellOf_holds y) hd]
+      rw [← evalOnPartition_iff_pruned hpart (cellOf_holds y) hd]
       constructor
       · intro hev
         refine ⟨((cellOf y).lo, (cellOf y).lo + (cellOf y).len - 1), .inr ⟨cellOf y, hcs, ?_⟩, hlo, by omega⟩

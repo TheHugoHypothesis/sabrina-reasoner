@@ -16,3 +16,4 @@ import SabrinaTests.MaterializeTests
 import SabrinaTests.FastELTests
 import SabrinaTests.FastClassificationTests
 import SabrinaTests.JustificationTests
+import SabrinaTests.RDFAndDatatypeScalingTests

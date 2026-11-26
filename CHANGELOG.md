@@ -9,6 +9,16 @@
 ### Changed
 - Replaced quadratic `List.contains` deduplication in `Classification.dedupIRIs` with $O(N)$ `Std.HashSet` deduplication and replaced quadratic `ontologySig` scanning in `EL.normalizeEL` with a linear structural prefix check.
 
+### Fixed
+- **RDF loader metadata & import-closure declarations (`RDF/OWLMapping.lean`):** Preserved all non-`rdf:type` triples on named and blank-node `owl:Ontology` headers as ontology annotations (W3C OWL 2 RDF Mapping Table 4) without requiring explicit `owl:AnnotationProperty` declarations; added standard metadata vocabulary fallback (`dcterms:`, `dc:`, `skos:`, `vann:`, `oboInOwl:`, `foaf:`) for undeclared entity annotations; implemented two-phase import-closure declaration sharing (`AllDecl(G)`, W3C §3.1.2 Table 5) across reachable imports.
+- **Multi-datatype preparation & solver scaling (`WiderDataReduction.lean`, `WiderDataAlgebra.lean`, `WiderDataCore.lean`, `DataRangeExact.lean`, `DataCSP.lean`, `StringLengthCells.lean`, `DataRanges.lean`, `SROIQD/Search.lean`, `Classification.lean`, `CLI/OFNQuery.lean`):**
+  - Replaced full $2^N$ `vennPartitions` with kernel-verified family-, subtype-, `oneOf`-, and interval-pruned partition builders (`prunedWiderPartitions`, `prunedExactPartitions`).
+  - Filtered empty intervals in `subtractRatBoundsOne`, `subtractNatBoundsOne`, and `subtractBoundsOne` to prevent $O(2^m)$ interval-difference blowups.
+  - Made `widerCandidates` and `vennCandidates` family-targeted with early-stopping distinct filtering (`takeDistinctFilter`), and capped/deduplicated character options in `StringLengthCells.substitutions` (`takeDistinctChars`) before Cartesian expansion.
+  - Capped `SolvedRange.finiteValues?` integer-interval enumeration (`< 1024`) so wide subtypes (`xsd:int`, `xsd:long`) never materialize $2^{32}$ / $2^{64}$ elements.
+  - Enabled verified `SROIQD.propose` + `checkEvidence` fast path ahead of exhaustive `decideRealOntology?` on ordered/string-facet/wider-admissible `owl:real` problems, skipped redundant model construction on deterministic same-node tableau steps, and avoided building `fallbackCandidates` when solved-range candidates suffice.
+  - Added generic regression tests (`RDFAndDatatypeScalingTests.lean`) and CLI benchmark (`benchmarks/datatype-scaling/run_datatype_scaling.py`).
+
 ## 1.1.0 (2026-11-25)
 
 ### Added

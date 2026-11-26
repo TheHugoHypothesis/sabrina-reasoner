@@ -48,7 +48,7 @@ theorem evalDataRange_iff {d : DataRange} (hd : d.isSROIQD = true)
 theorem evalDataRange_eq_evalOnPartition {atoms pos neg : List DataRange}
     (hpos : ∀ a ∈ pos, isExactAtomicDataRange a = true)
     (hneg : ∀ a ∈ neg, isExactAtomicDataRange a = true)
-    (hpart : (pos, neg) ∈ vennPartitions atoms)
+    (hpart : (pos, neg) ∈ prunedExactPartitions atoms)
     {v : Value} (hv : evalPartition pos neg v = true)
     {d : DataRange} (hd : d.isSROIQD = true)
     (hsub : ∀ a ∈ atomsOfDataRange d, a ∈ atoms) :
@@ -57,7 +57,7 @@ theorem evalDataRange_eq_evalOnPartition {atoms pos neg : List DataRange}
   have hpartHolds : dataHolds i₀ (i₀.embedValue v) (partitionRange pos neg) :=
     (evalPartition_iff hpos hneg i₀ v).mp hv
   have h1 := evalDataRange_iff hd i₀ v
-  have h2 := evalOnPartition_iff hpart hpartHolds hsub
+  have h2 := evalOnPartition_iff_pruned hpart hpartHolds hsub
   cases h3 : evalDataRange d v <;> cases h4 : evalOnPartition pos d
   · rfl
   · exfalso
@@ -289,7 +289,7 @@ theorem DataCSP.atoms_exact {csp : DataCSP} (h : csp.isSROIQD = true) :
 
 def DataCSP.pool (csp : DataCSP) : List Value :=
   let K := csp.totalDemand + 1
-  ((vennPartitions csp.atoms).flatMap fun pq => samplePartition K pq.1 pq.2).eraseDups
+  ((prunedExactPartitions csp.atoms).flatMap fun pq => samplePartition K pq.1 pq.2).eraseDups
 
 theorem DataCSP.pool_nodup (csp : DataCSP) : csp.pool.Nodup :=
   nodup_eraseDups_list _
@@ -991,14 +991,14 @@ theorem solveDataCSP_complete {csp : DataCSP} (hcsp : csp.isSROIQD = true)
   let S_part (pq : List DataRange × List DataRange) : List Value :=
     samplePartition K pq.1 pq.2
   have hpartExact (pq : List DataRange × List DataRange)
-      (hpq : pq ∈ vennPartitions csp.atoms) :
+      (hpq : pq ∈ prunedExactPartitions csp.atoms) :
       (∀ a ∈ pq.1, isExactAtomicDataRange a = true) ∧
       (∀ a ∈ pq.2, isExactAtomicDataRange a = true) := by
-    obtain ⟨hp, hn, _, _⟩ := mem_vennPartitions_sub hpq
+    obtain ⟨hp, hn, _⟩ := mem_prunedExactPartitions_sub hpq
     exact ⟨fun a ha => csp.atoms_exact hcsp a (hp a ha),
            fun a ha => csp.atoms_exact hcsp a (hn a ha)⟩
   have hWpartLeSpart (pq : List DataRange × List DataRange)
-      (hpq : pq ∈ vennPartitions csp.atoms) :
+      (hpq : pq ∈ prunedExactPartitions csp.atoms) :
       (W_part pq).length ≤ (S_part pq).length := by
     obtain ⟨hposE, hnegE⟩ := hpartExact pq hpq
     have hWpNd : (W_part pq).Nodup := List.filter_sublist.nodup hWnd
@@ -1017,25 +1017,25 @@ theorem solveDataCSP_complete {csp : DataCSP} (hcsp : csp.isSROIQD = true)
       omega
     · omega
   let findPart (y : i.Data) : List DataRange × List DataRange :=
-    ((vennPartitions csp.atoms).find? (partPred y)).getD ([], [])
+    ((prunedExactPartitions csp.atoms).find? (partPred y)).getD ([], [])
   have hfindPart_eq (y : i.Data) (pq : List DataRange × List DataRange)
-      (hpq : pq ∈ vennPartitions csp.atoms)
+      (hpq : pq ∈ prunedExactPartitions csp.atoms)
       (hholds : dataHolds i y (partitionRange pq.1 pq.2)) :
       findPart y = pq := by
-    have hfind : (vennPartitions csp.atoms).find? (partPred y) = some pq :=
+    have hfind : (prunedExactPartitions csp.atoms).find? (partPred y) = some pq :=
       find?_eq_some_of_unique hpq (decide_eq_true hholds) fun pq' hpq' hp' =>
-        vennPartitions_unique hpq' hpq (of_decide_eq_true hp') hholds
+        prunedExactPartitions_unique hpq' hpq (of_decide_eq_true hp') hholds
     simp [findPart, hfind]
   let phi (y : i.Data) : Value :=
     let pq := findPart y
     nthVal (S_part pq) (indexIn (W_part pq) y)
   have hphi_spec (y : i.Data) (hy : y ∈ W) :
       phi y ∈ csp.pool ∧
-      (findPart y) ∈ vennPartitions csp.atoms ∧
+      (findPart y) ∈ prunedExactPartitions csp.atoms ∧
       dataHolds i y (partitionRange (findPart y).1 (findPart y).2) ∧
       dataHolds i (i.embedValue (phi y)) (partitionRange (findPart y).1 (findPart y).2) ∧
       evalPartition (findPart y).1 (findPart y).2 (phi y) = true := by
-    obtain ⟨pq, hpq, hholds⟩ := exists_vennPartition i y csp.atoms
+    obtain ⟨pq, hpq, hholds⟩ := exists_prunedExactPartition i y (csp.atoms_exact hcsp)
     have hfp : findPart y = pq := hfindPart_eq y pq hpq hholds
     obtain ⟨hposE, hnegE⟩ := hpartExact pq hpq
     have hyWp : y ∈ W_part pq :=
@@ -1061,7 +1061,7 @@ theorem solveDataCSP_complete {csp : DataCSP} (hcsp : csp.isSROIQD = true)
     have hphiH₂' : dataHolds i (i.embedValue (phi y₁)) (partitionRange (findPart y₂).1 (findPart y₂).2) := by
       rw [heq]; exact hphiH₂
     have hpqEq : findPart y₁ = findPart y₂ :=
-      vennPartitions_unique hpq₁ hpq₂ hphiH₁ hphiH₂'
+      prunedExactPartitions_unique hpq₁ hpq₂ hphiH₁ hphiH₂'
     have hh₂' : dataHolds i y₂ (partitionRange (findPart y₁).1 (findPart y₁).2) := by
       rw [hpqEq]; exact hh₂
     let pq := findPart y₁
@@ -1088,7 +1088,7 @@ theorem solveDataCSP_complete {csp : DataCSP} (hcsp : csp.isSROIQD = true)
     obtain ⟨_, hpq, hh, _, hphiEval⟩ := hphi_spec y hy
     obtain ⟨hposE, hnegE⟩ := hpartExact (findPart y) hpq
     rw [evalDataRange_eq_evalOnPartition hposE hnegE hpq hphiEval hd hsub]
-    exact evalOnPartition_iff hpq hh hsub
+    exact evalOnPartition_iff_pruned hpq hh hsub
   -- Build target edges from W and hreal.dataProperties
   let target : List DataEdge :=
     ((csp.lowers.flatMap fun L =>

@@ -154,20 +154,20 @@ theorem widerEmbedded_of_nonLiteral_atom {a : DataRange}
     exact ⟨v, rfl⟩
   | _ => simp [isWiderExactAtom, isOrderedExactAtom, isStringFacetExactAtom, legacy_isWiderExactAtom] at ha
 
-private def isOrderedValue : Value → Bool
+def isOrderedValue : Value → Bool
   | .float _ | .double _ | .dateTime _ => true
   | _ => false
 
-private def isLexicalValue : Value → Bool
+def isLexicalValue : Value → Bool
   | .plainLiteral _ _ | .anyURI _ => true
   | _ => false
 
-private theorem checkValue_ordered_false {t : IRI} {v : Value}
+theorem checkValue_ordered_false {t : IRI} {v : Value}
     (ht : isOrderedDatatype t = true) (hv : isOrderedValue v = false) : checkValue t v = false := by
   simp only [isOrderedDatatype, Bool.or_eq_true, beq_iff_eq] at ht
   rcases ht with ((rfl | rfl) | rfl) | rfl <;> cases v <;> first | rfl | cases hv
 
-private theorem checkValue_lexical_false {t : IRI} {v : Value}
+theorem checkValue_lexical_false {t : IRI} {v : Value}
     (ht : isLexicalDatatype t = true) (hv : isLexicalValue v = false) : checkValue t v = false := by
   simp only [isLexicalDatatype, isStringDatatype, Bool.or_eq_true, beq_iff_eq] at ht
   rcases ht with (((((((rfl | rfl) | rfl) | rfl) | rfl) | rfl) | rfl) | rfl) | rfl <;>
@@ -306,28 +306,206 @@ private def hasURIConstraint (pos : List DataRange) : Bool :=
 private def hasStringFacetExtra (pos neg : List DataRange) : Bool :=
   (pos ++ neg).any isStringFacetExtraAtom
 
+private def hasOneOfConstraint (pos : List DataRange) : Bool :=
+  pos.any fun | .oneOf _ => true | _ => false
+
+private def hasBoolConstraint (pos : List DataRange) : Bool :=
+  pos.any fun a => atomDatatype a == some (xsd "boolean")
+
+private def hasFloatConstraint (pos : List DataRange) : Bool :=
+  pos.any fun a => atomDatatype a == some (xsd "float")
+
+private def hasDoubleConstraint (pos : List DataRange) : Bool :=
+  pos.any fun a => atomDatatype a == some (xsd "double")
+
+private def hasDateConstraint (pos : List DataRange) : Bool :=
+  pos.any fun a =>
+    atomDatatype a == some (xsd "dateTime") || atomDatatype a == some (xsd "dateTimeStamp")
+
 private def orderedCandidates (K : Nat) (pos neg : List DataRange) : List Value :=
-  orderedFloatCandidates .binary32 K pos neg ++ orderedFloatCandidates .binary64 K pos neg ++
-  orderedDateCandidates K pos neg
+  (if hasFloatConstraint pos then orderedFloatCandidates .binary32 K pos neg else []) ++
+  (if hasDoubleConstraint pos then orderedFloatCandidates .binary64 K pos neg else []) ++
+  (if hasDateConstraint pos then orderedDateCandidates K pos neg else [])
 
 def widerCandidates (K : Nat) (pos neg : List DataRange) : List Value :=
-  legacy_widerCandidates K (legacyAtoms pos) (legacyAtoms neg) ++
-    (if hasOrderedConstraint pos then orderedCandidates K pos neg else []) ++
-    (if hasStringFacetExtra pos neg then
-      (if hasStringConstraint pos then stringFacetPlainCandidates K pos neg else []) ++
-      (if hasURIConstraint pos then stringFacetURICandidates K pos neg else [])
-     else [])
+  if hasOneOfConstraint pos then
+    allOneOfValues pos
+  else if hasBoolConstraint pos then
+    [Value.boolean false, Value.boolean true]
+  else if hasOrderedConstraint pos then
+    orderedCandidates K pos neg
+  else if hasStringFacetExtra pos neg && hasStringConstraint pos then
+    stringFacetPlainCandidates K pos neg
+  else if hasStringFacetExtra pos neg && hasURIConstraint pos then
+    stringFacetURICandidates K pos neg
+  else
+    legacy_widerCandidates K (legacyAtoms pos) (legacyAtoms neg)
+
+/-- Collect at most `K` distinct elements of `xs` satisfying `p`, stopping early
+    as soon as `K` matches are found (avoiding quadratic `eraseDups` on non-matching
+    candidates). Semantically equal to `(xs.eraseDups.filter p).take K`. -/
+def takeDistinctFilter {α : Type} [BEq α] (K : Nat) (p : α → Bool) (xs : List α) : List α :=
+  go K xs []
+where
+  go : Nat → List α → List α → List α
+  | 0, _, acc => acc.reverse
+  | _, [], acc => acc.reverse
+  | rem + 1, x :: rest, acc =>
+    if p x && !acc.contains x then
+      go rem rest (x :: acc)
+    else
+      go (rem + 1) rest acc
+
+private theorem nodup_reverse_aux {α : Type} {l : List α} (h : l.Nodup) : l.reverse.Nodup := by
+  induction l with
+  | nil => exact List.nodup_nil
+  | cons a rest ih =>
+    obtain ⟨hna, hnd⟩ := List.nodup_cons.mp h
+    rw [List.reverse_cons]
+    exact List.pairwise_append.mpr ⟨ih hnd, List.nodup_cons.mpr ⟨by simp, List.nodup_nil⟩, fun x hx y hy => by
+      simp only [List.mem_singleton] at hy; subst hy
+      intro he; subst he; exact hna (List.mem_reverse.mp hx)⟩
+
+private theorem takeDistinctFilter_go_nodup {α : Type} [BEq α] [LawfulBEq α] (p : α → Bool)
+    (rem : Nat) (xs acc : List α) (hnd : acc.Nodup) :
+    (takeDistinctFilter.go p rem xs acc).Nodup := by
+  induction rem generalizing xs acc with
+  | zero => simpa [takeDistinctFilter.go] using nodup_reverse_aux hnd
+  | succ k ih =>
+    induction xs generalizing acc with
+    | nil => simpa [takeDistinctFilter.go] using nodup_reverse_aux hnd
+    | cons x rest ihx =>
+      unfold takeDistinctFilter.go
+      split
+      · rename_i hc
+        simp only [Bool.and_eq_true, Bool.not_eq_true'] at hc
+        have hnot : x ∉ acc := fun hm => Bool.false_ne_true (hc.2 ▸ List.contains_iff_mem.mpr hm)
+        exact ih rest (x :: acc) (List.nodup_cons.mpr ⟨hnot, hnd⟩)
+      · exact ihx acc hnd
+
+private theorem takeDistinctFilter_go_length_le {α : Type} [BEq α] (p : α → Bool)
+    (rem : Nat) (xs acc : List α) :
+    (takeDistinctFilter.go p rem xs acc).length ≤ rem + acc.length := by
+  induction rem generalizing xs acc with
+  | zero => simp [takeDistinctFilter.go]
+  | succ k ih =>
+    induction xs generalizing acc with
+    | nil => simp [takeDistinctFilter.go]
+    | cons x rest ihx =>
+      unfold takeDistinctFilter.go
+      split
+      · have h := ih rest (x :: acc)
+        simp only [List.length_cons] at h; omega
+      · exact ihx acc
+
+private theorem takeDistinctFilter_go_mem {α : Type} [BEq α] [LawfulBEq α] (p : α → Bool)
+    (rem : Nat) (xs acc : List α) (hacc : ∀ y ∈ acc, p y = true) :
+    ∀ y ∈ takeDistinctFilter.go p rem xs acc, (y ∈ acc ∨ y ∈ xs) ∧ p y = true := by
+  induction rem generalizing xs acc with
+  | zero =>
+    intro y hy
+    simp only [takeDistinctFilter.go, List.mem_reverse] at hy
+    exact ⟨Or.inl hy, hacc y hy⟩
+  | succ k ih =>
+    induction xs generalizing acc with
+    | nil =>
+      intro y hy
+      simp only [takeDistinctFilter.go, List.mem_reverse] at hy
+      exact ⟨Or.inl hy, hacc y hy⟩
+    | cons x rest ihx =>
+      intro y hy
+      unfold takeDistinctFilter.go at hy
+      split at hy
+      · rename_i hc
+        simp only [Bool.and_eq_true] at hc
+        have hrec := ih rest (x :: acc) (fun z hz => by
+          rcases List.mem_cons.mp hz with rfl | hz'
+          · exact hc.1
+          · exact hacc z hz') y hy
+        refine ⟨?_, hrec.2⟩
+        rcases hrec.1 with h1 | h2
+        · rcases List.mem_cons.mp h1 with rfl | h1'
+          · exact Or.inr (List.mem_cons_self ..)
+          · exact Or.inl h1'
+        · exact Or.inr (List.mem_cons_of_mem _ h2)
+      · have hrec := ihx acc hacc y hy
+        exact ⟨hrec.1.elim Or.inl (fun hr => Or.inr (List.mem_cons_of_mem _ hr)), hrec.2⟩
+
+private theorem takeDistinctFilter_go_acc_sub {α : Type} [BEq α] (p : α → Bool)
+    (rem : Nat) (xs acc : List α) :
+    ∀ z ∈ acc, z ∈ takeDistinctFilter.go p rem xs acc := by
+  induction rem generalizing xs acc with
+  | zero => intro z hz; simp [takeDistinctFilter.go, hz]
+  | succ k ih =>
+    induction xs generalizing acc with
+    | nil => intro z hz; simp [takeDistinctFilter.go, hz]
+    | cons u us ihl =>
+      intro z hz
+      unfold takeDistinctFilter.go
+      split
+      · exact ih us (u :: acc) z (List.mem_cons_of_mem _ hz)
+      · exact ihl acc z hz
+
+private theorem takeDistinctFilter_go_complete_of_lt {α : Type} [BEq α] [LawfulBEq α] (p : α → Bool)
+    (rem : Nat) (xs acc : List α)
+    (hlt : (takeDistinctFilter.go p rem xs acc).length < rem + acc.length) :
+    ∀ y ∈ xs, p y = true → y ∈ takeDistinctFilter.go p rem xs acc := by
+  induction rem generalizing xs acc with
+  | zero =>
+    simp [takeDistinctFilter.go] at hlt
+  | succ k ih =>
+    induction xs generalizing acc with
+    | nil => intro _ hx; cases hx
+    | cons x rest ihx =>
+      intro y hy hpy
+      unfold takeDistinctFilter.go at hlt ⊢
+      split at hlt
+      · rename_i hc
+        simp only [hc, ↓reduceIte]
+        have hlt' : (takeDistinctFilter.go p k rest (x :: acc)).length < k + (x :: acc).length := by
+          simp only [List.length_cons]; omega
+        rcases List.mem_cons.mp hy with rfl | hy'
+        · exact takeDistinctFilter_go_acc_sub p k rest (y :: acc) y (List.mem_cons_self ..)
+        · exact ih rest (x :: acc) hlt' y hy' hpy
+      · rename_i hnc
+        simp only [hnc]
+        rcases List.mem_cons.mp hy with rfl | hy'
+        · have hmemA : y ∈ acc := by
+            simp only [hpy, Bool.true_and, Bool.not_eq_true'] at hnc
+            cases hc : acc.contains y with
+            | true => exact List.contains_iff_mem.mp hc
+            | false => exact absurd hc hnc
+          exact takeDistinctFilter_go_acc_sub p (k + 1) rest acc y hmemA
+        · exact ihx acc hlt y hy' hpy
+
+private theorem takeDistinctFilter_length_eq {α : Type} [BEq α] [LawfulBEq α]
+    (K : Nat) (p : α → Bool) (xs : List α)
+    (hlt : (takeDistinctFilter K p xs).length < K) :
+    (xs.eraseDups.filter p).length < K := by
+  have hsub : ∀ x ∈ xs.eraseDups.filter p, x ∈ takeDistinctFilter K p xs := by
+    intro x hx
+    obtain ⟨hxe, hpx⟩ := List.mem_filter.mp hx
+    exact takeDistinctFilter_go_complete_of_lt p K xs [] (by simpa [takeDistinctFilter] using hlt)
+      x (List.mem_eraseDups.mp hxe) hpx
+  have hle := (List.filter_sublist.nodup (nodup_eraseDups_list xs)).length_le_of_subset hsub
+  exact Nat.lt_of_le_of_lt hle hlt
 
 def sampleWiderCell (K : Nat) (pos neg : List DataRange) : List Value :=
-    ((widerCandidates K pos neg).eraseDups.filter (evalWiderPartition pos neg)).take K
+  takeDistinctFilter K (evalWiderPartition pos neg) (widerCandidates K pos neg)
 
 theorem sampleWiderCell_nodup (K : Nat) (pos neg : List DataRange) :
     (sampleWiderCell K pos neg).Nodup :=
-  (List.take_sublist ..).nodup (List.filter_sublist.nodup (nodup_eraseDups_list _))
+  takeDistinctFilter_go_nodup (evalWiderPartition pos neg) K _ [] List.nodup_nil
 
 theorem sampleWiderCell_length_le (K : Nat) (pos neg : List DataRange) :
-    (sampleWiderCell K pos neg).length ≤ K :=
-  List.length_take_le ..
+    (sampleWiderCell K pos neg).length ≤ K := by
+  simpa [sampleWiderCell, takeDistinctFilter] using
+    takeDistinctFilter_go_length_le (evalWiderPartition pos neg) K (widerCandidates K pos neg) []
+
+theorem sampleWiderCell_eval {K : Nat} {pos neg : List DataRange} {v : Value}
+    (hv : v ∈ sampleWiderCell K pos neg) :
+    evalWiderPartition pos neg v = true :=
+  (takeDistinctFilter_go_mem (evalWiderPartition pos neg) K _ [] (fun _ h => by cases h) v hv).2
 
 theorem sampleWiderCell_sound {K : Nat} {pos neg : List DataRange}
     (hpos : ∀ a ∈ pos, isWiderExactAtom a = true)
@@ -335,7 +513,8 @@ theorem sampleWiderCell_sound {K : Nat} {pos neg : List DataRange}
     {v : Value} (hv : v ∈ sampleWiderCell K pos neg)
     (i : Interpretation datatypeMap) :
     dataHolds i (i.embedValue v) (partitionRange pos neg) := by
-  have heval := (List.mem_filter.mp (List.mem_of_mem_take hv)).2
+  have heval := (takeDistinctFilter_go_mem (evalWiderPartition pos neg) K _ []
+    (fun _ h => by cases h) v hv).2
   exact (evalWiderPartition_iff hpos hneg i v).mp heval
 
 private theorem filteredCandidates_bound {pos neg : List DataRange}
@@ -386,152 +565,259 @@ private theorem orderedCell_cover {K : Nat} {pos neg : List DataRange} {v : Valu
   have hp a ha := List.all_eq_true.mp hadm a (List.mem_append_left neg ha)
   have hn a ha := List.all_eq_true.mp hadm a (List.mem_append_right pos ha)
   have hpos := List.all_eq_true.mp (Bool.and_eq_true_iff.mp hev).1
-  have hcore : ∀ w ∈ legacy_widerCandidates K (legacyAtoms pos) (legacyAtoms neg),
-      w ∈ widerCandidates K pos neg := fun w hw =>
-    List.mem_append_left _ (List.mem_append_left _ hw)
-  by_cases hen : ∃ ls, DataRange.oneOf ls ∈ pos
-  · obtain ⟨ls, hl⟩ := hen
-    have hkeep : legacy_isWiderExactAtom (.oneOf ls) = true := by
-      simpa [isWiderExactAtom, isOrderedExactAtom, isStringFacetExactAtom] using hp _ hl
-    have hm : DataRange.oneOf ls ∈ legacyAtoms pos := List.mem_filter.mpr ⟨hl, hkeep⟩
-    have hv : v ∈ allOneOfValues (legacyAtoms pos) :=
-      List.mem_flatMap.mpr ⟨DataRange.oneOf ls, hm, evalWiderAtom_oneOf_mem (hpos _ hl)⟩
-    exact hcore _ (mem_legacyCandidate_of_oneOf hv)
-  obtain ⟨a, ha, hane⟩ := hsome
-  obtain ⟨t, ht, htv⟩ := atomDatatype_of_positive (hpos a ha) hane
-    (fun ls he => hen ⟨ls, he ▸ ha⟩)
-  have hordered (hv : isOrderedValue v = true) :
-      ∀ w ∈ orderedCandidates K pos neg, w ∈ widerCandidates K pos neg := by
-    have hhas : hasOrderedConstraint pos = true :=
-      List.any_eq_true.mpr ⟨a, ha, by simp [ht, orderedType_of_checkValue hv htv]⟩
-    intro w hw
-    exact List.mem_append_left _ (List.mem_append_right _ (by simp only [hhas, ↓reduceIte]; exact hw))
-  have ordinary (hv : isOrderedValue v = false)
-      (hlex : hasStringFacetExtra pos neg = false ∨ isLexicalValue v = false) :
-      v ∈ widerCandidates K pos neg := by
-    have hposScope : legacyAtoms pos = pos := by
-      apply List.filter_eq_self.mpr
-      intro b hb
-      cases h : legacy_isWiderExactAtom b
-      · rcases Bool.or_eq_true_iff.mp (hp b hb) with hc | hc
-        · have hord : isOrderedExactAtom b = true := by simpa [h] using hc
-          have hpass := hpos b hb
-          rw [eval_orderedAtom_false hord hv] at hpass
-          contradiction
-        · rcases hlex with hnoex | hnotlex
-          · have hex : hasStringFacetExtra pos neg = true :=
-              List.any_eq_true.mpr ⟨b, List.mem_append_left neg hb, by simp [isStringFacetExtraAtom, hc, h]⟩
-            rw [hnoex] at hex; cases hex
-          · have hpass := hpos b hb
-            rw [eval_lexicalAtom_false hc hnotlex] at hpass
-            contradiction
-      · rfl
-    have hall : legacy_widerAtomsAdmissible (pos ++ legacyAtoms neg) = true := by
-      apply List.all_eq_true.mpr
-      intro b hb
-      rcases List.mem_append.mp hb with hb | hb
-      · exact (List.mem_filter.mp (hposScope ▸ hb)).2
-      · exact (List.mem_filter.mp hb).2
-    have hpart := (eval_legacyPartition_iff hn hv hlex).mpr hev
-    have hasTag (w : Value) (hw : evalWiderPartition pos (legacyAtoms neg) w = true) :
-        isOrderedValue w = false := by
-      cases hw' : isOrderedValue w
-      · rfl
-      · have hc := eval_pos_of_checkValue ht
-          (List.all_eq_true.mp (Bool.and_eq_true_iff.mp hw).1 a ha) hane
-        exact False.elim (by rw [checkValue_ordered_false (orderedType_of_checkValue hw' hc) hv] at htv
-                             cases htv)
-    have hasLexTag (w : Value) (hw : evalWiderPartition pos (legacyAtoms neg) w = true) :
-        hasStringFacetExtra pos neg = false ∨ isLexicalValue w = false := by
-      rcases hlex with hnoex | hnotlex
-      · exact .inl hnoex
-      · right
-        cases hw' : isLexicalValue w
-        · rfl
-        · have hc := eval_pos_of_checkValue ht
-            (List.all_eq_true.mp (Bool.and_eq_true_iff.mp hw).1 a ha) hane
-          exact False.elim (by rw [checkValue_lexical_false (lexicalType_of_checkValue hw' hc) hnotlex] at htv
-                               cases htv)
-    have hle : ((legacy_widerCandidates K pos (legacyAtoms neg)).eraseDups.filter
-        (evalWiderPartition pos (legacyAtoms neg))).length ≤
-        ((widerCandidates K pos neg).eraseDups.filter (evalWiderPartition pos neg)).length := by
-      apply (List.filter_sublist.nodup (nodup_eraseDups_list _)).length_le_of_subset
-      intro w hw
-      obtain ⟨hm, he⟩ := List.mem_filter.mp hw
-      refine List.mem_filter.mpr ⟨List.mem_eraseDups.mpr (hcore w ?_), ?_⟩
-      · rw [hposScope]
-        exact List.mem_eraseDups.mp hm
-      · exact (eval_legacyPartition_iff hn (hasTag w he) (hasLexTag w he)).mp he
-    rcases legacy_cover_of_evalWiderPartition (K := K) hall i hpart ⟨a, ha, hane⟩ (by
-      intro dt he; rw [he] at hv; cases hv) with hge | hm
-    · omega
-    · apply hcore
-      rwa [hposScope]
-  cases v <;> try exact ordinary rfl (.inr rfl)
-  case float f =>
-    have hsub : ∀ w ∈ orderedFloatCandidates .binary32 K pos neg,
-        w ∈ widerCandidates K pos neg := fun w hw =>
-      hordered rfl w (List.mem_append_left _ (List.mem_append_left _ hw))
-    have hv := ((valueSpace_float_iff t f).mp ((checkValue_iff _ _).mp htv)).2
-    exact hsub _ (orderedFloatCandidates_cover .binary32 hv hev
-      (Nat.lt_of_le_of_lt (filteredCandidates_bound hsub) hshort))
-  case double f =>
-    have hsub : ∀ w ∈ orderedFloatCandidates .binary64 K pos neg,
-        w ∈ widerCandidates K pos neg := fun w hw =>
-      hordered rfl w (List.mem_append_left _ (List.mem_append_right _ hw))
-    have hv := ((valueSpace_double_iff t f).mp ((checkValue_iff _ _).mp htv)).2
-    exact hsub _ (orderedFloatCandidates_cover .binary64 hv hev
-      (Nat.lt_of_le_of_lt (filteredCandidates_bound hsub) hshort))
-  case dateTime dt =>
-    have hsub : ∀ w ∈ orderedDateCandidates K pos neg, w ∈ widerCandidates K pos neg :=
-      fun w hw => hordered rfl w (List.mem_append_right _ hw)
-    have hv := ((valueSpace_dateTime_iff t dt).mp ((checkValue_iff _ _).mp htv)).1
-    exact hsub _ (orderedDateCandidates_cover hv hev
-      (Nat.lt_of_le_of_lt (filteredCandidates_bound hsub) hshort))
-  case plainLiteral s lang =>
-    cases hex : hasStringFacetExtra pos neg
-    · exact ordinary rfl (.inl hex)
-    · have hstrT : isStringDatatype t = true := by
-        rcases valueSpace_plainLiteral_iri ((checkValue_iff _ _).mp htv) with
-          rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;> decide
-      have hhas : hasStringConstraint pos = true :=
-        List.any_eq_true.mpr ⟨a, ha, by simp [ht, hstrT]⟩
-      have hsub : ∀ w ∈ stringFacetPlainCandidates K pos neg, w ∈ widerCandidates K pos neg := by
-        intro w hw
-        exact List.mem_append_right _ (by simp only [hex, hhas, ↓reduceIte]; exact List.mem_append_left _ hw)
-      have hsfAdm : ∀ b ∈ pos ++ neg, match b with
-          | .restriction t' fs => isStringDatatype t' = true → ∀ f ∈ fs, isStringFacetSupported t' f = true
-          | _ => True := by
-        intro b hb
-        cases b with
-        | restriction t' fs =>
-          intro hst'
-          exact widerRestriction_stringFacets_supported (List.all_eq_true.mp hadm _ hb)
-            (by simp [isLexicalDatatype, hst'])
-        | _ => trivial
-      exact hsub _ (stringFacetPlainCandidates_cover hsfAdm hev
-        (Nat.lt_of_le_of_lt (filteredCandidates_bound hsub) hshort))
-  case anyURI s =>
-    cases hex : hasStringFacetExtra pos neg
-    · exact ordinary rfl (.inl hex)
-    · have huriT : t = xsd "anyURI" := (valueSpace_anyURI_iff t s).mp ((checkValue_iff _ _).mp htv)
-      have hhas : hasURIConstraint pos = true :=
-        List.any_eq_true.mpr ⟨a, ha, by simp [ht, huriT]⟩
-      have hsub : ∀ w ∈ stringFacetURICandidates K pos neg, w ∈ widerCandidates K pos neg := by
-        intro w hw
-        exact List.mem_append_right _ (by simp only [hex, hhas, ↓reduceIte]; exact List.mem_append_right _ hw)
-      have hsfAdm : ∀ b ∈ pos ++ neg, match b with
-          | .restriction t' fs => t' = xsd "anyURI" → ∀ f ∈ fs, isStringFacetSupported t' f = true
-          | _ => True := by
-        intro b hb
-        cases b with
-        | restriction t' fs =>
-          intro hut'
-          exact widerRestriction_stringFacets_supported (List.all_eq_true.mp hadm _ hb)
-            (by simp [isLexicalDatatype, hut'])
-        | _ => trivial
-      exact hsub _ (stringFacetURICandidates_cover hsfAdm hev
-        (Nat.lt_of_le_of_lt (filteredCandidates_bound hsub) hshort))
+  -- Branch 1: `pos` contains a `oneOf` enumeration
+  cases hOne : hasOneOfConstraint pos with
+  | true =>
+    unfold widerCandidates
+    simp only [hOne, ↓reduceIte]
+    obtain ⟨b, hb, hbo⟩ := List.any_eq_true.mp hOne
+    cases b with
+    | oneOf ls =>
+      exact List.mem_flatMap.mpr ⟨.oneOf ls, hb, evalWiderAtom_oneOf_mem (hpos _ hb)⟩
+    | _ => simp at hbo
+  | false =>
+    have hen : ¬ ∃ ls, DataRange.oneOf ls ∈ pos := by
+      rintro ⟨ls, hl⟩
+      have : hasOneOfConstraint pos = true := List.any_eq_true.mpr ⟨.oneOf ls, hl, rfl⟩
+      rw [hOne] at this; cases this
+    -- Branch 2: `pos` contains a `xsd:boolean` constraint
+    cases hBool : hasBoolConstraint pos with
+    | true =>
+      unfold widerCandidates
+      simp only [hOne, hBool, Bool.false_eq_true, ↓reduceIte]
+      obtain ⟨b, hb, hbt⟩ := List.any_eq_true.mp hBool
+      have hbt' : atomDatatype b = some (xsd "boolean") := by
+        simpa [beq_iff_eq] using hbt
+      have hneLit : b ≠ .datatype literalDatatype := by
+        intro he; subst he; simp [atomDatatype, literalDatatype, xsd] at hbt'
+      have hcv := eval_pos_of_checkValue hbt' (hpos b hb) hneLit
+      obtain ⟨bv, rfl⟩ := (valueSpace_boolean_iff v).mp ((checkValue_iff _ _).mp hcv)
+      cases bv <;> simp
+    | false =>
+      obtain ⟨a, ha, hane⟩ := hsome
+      obtain ⟨t, ht, htv⟩ := atomDatatype_of_positive (hpos a ha) hane
+        (fun ls he => hen ⟨ls, he ▸ ha⟩)
+      -- Branch 3: `pos` contains an ordered datatype constraint (`float`/`double`/`dateTime`)
+      cases hOrd : hasOrderedConstraint pos with
+      | true =>
+        have hwc : widerCandidates K pos neg = orderedCandidates K pos neg := by
+          simp [widerCandidates, hOne, hBool, hOrd]
+        obtain ⟨b, hb, hbo⟩ := List.any_eq_true.mp hOrd
+        cases htb : atomDatatype b with
+        | none => simp [htb] at hbo
+        | some tb =>
+          have hordB : isOrderedDatatype tb = true := by simpa [htb] using hbo
+          have hneLitB : b ≠ .datatype literalDatatype := by
+            intro he; subst he; simp [atomDatatype] at htb; subst htb; simp [isOrderedDatatype, literalDatatype, xsd] at hordB
+          have hcvB := eval_pos_of_checkValue htb (hpos b hb) hneLitB
+          cases hv' : v with
+          | float f =>
+            subst hv'
+            have htf : tb = xsd "float" :=
+              ((valueSpace_float_iff tb f).mp ((checkValue_iff _ _).mp hcvB)).1
+            have hhf : hasFloatConstraint pos = true :=
+              List.any_eq_true.mpr ⟨b, hb, by simp [htb, htf]⟩
+            have hsub : ∀ w ∈ orderedFloatCandidates .binary32 K pos neg,
+                w ∈ widerCandidates K pos neg := fun w hw => by
+              rw [hwc]; simp only [orderedCandidates, hhf, ↓reduceIte]
+              exact List.mem_append_left _ (List.mem_append_left _ hw)
+            exact hsub _ (orderedFloatCandidates_cover .binary32
+              ((valueSpace_float_iff t f).mp ((checkValue_iff _ _).mp htv)).2
+              hev (Nat.lt_of_le_of_lt (filteredCandidates_bound hsub) hshort))
+          | double f =>
+            subst hv'
+            have htd : tb = xsd "double" :=
+              ((valueSpace_double_iff tb f).mp ((checkValue_iff _ _).mp hcvB)).1
+            have hhd : hasDoubleConstraint pos = true :=
+              List.any_eq_true.mpr ⟨b, hb, by simp [htb, htd]⟩
+            have hsub : ∀ w ∈ orderedFloatCandidates .binary64 K pos neg,
+                w ∈ widerCandidates K pos neg := fun w hw => by
+              rw [hwc]; simp only [orderedCandidates, hhd, ↓reduceIte]
+              exact List.mem_append_left _ (List.mem_append_right _ hw)
+            exact hsub _ (orderedFloatCandidates_cover .binary64
+              ((valueSpace_double_iff t f).mp ((checkValue_iff _ _).mp htv)).2
+              hev (Nat.lt_of_le_of_lt (filteredCandidates_bound hsub) hshort))
+          | dateTime dt =>
+            subst hv'
+            have htdt := ((valueSpace_dateTime_iff tb dt).mp ((checkValue_iff _ _).mp hcvB)).2
+            have hhdt : hasDateConstraint pos = true :=
+              List.any_eq_true.mpr ⟨b, hb, by
+                rcases htdt with h1 | ⟨h2, _⟩
+                · simp [htb, h1]
+                · simp [htb, h2]⟩
+            have hsub : ∀ w ∈ orderedDateCandidates K pos neg,
+                w ∈ widerCandidates K pos neg := fun w hw => by
+              rw [hwc]; simp only [orderedCandidates, hhdt, ↓reduceIte]
+              exact List.mem_append_right _ hw
+            exact hsub _ (orderedDateCandidates_cover
+              (((valueSpace_dateTime_iff t dt).mp ((checkValue_iff _ _).mp htv)).1)
+              hev (Nat.lt_of_le_of_lt (filteredCandidates_bound hsub) hshort))
+          | _ =>
+            have hnotOrdV : isOrderedValue v = false := by subst hv'; rfl
+            rw [checkValue_ordered_false hordB hnotOrdV] at hcvB; cases hcvB
+      | false =>
+        have hnotOrdV : isOrderedValue v = false := by
+          cases hv' : isOrderedValue v with
+          | false => rfl
+          | true =>
+            have : hasOrderedConstraint pos = true :=
+              List.any_eq_true.mpr ⟨a, ha, by simp [ht, orderedType_of_checkValue hv' htv]⟩
+            rw [hOrd] at this; cases this
+        -- Branch 4: string extra facets + string constraint in `pos`
+        cases hStrEx : (hasStringFacetExtra pos neg && hasStringConstraint pos) with
+        | true =>
+          have hwc : widerCandidates K pos neg = stringFacetPlainCandidates K pos neg := by
+            simp [widerCandidates, hOne, hBool, hOrd, hStrEx]
+          simp only [Bool.and_eq_true] at hStrEx
+          obtain ⟨b, hb, hbs⟩ := List.any_eq_true.mp hStrEx.2
+          cases htb : atomDatatype b with
+          | none => simp [htb] at hbs
+          | some tb =>
+            have hstrB : isStringDatatype tb = true := by simpa [htb] using hbs
+            have hneLitB : b ≠ .datatype literalDatatype := by
+              intro he; subst he; simp [atomDatatype] at htb; subst htb
+              simp [isStringDatatype, literalDatatype, rdf, xsd] at hstrB
+            have hcvB := eval_pos_of_checkValue htb (hpos b hb) hneLitB
+            cases hv' : v with
+            | plainLiteral s lang =>
+              subst hv'
+              have hsub : ∀ w ∈ stringFacetPlainCandidates K pos neg, w ∈ widerCandidates K pos neg := by
+                intro w hw; rw [hwc]; exact hw
+              have hsfAdm : ∀ c ∈ pos ++ neg, match c with
+                  | .restriction t' fs => isStringDatatype t' = true → ∀ f ∈ fs, isStringFacetSupported t' f = true
+                  | _ => True := by
+                intro c hc
+                cases c with
+                | restriction t' fs =>
+                  intro hst'
+                  exact widerRestriction_stringFacets_supported (List.all_eq_true.mp hadm _ hc)
+                    (by simp [isLexicalDatatype, hst'])
+                | _ => trivial
+              exact hsub _ (stringFacetPlainCandidates_cover hsfAdm hev
+                (Nat.lt_of_le_of_lt (filteredCandidates_bound hsub) hshort))
+            | anyURI s =>
+              subst hv'
+              have h := (valueSpace_anyURI_iff tb s).mp ((checkValue_iff _ _).mp hcvB)
+              subst h; simp [isStringDatatype, rdf, xsd] at hstrB
+            | _ =>
+              subst hv'
+              rw [checkValue_lexical_false (by simp [isLexicalDatatype, hstrB]) (by rfl)] at hcvB
+              cases hcvB
+        | false =>
+          -- Branch 5: string extra facets + anyURI constraint in `pos`
+          cases hUriEx : (hasStringFacetExtra pos neg && hasURIConstraint pos) with
+          | true =>
+            have hwc : widerCandidates K pos neg = stringFacetURICandidates K pos neg := by
+              simp [widerCandidates, hOne, hBool, hOrd, hStrEx, hUriEx]
+            simp only [Bool.and_eq_true] at hUriEx
+            obtain ⟨b, hb, hbu⟩ := List.any_eq_true.mp hUriEx.2
+            have htb : atomDatatype b = some (xsd "anyURI") := by simpa [beq_iff_eq] using hbu
+            have hneLitB : b ≠ .datatype literalDatatype := by
+              intro he; subst he; simp [atomDatatype, literalDatatype, xsd] at htb
+            have hcvB := eval_pos_of_checkValue htb (hpos b hb) hneLitB
+            cases hv' : v with
+            | anyURI s =>
+              subst hv'
+              have hsub : ∀ w ∈ stringFacetURICandidates K pos neg, w ∈ widerCandidates K pos neg := by
+                intro w hw; rw [hwc]; exact hw
+              have hsfAdm : ∀ c ∈ pos ++ neg, match c with
+                  | .restriction t' fs => t' = xsd "anyURI" → ∀ f ∈ fs, isStringFacetSupported t' f = true
+                  | _ => True := by
+                intro c hc
+                cases c with
+                | restriction t' fs =>
+                  intro hut'
+                  exact widerRestriction_stringFacets_supported (List.all_eq_true.mp hadm _ hc)
+                    (by simp [isLexicalDatatype, hut'])
+                | _ => trivial
+              exact hsub _ (stringFacetURICandidates_cover hsfAdm hev
+                (Nat.lt_of_le_of_lt (filteredCandidates_bound hsub) hshort))
+            | plainLiteral s lang =>
+              subst hv'
+              rcases valueSpace_plainLiteral_iri ((checkValue_iff _ _).mp hcvB) with
+                h | h | h | h | h | h | h | h <;> simp [rdf, xsd] at h
+            | _ =>
+              subst hv'
+              rw [checkValue_lexical_false (by decide : isLexicalDatatype (xsd "anyURI") = true) (by rfl)] at hcvB
+              cases hcvB
+          | false =>
+            -- Branch 6: standard legacy candidates
+            have hwc : widerCandidates K pos neg = legacy_widerCandidates K (legacyAtoms pos) (legacyAtoms neg) := by
+              simp [widerCandidates, hOne, hBool, hOrd, hStrEx, hUriEx]
+            have hlex : hasStringFacetExtra pos neg = false ∨ isLexicalValue v = false := by
+              cases hex : hasStringFacetExtra pos neg with
+              | false => exact .inl rfl
+              | true =>
+                right
+                cases hv' : v with
+                | plainLiteral s lang =>
+                  have hstrT : isStringDatatype t = true := by
+                    rcases valueSpace_plainLiteral_iri ((checkValue_iff _ _).mp (hv' ▸ htv)) with
+                      rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;> decide
+                  have hhas : hasStringConstraint pos = true :=
+                    List.any_eq_true.mpr ⟨a, ha, by simp [ht, hstrT]⟩
+                  simp [hex, hhas] at hStrEx
+                | anyURI s =>
+                  have huriT : t = xsd "anyURI" := (valueSpace_anyURI_iff t s).mp ((checkValue_iff _ _).mp (hv' ▸ htv))
+                  have hhas : hasURIConstraint pos = true :=
+                    List.any_eq_true.mpr ⟨a, ha, by simp [ht, huriT]⟩
+                  simp [hex, hhas] at hUriEx
+                | _ => rfl
+            have hposScope : legacyAtoms pos = pos := by
+              apply List.filter_eq_self.mpr
+              intro b hb
+              cases h : legacy_isWiderExactAtom b
+              · rcases Bool.or_eq_true_iff.mp (hp b hb) with hc | hc
+                · have hord : isOrderedExactAtom b = true := by simpa [h] using hc
+                  have hpass := hpos b hb
+                  rw [eval_orderedAtom_false hord hnotOrdV] at hpass
+                  contradiction
+                · rcases hlex with hnoex | hnotlex
+                  · have hex : hasStringFacetExtra pos neg = true :=
+                      List.any_eq_true.mpr ⟨b, List.mem_append_left neg hb, by simp [isStringFacetExtraAtom, hc, h]⟩
+                    rw [hnoex] at hex; cases hex
+                  · have hpass := hpos b hb
+                    rw [eval_lexicalAtom_false hc hnotlex] at hpass
+                    contradiction
+              · rfl
+            have hall : legacy_widerAtomsAdmissible (pos ++ legacyAtoms neg) = true := by
+              apply List.all_eq_true.mpr
+              intro b hb
+              rcases List.mem_append.mp hb with hb | hb
+              · exact (List.mem_filter.mp (hposScope ▸ hb)).2
+              · exact (List.mem_filter.mp hb).2
+            have hpart := (eval_legacyPartition_iff hn hnotOrdV hlex).mpr hev
+            have hasTag (w : Value) (hw : evalWiderPartition pos (legacyAtoms neg) w = true) :
+                isOrderedValue w = false := by
+              cases hw' : isOrderedValue w
+              · rfl
+              · have hc := eval_pos_of_checkValue ht
+                  (List.all_eq_true.mp (Bool.and_eq_true_iff.mp hw).1 a ha) hane
+                exact False.elim (by rw [checkValue_ordered_false (orderedType_of_checkValue hw' hc) hnotOrdV] at htv
+                                     cases htv)
+            have hasLexTag (w : Value) (hw : evalWiderPartition pos (legacyAtoms neg) w = true) :
+                hasStringFacetExtra pos neg = false ∨ isLexicalValue w = false := by
+              rcases hlex with hnoex | hnotlex
+              · exact .inl hnoex
+              · right
+                cases hw' : isLexicalValue w
+                · rfl
+                · have hc := eval_pos_of_checkValue ht
+                    (List.all_eq_true.mp (Bool.and_eq_true_iff.mp hw).1 a ha) hane
+                  exact False.elim (by rw [checkValue_lexical_false (lexicalType_of_checkValue hw' hc) hnotlex] at htv
+                                       cases htv)
+            have hle : ((legacy_widerCandidates K pos (legacyAtoms neg)).eraseDups.filter
+                (evalWiderPartition pos (legacyAtoms neg))).length ≤
+                ((widerCandidates K pos neg).eraseDups.filter (evalWiderPartition pos neg)).length := by
+              apply (List.filter_sublist.nodup (nodup_eraseDups_list _)).length_le_of_subset
+              intro w hw
+              obtain ⟨hm, he⟩ := List.mem_filter.mp hw
+              refine List.mem_filter.mpr ⟨List.mem_eraseDups.mpr (by rw [hwc, hposScope]; exact List.mem_eraseDups.mp hm), ?_⟩
+              exact (eval_legacyPartition_iff hn (hasTag w he) (hasLexTag w he)).mp he
+            rcases legacy_cover_of_evalWiderPartition (K := K) hall i hpart ⟨a, ha, hane⟩ (by
+              intro dt he; rw [he] at hnotOrdV; cases hnotOrdV) with hge | hm
+            · omega
+            · rw [hwc, hposScope]; exact hm
 
 /-- Below the witness cap the sampler returns every value of a supported cell
 that contains a positive, non-universal datatype or enumeration. -/
@@ -545,19 +831,16 @@ theorem sampleWiderCell_complete_of_lt {K : Nat} {pos neg : List DataRange}
   have hp a ha := List.all_eq_true.mp hadm a (List.mem_append_left neg ha)
   have hn a ha := List.all_eq_true.mp hadm a (List.mem_append_right pos ha)
   have hshort : (((widerCandidates K pos neg).eraseDups).filter
-      (evalWiderPartition pos neg)).length < K := by
-    unfold sampleWiderCell at hlt
-    rw [List.length_take] at hlt
-    omega
+      (evalWiderPartition pos neg)).length < K :=
+    takeDistinctFilter_length_eq K (evalWiderPartition pos neg) (widerCandidates K pos neg) hlt
   obtain ⟨a, ha, hne⟩ := hpos
   obtain ⟨v, rfl⟩ := widerEmbedded_of_nonLiteral_atom (hp a ha) hne
     ((dataHolds_partitionRange_iff i y pos neg).mp hy |>.1 a ha)
   have hev := (evalWiderPartition_iff hp hn i v).mpr hy
   refine ⟨v, ?_, rfl⟩
-  unfold sampleWiderCell
-  rw [List.take_of_length_le (Nat.le_of_lt hshort)]
-  exact List.mem_filter.mpr ⟨List.mem_eraseDups.mpr
-    (orderedCell_cover hadm i hev ⟨a, ha, hne⟩ hshort), hev⟩
+  have hmem := orderedCell_cover hadm i hev ⟨a, ha, hne⟩ hshort
+  exact takeDistinctFilter_go_complete_of_lt (evalWiderPartition pos neg) K (widerCandidates K pos neg) []
+    (by simpa [sampleWiderCell, takeDistinctFilter] using hlt) v hmem hev
 
 theorem sampleWiderCell_complete_value_of_lt {K : Nat} {pos neg : List DataRange} {v : Value}
     (hadm : widerAtomsAdmissible (pos ++ neg) = true)

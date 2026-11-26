@@ -371,13 +371,18 @@ theorem realizeOntologyReal_sound_complete {o : Ontology} {namedClasses namedInd
 
 /-! ### 4. Fast Hybrid Runtime Classifier & Realizer (EL++ + Tableau + Exact SROIQ(D)) -/
 
-private def hasWiderDataOrReal (p : SROIQD.Problem) : Bool :=
-  p.allDataAtoms.any (fun
+/-- Return `true` only when bounded `SROIQD.propose` + `checkEvidence` cannot safely
+    precede `decideRealOntology?`: namely, when built-in data properties
+    (`owl:topDataProperty`/`owl:bottomDataProperty`) appear, or when `owl:real`
+    appears outside the wider-admissible fragment where `p.Sat ↔ p.SatWith realDatatypeMap`
+    holds (`encodeWiderData_symbolic_real_iff`). -/
+private def needsExactDataSolverFirst (p : SROIQD.Problem) : Bool :=
+  p.allDataProps.any (fun dp => dp == topDataProperty || dp == bottomDataProperty) ||
+  (p.allDataAtoms.any (fun
     | .datatype t | .restriction t _ => t == owlReal
-    | _ => false) ||
-  p.allDataAtoms.any SROIQD.Termination.WiderData.isOrderedExactAtom ||
-  p.allDataAtoms.any SROIQD.Termination.WiderData.isStringFacetExtraAtom ||
-  p.allDataProps.any (fun dp => dp == topDataProperty || dp == bottomDataProperty)
+    | _ => false) &&
+   !(p.allDataLiterals.all (fun l => (Datatypes.decodeLiteral l).isSome) &&
+     SROIQD.Termination.WiderData.widerAtomsAdmissible (.oneOf p.allDataLiterals :: p.allDataAtoms)))
 
 private def checkTableauRolesOk (p : SROIQD.Problem) : Bool :=
   let closed := Sabrina.ALC.roleClosure p.rules
@@ -385,7 +390,7 @@ private def checkTableauRolesOk (p : SROIQD.Problem) : Bool :=
   RoleChains.checkRegular (RoleChains.inferRank p.rules p.chains) p.rules p.chains
 
 private def tryTableauSat (p : SROIQD.Problem) : Option Bool :=
-  if !hasWiderDataOrReal p && checkTableauRolesOk p then
+  if !needsExactDataSolverFirst p && checkTableauRolesOk p then
     let limits : SROIQD.Limits := {}
     match SROIQD.propose p limits with
     | some ev =>

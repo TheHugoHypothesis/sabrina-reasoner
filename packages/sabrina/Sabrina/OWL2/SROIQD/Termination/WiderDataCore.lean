@@ -187,6 +187,51 @@ theorem RatBounds.contains_intersect (a b : RatBounds) (q : Rat) :
   exact ⟨fun ⟨⟨h1, h2⟩, ⟨h3, h4⟩⟩ => ⟨⟨h1, h3⟩, ⟨h2, h4⟩⟩,
          fun ⟨⟨h1, h3⟩, ⟨h2, h4⟩⟩ => ⟨⟨h1, h2⟩, ⟨h3, h4⟩⟩⟩
 
+def isNonEmptyRatBounds (b : RatBounds) : Bool :=
+  match b.lower, b.upper with
+  | some lo, some hi =>
+    if lo.val < hi.val then true
+    else lo.val == hi.val && lo.inclusive && hi.inclusive
+  | _, _ => true
+
+private theorem isNonEmptyRatBounds_of_contains {b : RatBounds} {q : Rat}
+    (h : b.contains q) : isNonEmptyRatBounds b = true := by
+  rcases b with ⟨lo, hi⟩
+  cases lo with
+  | none => rfl
+  | some lo =>
+    rcases lo with ⟨lov, loi⟩
+    cases hi with
+    | none => rfl
+    | some hi =>
+      rcases hi with ⟨hiv, hii⟩
+      obtain ⟨h1, h2⟩ := h
+      simp only [Option.elim_some, RatEndpoint.holdsLower, RatEndpoint.holdsUpper] at h1 h2
+      simp only [isNonEmptyRatBounds]
+      split
+      · rfl
+      · rename_i hnot
+        have hle1 : lov ≤ q := by cases loi <;> simp at h1; exact Rat.le_of_lt h1; exact h1
+        have hle2 : q ≤ hiv := by cases hii <;> simp at h2; exact Rat.le_of_lt h2; exact h2
+        have hle : lov ≤ hiv := Rat.le_trans hle1 hle2
+        have heq : lov = hiv := by
+          rcases rat_trichotomy lov hiv with hlt | hgt | heq
+          · exact (hnot hlt).elim
+          · exact (Rat.not_lt.mpr hle hgt).elim
+          · exact heq
+        subst heq
+        have hq : q = lov := Rat.le_antisymm hle2 hle1
+        subst hq
+        have hli : loi = true := by
+          cases loi
+          · simp at h1
+          · rfl
+        have hhi : hii = true := by
+          cases hii
+          · simp at h2
+          · rfl
+        simp [hli, hhi]
+
 def subtractRatBoundsOne (cur neg : RatBounds) : List RatBounds :=
   let left : List RatBounds :=
     match neg.lower with
@@ -206,7 +251,7 @@ def subtractRatBoundsOne (cur neg : RatBounds) : List RatBounds :=
            | none => some flr
            | some clo => some (clo.maxLower flr),
          upper := cur.upper }]
-  left ++ right
+  (left ++ right).filter isNonEmptyRatBounds
 
 private theorem not_holdsLower_iff (e : RatEndpoint) (q : Rat) :
     ¬ e.holdsLower q ↔ (⟨e.val, !e.inclusive⟩ : RatEndpoint).holdsUpper q := by
@@ -259,7 +304,12 @@ theorem mem_subtractRatBoundsOne_iff (cur neg : RatBounds) (q : Rat) :
         simp only [List.mem_singleton, exists_eq_left, RatBounds.contains, Option.elim_some,
           RatEndpoint.holdsLower_maxLower, not_holdsUpper_iff]
         exact ⟨fun ⟨⟨h1, h3⟩, h2⟩ => ⟨h1, h2, h3⟩, fun ⟨h1, h2, h3⟩ => ⟨⟨h1, h3⟩, h2⟩⟩
-  change (∃ b ∈ leftL ++ rightL, b.contains q) ↔ _
+  have hfilt : (∃ b ∈ (leftL ++ rightL).filter isNonEmptyRatBounds, b.contains q) ↔
+      (∃ b ∈ leftL ++ rightL, b.contains q) :=
+    ⟨fun ⟨b, hb, hq⟩ => ⟨b, (List.mem_filter.mp hb).1, hq⟩,
+     fun ⟨b, hb, hq⟩ => ⟨b, List.mem_filter.mpr ⟨hb, isNonEmptyRatBounds_of_contains hq⟩, hq⟩⟩
+  change (∃ b ∈ (leftL ++ rightL).filter isNonEmptyRatBounds, b.contains q) ↔ _
+  rw [hfilt]
   simp only [List.mem_append, RatBounds.contains]
   constructor
   · rintro ⟨b, h1 | h2, hb⟩
@@ -1231,6 +1281,16 @@ theorem NatBounds.contains_intersect (a b : NatBounds) (n : Nat) :
   rcases b with ⟨bl, bu⟩
   cases au <;> cases bu <;> simp [NatBounds.intersect, NatBounds.contains] <;> omega
 
+def isNonEmptyNatBounds (b : NatBounds) : Bool :=
+  match b.upper with
+  | none => true
+  | some hi => decide (b.lower ≤ hi)
+
+private theorem isNonEmptyNatBounds_of_contains {b : NatBounds} {n : Nat}
+    (h : b.contains n) : isNonEmptyNatBounds b = true := by
+  rcases b with ⟨lo, hi⟩
+  cases hi <;> simp [isNonEmptyNatBounds, NatBounds.contains] at h ⊢ <;> omega
+
 def subtractNatBoundsOne (cur neg : NatBounds) : List NatBounds :=
   let left : List NatBounds :=
     if neg.lower = 0 then []
@@ -1244,16 +1304,22 @@ def subtractNatBoundsOne (cur neg : NatBounds) : List NatBounds :=
     match neg.upper with
     | none => []
     | some nhi => [{ lower := max cur.lower (nhi + 1), upper := cur.upper }]
-  left ++ right
+  (left ++ right).filter isNonEmptyNatBounds
 
 theorem mem_subtractNatBoundsOne_iff (cur neg : NatBounds) (n : Nat) :
     (∃ b ∈ subtractNatBoundsOne cur neg, b.contains n) ↔ (cur.contains n ∧ ¬ neg.contains n) := by
+  have hfilt : ∀ xs : List NatBounds,
+      (∃ b ∈ xs.filter isNonEmptyNatBounds, b.contains n) ↔ (∃ b ∈ xs, b.contains n) := fun xs =>
+    ⟨fun ⟨b, hb, hn⟩ => ⟨b, (List.mem_filter.mp hb).1, hn⟩,
+     fun ⟨b, hb, hn⟩ => ⟨b, List.mem_filter.mpr ⟨hb, isNonEmptyNatBounds_of_contains hn⟩, hn⟩⟩
+  unfold subtractNatBoundsOne
+  rw [hfilt]
   rcases cur with ⟨clo, chi⟩
   rcases neg with ⟨nlo, nhi⟩
   by_cases hz : nlo = 0
   · subst hz
-    cases chi <;> cases nhi <;> simp [subtractNatBoundsOne, NatBounds.contains] <;> omega
-  · cases chi <;> cases nhi <;> simp [subtractNatBoundsOne, hz, NatBounds.contains] <;> omega
+    cases chi <;> cases nhi <;> simp [NatBounds.contains] <;> omega
+  · cases chi <;> cases nhi <;> simp [hz, NatBounds.contains] <;> omega
 
 def foldSubtractNatBounds : List NatBounds → List NatBounds → List NatBounds
   | bs, [] => bs

@@ -162,11 +162,108 @@ private theorem skeleton_mem (xs : List Char) :
   | cons c xs ih =>
     exact List.mem_flatMap.mpr ⟨_, stringCharacterProfile_mem c, List.mem_map_of_mem ih⟩
 
+private def takeDistinctChars (count : Nat) (xs : List Char) : List Char :=
+  go count xs []
+where
+  go : Nat → List Char → List Char → List Char
+  | 0, _, acc => acc.reverse
+  | _, [], acc => acc.reverse
+  | rem + 1, x :: rest, acc =>
+    if acc.contains x then go (rem + 1) rest acc
+    else go rem rest (x :: acc)
+
+private theorem filter_eraseDups_comm (p : Char → Bool) :
+    ∀ (l : List Char), (l.filter p).eraseDups = l.eraseDups.filter p := by
+  intro l
+  induction hlen : l.length using Nat.strongRecOn generalizing l with
+  | ind n ih =>
+    cases l with
+    | nil => rfl
+    | cons y ys =>
+      simp only [List.filter_cons, List.eraseDups_cons]
+      cases hp : p y with
+      | false =>
+        simp only [Bool.false_eq_true, ↓reduceIte]
+        rw [← ih _ (by have := List.length_filter_le (fun b => !b == y) ys; simp at hlen; omega) _ rfl]
+        congr 1
+        rw [List.filter_filter]
+        congr 1; funext z
+        by_cases hzy : z = y
+        · subst hzy; simp [hp]
+        · have hne : (z == y) = false := beq_false_of_ne hzy
+          simp [hne]
+      | true =>
+        simp only [↓reduceIte, List.eraseDups_cons]
+        congr 1
+        have h1 := ih _ (by have := List.length_filter_le (fun b => !b == y) ys; simp at hlen; omega)
+          (ys.filter fun b => !b == y) rfl
+        rw [← h1]
+        congr 1
+        rw [List.filter_filter, List.filter_filter]
+        congr 1; funext z; cases p z <;> cases (z == y) <;> rfl
+
+private theorem takeDistinctChars_go_eq (rem : Nat) (xs acc : List Char)
+    (hnd : acc.Nodup) :
+    takeDistinctChars.go rem xs acc =
+      acc.reverse ++ ((xs.filter fun x => !acc.contains x).eraseDups.take rem) := by
+  induction xs generalizing rem acc with
+  | nil =>
+    cases rem <;> simp [takeDistinctChars.go]
+  | cons x rest ih =>
+    cases rem with
+    | zero => simp [takeDistinctChars.go]
+    | succ r =>
+      unfold takeDistinctChars.go
+      cases hc : acc.contains x with
+      | true =>
+        simp only [↓reduceIte, List.filter_cons, hc, Bool.not_true, Bool.false_eq_true]
+        exact ih (r + 1) acc hnd
+      | false =>
+        have hxNotAcc : x ∉ acc := fun hm => by rw [List.contains_iff_mem.mpr hm] at hc; cases hc
+        have hnd' : (x :: acc).Nodup := List.nodup_cons.mpr ⟨hxNotAcc, hnd⟩
+        simp only [Bool.false_eq_true, ↓reduceIte]
+        rw [ih r (x :: acc) hnd']
+        simp only [List.filter_cons, hc, Bool.not_false, ↓reduceIte, List.eraseDups_cons,
+          List.take_succ_cons, List.reverse_cons, List.append_assoc, List.singleton_append]
+        congr 2
+        have hfilt : (rest.filter fun y => !(x :: acc).contains y) =
+            (rest.filter fun y => !acc.contains y).filter (fun y => !(y == x)) := by
+          rw [List.filter_filter]
+          congr 1; funext y
+          by_cases hyx : y = x
+          · subst hyx; simp
+          · have hne : (y == x) = false := beq_false_of_ne hyx
+            simp [hne, hyx]
+        rw [hfilt, filter_eraseDups_comm]
+
+private theorem takeDistinctChars_eq (count : Nat) (xs : List Char) :
+    takeDistinctChars count xs = xs.eraseDups.take count := by
+  have h := takeDistinctChars_go_eq count xs [] List.nodup_nil
+  have hft : (xs.filter fun _ => true) = xs := List.filter_eq_self.mpr fun _ _ => rfl
+  simpa [takeDistinctChars, hft] using h
+
+private theorem nodup_flatMap_cons {cs : List Char} {tails : List (List Char)}
+    (hcs : cs.Nodup) (ht : tails.Nodup) :
+    (cs.flatMap fun d => tails.map (d :: ·)).Nodup := by
+  induction cs with
+  | nil => exact List.nodup_nil
+  | cons d ds ih =>
+    obtain ⟨hnd, hds⟩ := List.nodup_cons.mp hcs
+    simp only [List.flatMap_cons]
+    refine List.pairwise_append.mpr ⟨ht.map (d :: ·) (fun _ _ hne eq => hne (List.cons.inj eq).2),
+      ih hds, fun a ha b hb heq => ?_⟩
+    subst heq
+    obtain ⟨xs, _, rfl⟩ := List.mem_map.mp ha
+    obtain ⟨d', hd', hmem⟩ := List.mem_flatMap.mp hb
+    obtain ⟨ys, _, hcons⟩ := List.mem_map.mp hmem
+    exact hnd ((List.cons.inj hcons).1 ▸ hd')
+
 private def substitutions (count : Nat) : List Char → List (List Char)
   | [] => [[]].take count
   | c :: cs =>
     let tails := substitutions count cs
-    (((options count c).flatMap fun d => tails.map (d :: ·)).eraseDups).take count
+    let cs' := takeDistinctChars count (options count c)
+    (cs'.flatMap fun d => tails.map (d :: ·)).take count
 
 private theorem substitutions_profile {count : Nat} {ps ws : List Char}
     (h : ws ∈ substitutions count ps) : ws.map stringCharacterProfile = ps := by
@@ -176,16 +273,22 @@ private theorem substitutions_profile {count : Nat} {ps ws : List Char}
     obtain rfl := List.mem_singleton.mp hh
     rfl
   | cons p ps ih =>
-    obtain ⟨c, hc, hs⟩ := List.mem_flatMap.mp (List.mem_eraseDups.mp ((List.take_sublist ..).subset h))
+    obtain ⟨c, hc, hs⟩ := List.mem_flatMap.mp ((List.take_sublist ..).subset h)
+    rw [takeDistinctChars_eq] at hc
+    have hc' := List.mem_eraseDups.mp ((List.take_sublist ..).subset hc)
     obtain ⟨xs, hx, rfl⟩ := List.mem_map.mp hs
-    have e := options_profile hc
+    have e := options_profile hc'
     simp only [List.map_cons, e, ih hx]
 
 private theorem nodup_substitutions (count : Nat) (ps : List Char) :
     (substitutions count ps).Nodup := by
-  cases ps with
+  induction ps with
   | nil => exact (List.take_sublist ..).nodup (by simp)
-  | cons p ps => exact (List.take_sublist ..).nodup (nodup_eraseDups_list _)
+  | cons p ps ih =>
+    unfold substitutions
+    rw [takeDistinctChars_eq]
+    exact (List.take_sublist ..).nodup (nodup_flatMap_cons
+      ((List.take_sublist ..).nodup (nodup_eraseDups_list _)) ih)
 
 private theorem substitutions_cover (count : Nat) (xs : List Char) :
     xs ∈ substitutions count (xs.map stringCharacterProfile) ∨
@@ -195,9 +298,11 @@ private theorem substitutions_cover (count : Nat) (xs : List Char) :
     cases count <;> simp [substitutions]
   | cons c xs ih =>
     let cs := options count (stringCharacterProfile c)
+    let cs' := takeDistinctChars count cs
     let tails := substitutions count (xs.map stringCharacterProfile)
-    let big := (cs.flatMap fun d => tails.map (d :: ·)).eraseDups
+    let big := cs'.flatMap fun d => tails.map (d :: ·)
     change c :: xs ∈ big.take count ∨ count ≤ (big.take count).length
+    have hcsEq : cs' = cs.eraseDups.take count := takeDistinctChars_eq count cs
     by_cases hbig : count ≤ big.length
     · exact .inr (by simp [List.length_take, hbig])
     · have hc := options_cover count c
@@ -216,27 +321,33 @@ private theorem substitutions_cover (count : Nat) (xs : List Char) :
           change count ≤ tails.length at hn
           simp [e] at hn
           omega
-      obtain ⟨d, hd⟩ := List.exists_mem_of_ne_nil _ hcs
       obtain ⟨ys, hys⟩ := List.exists_mem_of_ne_nil _ ht
-      rcases hc with hc | hc
-      · rcases ih with hx | hx
+      by_cases hcsLen : count ≤ cs.eraseDups.length
+      · have hnd' : cs'.Nodup := by rw [hcsEq]; exact (List.take_sublist ..).nodup (nodup_eraseDups_list _)
+        have hle : cs'.length ≤ big.length := by
+          simpa using length_le_of_nodup_subset
+            (hnd'.map (· :: ys) (fun _ _ hn eq => hn (List.cons.inj eq).1))
+            (ys := big) (fun w hw => by
+              obtain ⟨d, hd, rfl⟩ := List.mem_map.mp hw
+              exact List.mem_flatMap.mpr ⟨d, hd, List.mem_map_of_mem hys⟩)
+        have hlen' : cs'.length = count := by rw [hcsEq, List.length_take, Nat.min_eq_left hcsLen]
+        exact (hbig (by omega)).elim
+      · have hcsAll : cs' = cs.eraseDups := by
+          rw [hcsEq, List.take_of_length_le (by omega)]
+        have hcMem : c ∈ cs' := by
+          rcases hc with hm | hge
+          · rw [hcsAll]; exact List.mem_eraseDups.mpr hm
+          · exact (hcsLen hge).elim
+        rcases ih with hx | hx
         · left
           rw [List.take_of_length_le (by omega : big.length ≤ count)]
-          exact List.mem_eraseDups.mpr (List.mem_flatMap.mpr ⟨_, hc, List.mem_map_of_mem hx⟩)
+          exact List.mem_flatMap.mpr ⟨_, hcMem, List.mem_map_of_mem hx⟩
         · have hle : tails.length ≤ big.length := by
             simpa using length_le_of_nodup_subset
               ((nodup_substitutions count (xs.map stringCharacterProfile)).map (c :: ·)
                 (fun _ _ hn eq => hn (List.cons.inj eq).2))
-              (ys := big) (fun w hw => List.mem_eraseDups.mpr (List.mem_flatMap.mpr ⟨_, hc, hw⟩))
+              (ys := big) (fun w hw => List.mem_flatMap.mpr ⟨_, hcMem, hw⟩)
           exact (hbig (Nat.le_trans hx hle)).elim
-      · have hle : cs.eraseDups.length ≤ big.length := by
-          simpa using length_le_of_nodup_subset
-            ((nodup_eraseDups_list cs).map (· :: ys) (fun _ _ hn eq => hn (List.cons.inj eq).1))
-            (ys := big) (fun w hw => by
-              obtain ⟨d, hd, rfl⟩ := List.mem_map.mp hw
-              exact List.mem_eraseDups.mpr (List.mem_flatMap.mpr
-                ⟨d, List.mem_eraseDups.mp hd, List.mem_map_of_mem hys⟩))
-        exact (hbig (Nat.le_trans hc hle)).elim
 
 private def expandProfiles (count : Nat) (profiles : List (List Char))
     (accept : String → Bool) : List String :=

@@ -765,12 +765,19 @@ private def completeDataEdges (p : Problem) (s : Branch)
     let srCands := match compileSolvedRange comb with
       | some sr => candidateValues sr (need + 4)
       | none => []
-    for v in (srCands ++ fallbackCandidates comb (need + 4)).eraseDups do
+    for v in srCands do
       if added >= need then break
       if comp.holds v && !s.negDataEdges.contains (dp, x, v) &&
          !edges.contains (dp, wx, v) then
         edges := (dp, wx, v) :: edges
         added := added + 1
+    if added < need then
+      for v in fallbackCandidates comb (need + 4) do
+        if added >= need then break
+        if comp.holds v && !s.negDataEdges.contains (dp, x, v) &&
+           !edges.contains (dp, wx, v) then
+          edges := (dp, wx, v) :: edges
+          added := added + 1
   return closeSubDataEdges p.subData edges
 
 private def toModel (p : Problem) (s : Branch) : SROIQDModel :=
@@ -888,12 +895,19 @@ private def buildQuotientModel (p : Problem) (s : Branch) (redirects : List (Nat
           let srCands := match compileSolvedRange comb with
             | some sr => candidateValues sr (need + 4)
             | none => []
-          for v in (srCands ++ fallbackCandidates comb (need + 4)).eraseDups do
+          for v in srCands do
             if added >= need then break
             if comp.holds v && !sQuot.negDataEdges.contains (dp, x, v) &&
                !edges.contains (dp, wx, v) then
               edges := (dp, wx, v) :: edges
               added := added + 1
+          if added < need then
+            for v in fallbackCandidates comb (need + 4) do
+              if added >= need then break
+              if comp.holds v && !sQuot.negDataEdges.contains (dp, x, v) &&
+                 !edges.contains (dp, wx, v) then
+                edges := (dp, wx, v) :: edges
+                added := added + 1
         return closeSubDataEdges p.subData edges
       some ⟨g, noms, anons, dEdges⟩
 
@@ -973,11 +987,23 @@ private def probe (p : Problem) (maxNodes : Nat) :
   | _ + 1, 0, _ => (none, 0)
   | depth + 1, fuel + 1, s => Id.run do
     if s.nodes.length > maxNodes then return (none, fuel)
-    let m := toModel p s
-    if checkModel p m then return (some (.model m), fuel)
-    for bm in toBlockedModels p s do
-      if checkModel p bm then return (some (.model bm), fuel)
-    let some t := next p s maxNodes | return (none, fuel)
+    let some t := next p s maxNodes | do
+      let m := toModel p s
+      if checkModel p m then return (some (.model m), fuel)
+      for bm in toBlockedModels p s do
+        if checkModel p bm then return (some (.model bm), fuel)
+      return (none, fuel)
+    -- Skip expensive model construction during purely deterministic same-node
+    -- expansion (`t.branches = [u]` with no new worlds); check early only before
+    -- branching or world-creating steps (which also enables early blocking).
+    let tryEarlyModel : Bool := match t.branches with
+      | [u] => u.nodes.length > s.nodes.length
+      | _ => true
+    if tryEarlyModel then
+      let m := toModel p s
+      if checkModel p m then return (some (.model m), fuel)
+      for bm in toBlockedModels p s do
+        if checkModel p bm then return (some (.model bm), fuel)
     let mut rest := fuel
     let mut result : Option Evidence := some (.refutation 0)
     for branch in t.branches do
