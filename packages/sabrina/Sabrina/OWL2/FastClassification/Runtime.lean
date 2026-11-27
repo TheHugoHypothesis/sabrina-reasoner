@@ -1,4 +1,5 @@
 import Sabrina.OWL2.FastClassification.EL
+import Sabrina.OWL2.FastCB
 import Sabrina.OWL2.FastLocality
 
 /-! Parallel runtime classification and realization using checked SROIQ(D) models and locality modules. -/
@@ -420,7 +421,8 @@ private structure KPState where
   unsatSet : Std.HashSet IRI := {}
 
 private def KPState.init (o : Ontology) (namedClasses : List IRI)
-    (namedClassSet : Std.HashSet IRI) : KPState := Id.run do
+    (namedClassSet : Std.HashSet IRI)
+    (cbSubs : List (IRI × IRI) := []) (cbUnsats : List IRI := []) : KPState := Id.run do
   let mut toldAdj : Std.HashMap IRI (List IRI) := {}
   for ax in o do
     match ax with
@@ -433,6 +435,8 @@ private def KPState.init (o : Ontology) (namedClasses : List IRI)
             if let .named b := c2 then
               if a != b then toldAdj := toldAdj.insert a (b :: toldAdj.getD a [])
     | _ => pure ()
+  for (a, b) in cbSubs do
+    if a != b then toldAdj := toldAdj.insert a (b :: toldAdj.getD a [])
   let hasThing := namedClassSet.contains thing
   let mut kSups : Std.HashMap IRI (Std.HashSet IRI) := {}
   let mut kSubs : Std.HashMap IRI (Std.HashSet IRI) := {}
@@ -458,6 +462,11 @@ private def KPState.init (o : Ontology) (namedClasses : List IRI)
   let mut unsat0 : Std.HashSet IRI := {}
   if hasThing then sat0 := sat0.insert thing
   if namedClassSet.contains nothing then unsat0 := unsat0.insert nothing
+  for u in cbUnsats do
+    if namedClassSet.contains u then
+      unsat0 := unsat0.insert u
+      for x in kSubs.getD u {} do
+        unsat0 := unsat0.insert x
   return { knownSups := kSups, knownSubs := kSubs, satSet := sat0, unsatSet := unsat0 }
 
 private def KPState.markSat (c : IRI) (st : KPState) : KPState := Id.run do
@@ -845,7 +854,8 @@ private def classifyEnhancedRuntimeCore (o : Ontology) (namedClasses : List IRI)
       }
     else
       let namedClassSet : Std.HashSet IRI := namedClasses.foldl (fun s c => s.insert c) {}
-      let st0 := KPState.init o namedClasses namedClassSet
+      let cb := FastCB.runFastCB o numWorkers
+      let st0 := KPState.init o namedClasses namedClassSet cb.subs cb.unsats
       let stInit := match initModel? with
         | some m0 => st0.mergeSummary (summarizeModel m0 namedClasses namedClassSet)
         | none => st0
@@ -916,6 +926,7 @@ theorem classifyOntologyFastRuntime_nonEL_workers_eq (o : Ontology)
       classifyOntologyFastRuntime o decls 1 auxiliaryClass? := by
   simp only [classifyOntologyFastRuntime, classifyOntologyFastWithModelRuntime,
     classifyEnhancedRuntimeCore, beq_iff_eq, h, ↓reduceIte,
+    FastCB.runFastCB_workers_eq,
     seedKPFromBatchModels, checkComponentBatches, mapIndependent_eq,
     sweepKPSatParallel_eq, verifyKPPairsParallel_eq]
 

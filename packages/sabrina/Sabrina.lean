@@ -20,6 +20,7 @@ import Sabrina.OWL2.Profile
 import Sabrina.OWL2.FastLocality
 import Sabrina.OWL2.EL
 import Sabrina.OWL2.FastEL
+import Sabrina.OWL2.FastCB
 import Sabrina.OWL2.IncrementalABox
 import Sabrina.OWL2.RDF.Serialize
 import Sabrina.OWL2.Materialize
