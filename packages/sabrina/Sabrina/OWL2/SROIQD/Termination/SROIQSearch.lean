@@ -382,7 +382,8 @@ private def inspectNodes {rank : Rank} {p : Problem} {s : SROIQState rank p}
 /-! ### 1. Clash detection -/
 
 private def inspectClash {rank : Rank} {p : Problem} (hsroiqd : p.isSROIQD rank = true)
-    (s : SROIQState rank p) :
+    (s : SROIQState rank p)
+    (rootResult : {r // r = solveDataCSP (s.forest.rootDataCSP p)}) :
     Inspection rank p s (s.forest.reblock.BlockedClashFree p) :=
   let b := s.forest
   let hi := p.sroiqdInput hsroiqd
@@ -471,11 +472,12 @@ private def inspectClash {rank : Rank} {p : Problem} (hsroiqd : p.isSROIQD rank 
         else
           .done fun he => h (edgeBool_iff.mpr he)).mapDone fun h r hs he => h (.self r false) hs r rfl he
   let c9 : Inspection rank p s ((solveDataCSP (b.rootDataCSP p)).isSome = true) :=
-    match hsol : solveDataCSP (b.rootDataCSP p) with
-    | some _ => .done rfl
+    match hsol : rootResult.val with
+    | some _ => .done (by rw [← rootResult.property, hsol]; rfl)
     | none =>
       .step (closeStep fun i hm env hreal =>
-        solveDataCSP_none_unsat (b.rootDataCSP_isSROIQD hi s.within.labels) hsol
+        solveDataCSP_none_unsat (b.rootDataCSP_isSROIQD hi s.within.labels)
+          (rootResult.property.symm.trans hsol)
           (b.rootDataCSP_realizes hm hreal))
   let c10 : Inspection rank p s (∀ x, b.reblock.Unblocked x → b.isRoot x = false →
       (solveDataCSP (b.nodeDataCSP p x)).isSome = true) :=
@@ -1754,10 +1756,11 @@ private def inspectWitnesses {rank : Rank} {p : Problem} (s : SROIQState rank p)
 /-! ### Full fair `sroiqStep` sweep -/
 
 private def sroiqSweep {rank : Rank} {p : Problem} (hsroiqd : p.isSROIQD rank = true)
-    (s : SROIQState rank p) :
+    (s : SROIQState rank p)
+    (rootResult : {r // r = solveDataCSP (s.forest.rootDataCSP p)}) :
     Inspection rank p s (s.forest.reblock.BlockedClashFree p ∧ s.forest.reblock.BlockedSaturated rank p) :=
   let all :=
-    (((((((((((inspectClash hsroiqd s).andThen fun _ => inspectNomPos s).andThen
+    (((((((((((inspectClash hsroiqd s rootResult).andThen fun _ => inspectNomPos s).andThen
       fun _ => inspectKeyCls s).andThen
       fun _ => inspectKeyObjSplit s).andThen
       fun _ => inspectKeyMerge s).andThen
@@ -1815,20 +1818,31 @@ private def sroiqSweep {rank : Rank} {p : Problem} (hsroiqd : p.isSROIQD rank = 
       keyObjSplit := hkeyObj
       keyMerge := hkeyMerge }⟩
 
+private def sroiqStepWith {rank : Rank} {p : Problem} (hsroiqd : p.isSROIQD rank = true)
+    (s : SROIQState rank p)
+    (rootResult : {r // r = solveDataCSP (s.forest.rootDataCSP p)}) :
+    Option (SROIQCheckedStep rank p s) :=
+  match sroiqSweep hsroiqd s rootResult with
+  | .step t => some t
+  | .done _ => none
+
 /-- Single fair search step for full `SROIQ(D)`: returns `none` iff the reblocked
 forest is clash-free and fully saturated; otherwise emits a sound, strictly
 progressing branching transition. -/
 def sroiqStep {rank : Rank} {p : Problem} (hsroiqd : p.isSROIQD rank = true)
     (s : SROIQState rank p) : Option (SROIQCheckedStep rank p s) :=
-  match sroiqSweep hsroiqd s with
-  | .step t => some t
-  | .done _ => none
+  sroiqStepWith hsroiqd s ⟨solveDataCSP (s.forest.rootDataCSP p), rfl⟩
+
+private theorem sroiqStepWith_eq {rank : Rank} {p : Problem} (hsroiqd : p.isSROIQD rank = true)
+    (s : SROIQState rank p) (result : {r // r = solveDataCSP (s.forest.rootDataCSP p)}) :
+    sroiqStepWith hsroiqd s result = sroiqStep hsroiqd s :=
+  congrArg (sroiqStepWith hsroiqd s) (Subtype.ext result.property)
 
 theorem sroiqStep_fair {rank : Rank} {p : Problem} {hsroiqd : p.isSROIQD rank = true}
     {s : SROIQState rank p} (h : sroiqStep hsroiqd s = none) :
     s.forest.reblock.BlockedClashFree p ∧ s.forest.reblock.BlockedSaturated rank p := by
-  unfold sroiqStep at h
-  cases hs : sroiqSweep hsroiqd s with
+  unfold sroiqStep sroiqStepWith at h
+  cases hs : sroiqSweep hsroiqd s ⟨solveDataCSP (s.forest.rootDataCSP p), rfl⟩ with
   | step t => rw [hs] at h; cases h
   | done hd => exact hd
 
@@ -1867,6 +1881,58 @@ inductive SROIQVerdict {rank : Rank} {p : Problem} (s : SROIQState rank p) where
   | sat (leaf : SROIQOpenLeaf rank p)
   | unsat (ref : SROIQRefutation s)
 
+private structure RootDataMemo where
+  problem : DataCSP
+  result : Option (List DataEdge)
+  correct : result = solveDataCSP problem
+
+private def solveRootData (problem : DataCSP) (memo : Option RootDataMemo) :
+    {entry : RootDataMemo // entry.problem = problem} :=
+  match memo with
+  | none => ⟨⟨problem, solveDataCSP problem, rfl⟩, rfl⟩
+  | some previous =>
+    if h : previous.problem = problem then ⟨previous, h⟩
+    else ⟨⟨problem, solveDataCSP problem, rfl⟩, rfl⟩
+
+private def refreshLookups (forest : BlockedForest) : BlockedForest := forest
+
+private def refreshLookupsIndexed (forest : BlockedForest) : BlockedForest :=
+  let labels := Vector.ofFn forest.labels
+  let guards := Vector.ofFn forest.guardLabels
+  let loops := Vector.ofFn forest.loops
+  let down := Vector.ofFn forest.down
+  let up := Vector.ofFn forest.up
+  { forest with
+    labels := fun x => labels[x.val]
+    guardLabels := fun x => guards[x.val]
+    loops := fun x => loops[x.val]
+    down := fun x => down[x.val]
+    up := fun x => up[x.val] }
+
+@[csimp] private theorem refreshLookups_eq_indexed : refreshLookups = refreshLookupsIndexed := by
+  funext forest
+  have lookupEq {α : Type} (get : forest.Node → α) :
+      (fun x : forest.Node => (Vector.ofFn get)[x.val]) = get := by
+    funext x
+    exact Vector.getElem_ofFn x.isLt
+  unfold refreshLookups refreshLookupsIndexed
+  dsimp only
+  rw [lookupEq forest.labels, lookupEq forest.guardLabels, lookupEq forest.loops,
+    lookupEq forest.down, lookupEq forest.up]
+
+-- Point updates close over earlier versions of these fields. Take an indexed
+-- snapshot periodically along a branch to bound the lookup chain.
+private def refreshState {rank : Rank} {p : Problem} (state : SROIQState rank p)
+    (depth : Nat) : SROIQState rank p :=
+  if depth % 64 = 0 then { state with forest := refreshLookups state.forest } else state
+
+private theorem refreshState_eq {rank : Rank} {p : Problem} (state : SROIQState rank p)
+    (depth : Nat) : refreshState state depth = state := by
+  unfold refreshState
+  split
+  · cases state; rfl
+  · rfl
+
 private inductive BranchCheck {rank : Rank} {p : Problem} (xs : List (SROIQState rank p)) where
   | sat (leaf : SROIQOpenLeaf rank p)
   | closed (proof : ∀ next ∈ xs, SROIQRefutation next)
@@ -1894,21 +1960,30 @@ def decideSROIQDAccessible {rank : Rank} {p : Problem} (hsroiqd : p.isSROIQD ran
   let A := { state : SROIQState rank p // Acc (SROIQFollows hsroiqd) state }
   let less : A → A → Prop := InvImage (SROIQFollows hsroiqd) Subtype.val
   let wf : WellFounded less := ⟨fun a => InvImage.accessible Subtype.val a.property⟩
-  let run (state : A) (visit : ∀ next, less next state → SROIQVerdict next.val) :
-      SROIQVerdict state.val :=
-    match h : sroiqStep hsroiqd state.val with
+  let run (state : A)
+      (visit : ∀ next, less next state → Option RootDataMemo → Nat → SROIQVerdict next.val)
+      (memo : Option RootDataMemo) (depth : Nat) : SROIQVerdict state.val :=
+    let current := refreshState state.val depth
+    have hcurrent : current = state.val := refreshState_eq state.val depth
+    let problem := current.forest.rootDataCSP p
+    let saved := solveRootData problem memo
+    let result : {r // r = solveDataCSP problem} :=
+      ⟨saved.val.result, saved.val.correct.trans (congrArg solveDataCSP saved.property)⟩
+    match h : sroiqStepWith hsroiqd current result with
     | none =>
-      let complete := sroiqStep_fair h
-      .sat ⟨state.val.forest.reblock, complete.1, complete.2⟩
+      let complete := sroiqStep_fair ((sroiqStepWith_eq hsroiqd current result).symm.trans h)
+      .sat ⟨current.forest.reblock, complete.1, complete.2⟩
     | some t =>
       match checkBranches t
         (fun next hn =>
-          let smaller := SROIQFollows.child h hn
-          visit ⟨next, state.property.inv smaller⟩ smaller)
+          have smaller : SROIQFollows hsroiqd next state.val :=
+            hcurrent ▸ SROIQFollows.child ((sroiqStepWith_eq hsroiqd current result).symm.trans h) hn
+          visit ⟨next, state.property.inv smaller⟩ smaller
+            (some saved.val) (depth + 1))
         t.branches (fun _ h => h) with
       | .sat leaf => .sat leaf
-      | .closed proof => .unsat (.step t proof)
-  exact wf.fix run ⟨s, acc⟩
+      | .closed proof => .unsat (hcurrent ▸ .step t proof)
+  exact wf.fix run ⟨s, acc⟩ none 1
 
 theorem decideSROIQDAccessible_sat_iff {rank : Rank} {p : Problem} {hsroiqd : p.isSROIQD rank = true}
     (a : Acc (SROIQFollows hsroiqd) (SROIQState.initial rank p)) :

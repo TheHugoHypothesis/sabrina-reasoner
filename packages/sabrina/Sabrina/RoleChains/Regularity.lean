@@ -109,9 +109,8 @@ private def lowerRoles (c : Chain) : List OrientedRole :=
 private def tableRank (table : List (String × Nat)) (r : String) : Nat :=
   (table.lookup r).getD 0
 
-/-- Find a potential witness with bounded relaxation. Callers check the result
-    independently of this search. -/
-def inferRank (rules : RoleTheory) (chains : List Chain) : Rank :=
+@[noinline] private def inferRankTable (rules : RoleTheory) (chains : List Chain) :
+    List (String × Nat) :=
   let constraints := (rules.map fun (r,s) => (r.1,s.1,0)) ++
     chains.flatMap (fun c => (lowerRoles c).map (fun r => (r.1,c.head,1)))
   let names := (constraints.flatMap fun (r,s,_) => [r,s]).eraseDups
@@ -119,8 +118,16 @@ def inferRank (rules : RoleTheory) (chains : List Chain) : Rank :=
     constraints.foldl (fun table (r,s,w) =>
       let k := tableRank table r + w
       table.map fun (t,v) => (t, if t == s then max v k else v)) table
-  let table := names.foldl (fun table _ => relax table) (names.map fun r => (r,0))
-  tableRank table
+  names.foldl (fun table _ => relax table) (names.map fun r => (r,0))
+
+/-- Find a potential rank witness with bounded relaxation. -/
+def inferRank (rules : RoleTheory) (chains : List Chain) : Rank :=
+  tableRank (inferRankTable rules chains)
+
+/-- Validate the inferred rank using a single table for all role lookups. -/
+def checkInferredRank (rules : RoleTheory) (chains : List Chain) : Bool :=
+  let table := inferRankTable rules chains
+  checkRegular (fun r => tableRank table r) rules chains
 
 private def roleNames (rules : RoleTheory) (chains : List Chain) : List String :=
   ((rules.flatMap fun (r, s) => [r.1, s.1]) ++
@@ -222,7 +229,8 @@ private theorem rankTable_ranked {rules chains rank} (h : Ranked rank rules chai
 /-- Complete search for a rank in the implemented regular chain fragment.
 Use the inexpensive relaxation first. The finite fallback is exhaustive. -/
 def findRank (rules : RoleTheory) (chains : List Chain) : Option Rank :=
-  let rank := inferRank rules chains
+  let table := inferRankTable rules chains
+  let rank := fun r => tableRank table r
   if checkRegular rank rules chains then some rank
   else
     let names := roleNames rules chains

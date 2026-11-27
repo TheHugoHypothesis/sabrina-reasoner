@@ -242,7 +242,7 @@ private def solveGraded (req : Request Graded.Inclusion) : UInt32 × Json := Id.
     chars.roles
   if names.any (RoleChains.SimpleRoles.builtinRoles.contains ·) then
     return reject "built-in OWL object properties are outside the typed graded semantics"
-  if !RoleChains.checkRegular (RoleChains.inferRank rules chains) rules chains then
+  if !RoleChains.checkInferredRank rules chains then
     return reject "no validated rank for this role hierarchy"
   let limits : Graded.Limits := {}
   let pair := do
@@ -263,7 +263,7 @@ private def solveChains (req : Request Inclusion) : UInt32 × Json := Id.run do
   let tbox := req.ontology.tbox
   let rules := req.ontology.rules
   let chains := req.ontology.chains
-  if !RoleChains.checkRegular (RoleChains.inferRank rules chains) rules chains then
+  if !RoleChains.checkInferredRank rules chains then
     return (2, response "UNSUPPORTED" false
       (("reason", toJson "no validated rank for this role hierarchy") :: context))
   let query := req.inclusion

@@ -227,7 +227,7 @@ def checkWellFormedOntology (o : Ontology) : Bool :=
   | some (defs, p) =>
     o.all (checkAxiom defs) &&
     p.checkSimple &&
-    RoleChains.checkRegular (RoleChains.inferRank p.rules p.chains) p.rules p.chains
+    RoleChains.checkInferredRank p.rules p.chains
 
 /-- Validator soundness and acceptance completeness for `WellFormedOntology`. -/
 theorem checkWellFormedOntology_iff (o : Ontology) :

@@ -1,4 +1,5 @@
 import Init.Data.List.Erase
+import Std.Data.HashSet.Lemmas
 
 namespace Sabrina.ALCH
 
@@ -72,6 +73,59 @@ private theorem closeThrough_sound {edges : HierarchyOf α} {R : α → α → P
     The endpoints of asserted inclusions are the pivots. -/
 def close (edges : HierarchyOf α) : HierarchyOf α :=
   closeThrough edges (edges.flatMap fun (a, b) => [a, b]).eraseDups
+
+section Indexed
+
+variable [Hashable α] [LawfulHashable α]
+
+private def dedupLoop : List α → Std.HashSet α → List α → List α
+  | [], _, kept => kept.reverse
+  | x :: xs, seen, kept =>
+    if seen.contains x then dedupLoop xs seen kept
+    else dedupLoop xs (seen.insert x) (x :: kept)
+
+private theorem dedupLoop_eq (xs kept : List α) (seen : Std.HashSet α)
+    (hseen : ∀ x, seen.contains x = kept.contains x) :
+    dedupLoop xs seen kept = List.eraseDupsBy.loop (· == ·) xs kept := by
+  induction xs generalizing seen kept with
+  | nil => rfl
+  | cons x xs ih =>
+    simp only [dedupLoop, List.eraseDupsBy.loop, ← List.contains_eq_any_beq, ← hseen x]
+    cases hx : seen.contains x with
+    | true => exact ih _ _ hseen
+    | false =>
+      apply ih
+      intro y
+      simp only [Std.HashSet.contains_insert, List.contains_cons, hseen y]
+      rw [Bool.beq_comm (a := x) (b := y)]
+
+private def dedupIndexed (xs : List α) : List α :=
+  dedupLoop xs (∅ : Std.HashSet α) []
+
+private theorem dedupIndexed_eq (xs : List α) :
+    dedupIndexed xs = xs.eraseDups :=
+  dedupLoop_eq xs [] _ (by simp)
+
+private def closeThroughIndexed (edges : HierarchyOf α) : List α → HierarchyOf α
+  | [] => edges
+  | p :: rest =>
+    let cur := closeThroughIndexed edges rest
+    let outgoing := cur.filter (fun e => e.1 == p)
+    dedupIndexed (cur ++ (cur.filter (fun e => e.2 == p)).flatMap fun e =>
+      outgoing.map fun f => (e.1, f.2))
+
+/-- Compute the same ordered closure using indexed duplicate checks at each pivot. -/
+def closeIndexed (edges : HierarchyOf α) : HierarchyOf α :=
+  closeThroughIndexed edges (dedupIndexed (edges.flatMap fun (a, b) => [a, b]))
+
+theorem closeIndexed_eq (edges : HierarchyOf α) : closeIndexed edges = close edges := by
+  have stepEq (pivots : List α) : closeThroughIndexed edges pivots = closeThrough edges pivots := by
+    induction pivots with
+    | nil => rfl
+    | cons p rest ih => simp only [closeThroughIndexed, closeThrough, dedupIndexed_eq, ih, extend]
+  simp only [closeIndexed, close, dedupIndexed_eq, stepEq]
+
+end Indexed
 
 theorem mem_close {edges : HierarchyOf α} {a b : α} (h : (a, b) ∈ edges) :
     (a, b) ∈ close edges := mem_closeThrough _ h

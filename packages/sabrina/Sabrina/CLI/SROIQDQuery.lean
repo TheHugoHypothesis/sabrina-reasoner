@@ -212,7 +212,7 @@ private def checkRoleRestrictions (p : Problem) : Option String := Id.run do
     if let some src := RoleChains.SimpleRoles.firstComposite closed p.chains r then
       let orient := if src.2 then "inverse of " else ""
       return some s!"non-simple role {r.1} used where a simple role is required; composite subrole: {orient}{src.1}"
-  if !RoleChains.checkRegular (RoleChains.inferRank p.rules p.chains) p.rules p.chains then
+  if !RoleChains.checkInferredRank p.rules p.chains then
     return some "no validated rank for this role hierarchy"
   return none
 

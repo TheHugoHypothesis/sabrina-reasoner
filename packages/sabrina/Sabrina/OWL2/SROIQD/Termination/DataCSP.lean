@@ -1,5 +1,6 @@
 import Sabrina.OWL2.SROIQD.Termination.DataRangeExact
 import Sabrina.OWL2.SROIQD.CoreCompleteness
+import Std.Data.HashSet.Lemmas
 
 /-!
 Exact concrete-datatype constraint satisfaction solver (`DataCSP`) for `SROIQ(D)`.
@@ -247,7 +248,7 @@ structure DataCSP where
   keyDisjoint : List (Nat × Nat × IRI) := []
   lowers : List DataLower := []
   uppers : List DataUpper := []
-  deriving Repr
+  deriving DecidableEq, Repr
 
 def DataCSP.isSROIQD (csp : DataCSP) : Bool :=
   csp.lowers.all (fun l => l.range.isSROIQD) &&
@@ -270,7 +271,7 @@ def DataCSP.totalDemand (csp : DataCSP) : Nat :=
   (csp.lowers.map DataLower.count).sum
 
 def DataCSP.atoms (csp : DataCSP) : List DataRange :=
-  ((csp.lowers.map DataLower.range ++ csp.uppers.map DataUpper.range).flatMap
+  ((csp.lowers.map DataLower.range ++ csp.uppers.map DataUpper.range).eraseDups.flatMap
     atomsOfDataRange).eraseDups
 
 theorem DataCSP.atoms_nodup (csp : DataCSP) : csp.atoms.Nodup :=
@@ -281,7 +282,7 @@ theorem DataCSP.atoms_exact {csp : DataCSP} (h : csp.isSROIQD = true) :
   obtain ⟨hl, hu⟩ := Bool.and_eq_true_iff.mp h
   intro a ha
   obtain ⟨d, hd, had⟩ := List.mem_flatMap.mp (List.mem_eraseDups.mp ha)
-  rcases List.mem_append.mp hd with h1 | h2
+  rcases List.mem_append.mp (List.mem_eraseDups.mp hd) with h1 | h2
   · obtain ⟨l, hlMem, rfl⟩ := List.mem_map.mp h1
     exact atomsOfDataRange_exact (List.all_eq_true.mp hl l hlMem) a had
   · obtain ⟨u, huMem, rfl⟩ := List.mem_map.mp h2
@@ -316,6 +317,51 @@ def checkDataAdmissible (pool : List Value) (subData : List (IRI × IRI))
   (uppers.all fun u =>
     decide ((qualPoolValues pool edges u.subj u.dp u.range).length ≤ u.bound))
 
+private def checkUppersIndexed (pool : List Value) (uppers : List DataUpper)
+    (edges : List DataEdge) : Bool :=
+  let occupied := Std.HashSet.ofList (edges.map fun (dp, subj, _) => (dp, subj))
+  uppers.all fun u =>
+    !occupied.contains (u.dp, u.subj) ||
+      decide ((qualPoolValues pool edges u.subj u.dp u.range).length ≤ u.bound)
+
+private theorem checkUppersIndexed_eq (pool : List Value) (uppers : List DataUpper)
+    (edges : List DataEdge) :
+    checkUppersIndexed pool uppers edges = uppers.all (fun u =>
+      decide ((qualPoolValues pool edges u.subj u.dp u.range).length ≤ u.bound)) := by
+  unfold checkUppersIndexed
+  apply List.all_congr rfl
+  intro u
+  simp only [Std.HashSet.contains_ofList]
+  cases h : (edges.map fun (dp, subj, _) => (dp, subj)).contains (u.dp, u.subj) with
+  | true => simp
+  | false =>
+    have hempty : qualPoolValues pool edges u.subj u.dp u.range = [] := by
+      apply List.filter_eq_nil_iff.mpr
+      intro v _ hval
+      have hv : (u.dp, u.subj, v) ∈ edges :=
+        List.contains_iff_mem.mp (Bool.and_eq_true_iff.mp hval).1
+      have hseen : (u.dp, u.subj) ∈ edges.map (fun (dp, subj, _) => (dp, subj)) :=
+        List.mem_map_of_mem hv
+      exact Bool.eq_false_iff.mp h (List.contains_iff_mem.mpr hseen)
+    simp [hempty]
+
+private def checkDataAdmissibleIndexed (pool : List Value) (subData : List (IRI × IRI))
+    (disjointData : List (IRI × IRI)) (keyDisjoint : List (Nat × Nat × IRI))
+    (uppers : List DataUpper) (edges : List DataEdge) : Bool :=
+  (edges.all fun (_, _, v) => pool.contains v) &&
+  (subData.all fun (r, t) =>
+    edges.all fun (dp, s, v) => !(dp == r) || hasDataEdge edges t s v) &&
+  (disjointData.all fun (r, t) =>
+    edges.all fun (dp, s, v) => !(dp == r && hasDataEdge edges t s v)) &&
+  (keyDisjoint.all fun (s₁, s₂, dp) =>
+    edges.all fun (dp', s, v) => !(dp' == dp && s == s₁ && hasDataEdge edges dp s₂ v)) &&
+  checkUppersIndexed pool uppers edges
+
+@[csimp] private theorem checkDataAdmissible_eq_indexed :
+    checkDataAdmissible = checkDataAdmissibleIndexed := by
+  funext pool subData disjointData keyDisjoint uppers edges
+  simp only [checkDataAdmissible, checkDataAdmissibleIndexed, checkUppersIndexed_eq]
+
 def addSubDataStar (subData : List (IRI × IRI)) (dp : IRI) (s : Nat) (v : Value)
     (edges : List DataEdge) : List DataEdge :=
   ((subDataStar subData dp).map (fun dp' => (dp', s, v)) ++ edges).eraseDups
@@ -347,8 +393,26 @@ def solveLowers (pool : List Value) (subData : List (IRI × IRI))
       pickForLower subData L.subj L.dp need cands edges
         (solveLowers pool subData disjointData keyDisjoint uppers rest)
 
+private def literalWitness (csp : DataCSP) : List DataEdge :=
+  (csp.lowers.flatMap fun lower =>
+    match lower.count, lower.range with
+    | 1, .oneOf [literal] =>
+      match decodeLiteral literal with
+      | some value =>
+        (subDataStar csp.subData lower.dp).map fun dp => (dp, lower.subj, value)
+      | none => []
+    | _, _ => []).eraseDups
+
 def solveDataCSP (csp : DataCSP) : Option (List DataEdge) :=
-  solveLowers csp.pool csp.subData csp.disjointData csp.keyDisjoint csp.uppers csp.lowers []
+  if csp.lowers.isEmpty then some []
+  else
+    let pool := csp.pool
+    let edges := literalWitness csp
+    if checkDataAdmissible pool csp.subData csp.disjointData csp.keyDisjoint csp.uppers edges &&
+        csp.lowers.all (fun lower =>
+          decide (lower.count ≤ (qualPoolValues pool edges lower.subj lower.dp lower.range).length)) then
+      some edges
+    else solveLowers pool csp.subData csp.disjointData csp.keyDisjoint csp.uppers csp.lowers []
 
 /-! ### 4. Soundness of `solveDataCSP` -/
 
@@ -498,9 +562,20 @@ theorem solveDataCSP_sound {csp : DataCSP} {sol : List DataEdge}
     (hsol : solveDataCSP csp = some sol) :
     checkDataAdmissible csp.pool csp.subData csp.disjointData csp.keyDisjoint csp.uppers sol = true ∧
     (∀ L ∈ csp.lowers, L.count ≤ (qualPoolValues csp.pool sol L.subj L.dp L.range).length) := by
-  obtain ⟨_, hadm, hlow⟩ := solveLowers_spec csp.pool csp.subData csp.disjointData
-    csp.keyDisjoint csp.uppers csp.pool_nodup csp.lowers [] sol hsol
-  exact ⟨hadm, hlow⟩
+  simp only [solveDataCSP] at hsol
+  split at hsol
+  · rename_i hempty
+    obtain rfl := Option.some.inj hsol
+    have noValues : csp.pool.filter (fun _ => false) = [] := List.filter_eq_nil_iff.mpr (by simp)
+    simp [List.isEmpty_iff.mp hempty, checkDataAdmissible, qualPoolValues, hasDataEdge, noValues]
+  · split at hsol
+    · rename_i hvalid
+      obtain rfl := (Option.some.inj hsol).symm
+      have ⟨hadm, hlower⟩ := Bool.and_eq_true_iff.mp hvalid
+      exact ⟨hadm, fun lower hmem => of_decide_eq_true (List.all_eq_true.mp hlower lower hmem)⟩
+    · obtain ⟨_, hadm, hlow⟩ := solveLowers_spec csp.pool csp.subData csp.disjointData
+        csp.keyDisjoint csp.uppers csp.pool_nodup csp.lowers [] sol hsol
+      exact ⟨hadm, hlow⟩
 
 /-- Any interpretation `i` whose data-property edges on the subjects of `csp`
 agree with `sol` satisfies `csp.Realizes i env`. -/
@@ -1160,7 +1235,7 @@ theorem solveDataCSP_complete {csp : DataCSP} (hcsp : csp.isSROIQD = true)
       have hdOk : u.range.isSROIQD = true := List.all_eq_true.mp huSROIQD u hu
       have hdSub : ∀ a ∈ atomsOfDataRange u.range, a ∈ csp.atoms := fun a ha =>
         List.mem_eraseDups.mpr (List.mem_flatMap.mpr ⟨u.range,
-          List.mem_append_right _ (List.mem_map_of_mem hu), ha⟩)
+          List.mem_eraseDups.mpr (List.mem_append_right _ (List.mem_map_of_mem hu)), ha⟩)
       let qs := qualPoolValues csp.pool target u.subj u.dp u.range
       by_cases hle : qs.length ≤ u.bound
       · exact hle
@@ -1201,7 +1276,7 @@ theorem solveDataCSP_complete {csp : DataCSP} (hcsp : csp.isSROIQD = true)
     have hdOk : L.range.isSROIQD = true := List.all_eq_true.mp hlSROIQD L hL
     have hdSub : ∀ a ∈ atomsOfDataRange L.range, a ∈ csp.atoms := fun a ha =>
       List.mem_eraseDups.mpr (List.mem_flatMap.mpr ⟨L.range,
-        List.mem_append_left _ (List.mem_map_of_mem hL), ha⟩)
+        List.mem_eraseDups.mpr (List.mem_append_left _ (List.mem_map_of_mem hL)), ha⟩)
     obtain ⟨xs, hxsLen, hxsNd, hxsW, hxsQ⟩ := hWwit L hL
     have hmapNd : (xs.map phi).Nodup := by
       have haux : ∀ (l : List i.Data), l.Nodup → (∀ y ∈ l, y ∈ W) → (l.map phi).Nodup := by
@@ -1235,9 +1310,15 @@ theorem solveDataCSP_complete {csp : DataCSP} (hcsp : csp.isSROIQD = true)
     have hle := hmapNd.length_le_of_subset hmapSub
     rw [List.length_map, hxsLen] at hle
     exact hle
-  exact solveLowers_isSome_of_target csp.pool_nodup hadmT htClosed csp.lowers []
-    hlowT (fun _ h => (List.not_mem_nil h).elim)
-    (fun _ _ _ _ _ h => (List.not_mem_nil h).elim)
+  unfold solveDataCSP
+  split
+  · rfl
+  · dsimp only
+    split
+    · rfl
+    · exact solveLowers_isSome_of_target csp.pool_nodup hadmT htClosed csp.lowers []
+        hlowT (fun _ h => (List.not_mem_nil h).elim)
+        (fun _ _ _ _ _ h => (List.not_mem_nil h).elim)
 
 theorem solveDataCSP_none_unsat {csp : DataCSP} (hcsp : csp.isSROIQD = true)
     (hnone : solveDataCSP csp = none)

@@ -387,7 +387,7 @@ private def needsExactDataSolverFirst (p : SROIQD.Problem) : Bool :=
 private def checkTableauRolesOk (p : SROIQD.Problem) : Bool :=
   let closed := Sabrina.ALC.roleClosure p.rules
   p.simpleRoles.all (fun r => (RoleChains.SimpleRoles.firstComposite closed p.chains r).isNone) &&
-  RoleChains.checkRegular (RoleChains.inferRank p.rules p.chains) p.rules p.chains
+  RoleChains.checkInferredRank p.rules p.chains
 
 private def tryTableauSat (p : SROIQD.Problem) : Option Bool :=
   if !needsExactDataSolverFirst p && checkTableauRolesOk p then

@@ -1,4 +1,5 @@
 import Sabrina.OWL2.SROIQD.Termination.ForestUnraveling
+import Std.Data.HashMap.Lemmas
 
 /-!
 Core forest operations and invariant/realization/witness-preservation theorems
@@ -255,13 +256,16 @@ private theorem initAnons_nodup (p : Problem) : (initAnons p).Nodup := nodup_era
 
 private def initNomPairs (p : Problem) :
     List (IRI × Fin ((initNoms p).length + (initAnons p).length + 1)) :=
+  let names := (initNoms p).toArray
   (List.finRange (initNoms p).length).map fun i =>
-    ((initNoms p).get i, ⟨i.val + 1, by omega⟩)
+    (names[i.val]'(by simp [names]), ⟨i.val + 1, by omega⟩)
 
 private def initAnonPairs (p : Problem) :
     List ((String × String) × Fin ((initNoms p).length + (initAnons p).length + 1)) :=
+  let names := (initAnons p).toArray
+  let offset := (initNoms p).length
   (List.finRange (initAnons p).length).map fun i =>
-    ((initAnons p).get i, ⟨(initNoms p).length + i.val + 1, by omega⟩)
+    (names[i.val]'(by simp [names]), ⟨offset + i.val + 1, by dsimp [offset]; omega⟩)
 
 private def initNodeInd (p : Problem)
     (x : Fin ((initNoms p).length + (initAnons p).length + 1)) : Option Individual :=
@@ -340,9 +344,7 @@ private def initLookupInd (p : Problem) :
   | .named a => (initNomPairs p).lookup a
   | .anonymous d l => (initAnonPairs p).lookup (d, l)
 
-private def initLabels (p : Problem)
-    (x : Fin ((initNoms p).length + (initAnons p).length + 1)) : List Concept :=
-  match initNodeInd p x with
+private def initLabelsFor (p : Problem) : Option Individual → List Concept
   | none => [p.root]
   | some ind =>
     (p.classAssertions.filterMap fun (a, c) => if a == ind then some c else none) ++
@@ -355,12 +357,18 @@ private def initLabels (p : Problem)
     (p.negDataAssertions.filterMap fun (dp, a, l) =>
       if a == ind then some (.dataValue dp l false) else none)
 
-private def initLoops (p : Problem)
-    (x : Fin ((initNoms p).length + (initAnons p).length + 1)) : List IRI :=
-  match initNodeInd p x with
+private def initLabels (p : Problem)
+    (x : Fin ((initNoms p).length + (initAnons p).length + 1)) : List Concept :=
+  initLabelsFor p (initNodeInd p x)
+
+private def initLoopsFor (p : Problem) : Option Individual → List IRI
   | none => []
   | some ind =>
     p.objAssertions.filterMap fun (r, a, b) => if a == ind && b == ind then some r else none
+
+private def initLoops (p : Problem)
+    (x : Fin ((initNoms p).length + (initAnons p).length + 1)) : List IRI :=
+  initLoopsFor p (initNodeInd p x)
 
 private def initRootEdges (p : Problem) :
     List (IRI × Fin ((initNoms p).length + (initAnons p).length + 1) ×
@@ -369,49 +377,6 @@ private def initRootEdges (p : Problem) :
     match initLookupInd p a, initLookupInd p b with
     | some x, some y => if x ≠ y then some (r, x, y) else none
     | _, _ => none
-
-/-- Initial nominal-rooted blocked forest for a `SROIQ` problem.
-Node `0` carries `p.root`; each distinct named or anonymous individual in `p`
-gets a dedicated level-0 root node seeded with its ABox assertions. -/
-def initial (p : Problem) : BlockedForest where
-  size := (initNoms p).length + (initAnons p).length
-  isRoot _ := true
-  root0 := rfl
-  nomLevel _ := 0
-  parent _ := 0
-  parent_lt _ h := by cases h
-  labels := initLabels p
-  guardLabels _ := []
-  down _ := []
-  up _ := []
-  loops := initLoops p
-  rootEdges := initRootEdges p
-  rootEdges_valid := by
-    intro e he
-    obtain ⟨⟨r, a, b⟩, _, hm⟩ := List.mem_filterMap.mp he
-    cases ha : initLookupInd p a <;> cases hb : initLookupInd p b <;> simp [ha, hb] at hm
-    rcases hm with ⟨hne, rfl⟩
-    exact ⟨rfl, rfl, hne⟩
-  toRoot _ := []
-  toRoot_valid _ _ h := (List.not_mem_nil h).elim
-  noms := initNomPairs p
-  noms_valid _ _ := rfl
-  anons := initAnonPairs p
-  anons_valid _ _ := rfl
-  unequal := []
-  nnBounds := []
-  nnBounds_valid _ h := (List.not_mem_nil h).elim
-  blockedBy _ := none
-
-theorem initial_boundTo_iff {p : Problem} {ind : Individual} {x : (initial p).Node} :
-    (initial p).BoundTo ind x ↔ initNodeInd p x = some ind := by
-  cases ind with
-  | named a =>
-    dsimp only [BoundTo, initial]
-    exact mem_initNomPairs_iff
-  | anonymous d l =>
-    dsimp only [BoundTo, initial]
-    exact mem_initAnonPairs_iff
 
 private theorem nodup_keys_initNomPairs (p : Problem) :
     ((initNomPairs p).map Prod.fst).Nodup := by
@@ -467,6 +432,156 @@ private theorem list_mem_of_lookup_eq_some {α β : Type} [DecidableEq α]
       simp only [heq] at h
       exact List.mem_cons_of_mem _ (ih h)
 
+private theorem hashLookup_eq_listLookup {α β : Type} [DecidableEq α] [Hashable α]
+    [LawfulHashable α] {entries : List (α × β)} (hnd : (entries.map Prod.fst).Nodup)
+    (key : α) : (Std.HashMap.ofList entries)[key]? = entries.lookup key := by
+  cases h : entries.lookup key with
+  | none =>
+    apply Std.HashMap.getElem?_ofList_of_contains_eq_false
+    apply Bool.eq_false_iff.mpr
+    intro hmem
+    obtain ⟨pair, hp, hk⟩ := List.mem_map.mp (List.contains_iff_mem.mp hmem)
+    have hne := List.lookup_eq_none_iff.mp h pair hp
+    simp [hk] at hne
+  | some value =>
+    apply Std.HashMap.getElem?_ofList_of_mem (show key == key by simp)
+    · simpa [List.Nodup, List.pairwise_map, beq_eq_false_iff_ne] using hnd
+    · exact list_mem_of_lookup_eq_some h
+
+private def initRootEdgesIndexed (p : Problem) :
+    List (IRI × Fin ((initNoms p).length + (initAnons p).length + 1) ×
+      Fin ((initNoms p).length + (initAnons p).length + 1)) :=
+  let named := Std.HashMap.ofList (initNomPairs p)
+  let anonymous := Std.HashMap.ofList (initAnonPairs p)
+  let lookup := fun
+    | Individual.named iri => named[iri]?
+    | Individual.anonymous doc label => anonymous[(doc, label)]?
+  p.objAssertions.filterMap fun (r, a, b) =>
+    match lookup a, lookup b with
+    | some x, some y => if x ≠ y then some (r, x, y) else none
+    | _, _ => none
+
+@[csimp] private theorem initRootEdges_eq_indexed : initRootEdges = initRootEdgesIndexed := by
+  funext p
+  have lookup_eq (ind : Individual) :
+      (match ind with
+      | .named iri => (Std.HashMap.ofList (initNomPairs p))[iri]?
+      | .anonymous doc label => (Std.HashMap.ofList (initAnonPairs p))[(doc, label)]?) =
+      initLookupInd p ind := by
+    cases ind with
+    | named iri => exact hashLookup_eq_listLookup (nodup_keys_initNomPairs p) iri
+    | anonymous doc label =>
+      exact hashLookup_eq_listLookup (nodup_keys_initAnonPairs p) (doc, label)
+  let edges (lookup : Individual → Option (Fin ((initNoms p).length + (initAnons p).length + 1))) :=
+    p.objAssertions.filterMap fun (r, a, b) =>
+      match lookup a, lookup b with
+      | some x, some y => if x ≠ y then some (r, x, y) else none
+      | _, _ => none
+  exact congrArg edges (funext fun ind => (lookup_eq ind).symm)
+
+/-- Initial nominal-rooted blocked forest for a `SROIQ` problem.
+Node `0` carries `p.root`; each distinct named or anonymous individual in `p`
+gets a dedicated level-0 root node seeded with its ABox assertions. -/
+def initial (p : Problem) : BlockedForest where
+  size := (initNoms p).length + (initAnons p).length
+  isRoot _ := true
+  root0 := rfl
+  nomLevel _ := 0
+  parent _ := 0
+  parent_lt _ h := by cases h
+  labels := initLabels p
+  guardLabels _ := []
+  down _ := []
+  up _ := []
+  loops := initLoops p
+  rootEdges := initRootEdges p
+  rootEdges_valid := by
+    intro e he
+    obtain ⟨⟨r, a, b⟩, _, hm⟩ := List.mem_filterMap.mp he
+    cases ha : initLookupInd p a <;> cases hb : initLookupInd p b <;> simp [ha, hb] at hm
+    rcases hm with ⟨hne, rfl⟩
+    exact ⟨rfl, rfl, hne⟩
+  toRoot _ := []
+  toRoot_valid _ _ h := (List.not_mem_nil h).elim
+  noms := initNomPairs p
+  noms_valid _ _ := rfl
+  anons := initAnonPairs p
+  anons_valid _ _ := rfl
+  unequal := []
+  nnBounds := []
+  nnBounds_valid _ h := (List.not_mem_nil h).elim
+  blockedBy _ := none
+
+private def nodeIndFromArrays (named : Array IRI) (anonymous : Array (String × String))
+    (node : Nat) : Option Individual :=
+  if node = 0 then none
+  else if h : node - 1 < named.size then some (.named named[node - 1])
+  else anonymous[node - 1 - named.size]?.map fun (doc, label) => .anonymous doc label
+
+private theorem nodeIndFromArrays_eq (p : Problem) (x : (initial p).Node) :
+    nodeIndFromArrays (initNoms p).toArray (initAnons p).toArray x.val = initNodeInd p x := by
+  by_cases hz : x.val = 0
+  · simp [nodeIndFromArrays, initNodeInd, hz]
+  by_cases hn : x.val - 1 < (initNoms p).length
+  · simp [nodeIndFromArrays, initNodeInd, hz, hn]
+  have ha : x.val - 1 - (initNoms p).length < (initAnons p).length := by
+    have hx : x.val < (initNoms p).length + (initAnons p).length + 1 := x.isLt
+    omega
+  simp [nodeIndFromArrays, initNodeInd, hz, hn, List.getElem?_eq_getElem ha]
+
+private def indexedSeeds (p : Problem) : Vector (List Concept × List IRI) ((initial p).size + 1) :=
+  let named := (initNoms p).toArray
+  let anonymous := (initAnons p).toArray
+  Vector.ofFn fun x =>
+    let ind := nodeIndFromArrays named anonymous x.val
+    (initLabelsFor p ind, initLoopsFor p ind)
+
+private theorem indexedSeeds_get (p : Problem) (x : (initial p).Node) :
+    (indexedSeeds p)[x.val] = ((initial p).labels x, (initial p).loops x) := by
+  unfold indexedSeeds
+  rw [Vector.getElem_ofFn]
+  change (initLabelsFor p _, initLoopsFor p _) =
+    (initLabelsFor p (initNodeInd p x), initLoopsFor p (initNodeInd p x))
+  rw [nodeIndFromArrays_eq p x]
+
+private def setInitialSeeds (forest : BlockedForest)
+    (labels : forest.Node → List Concept) (loops : forest.Node → List IRI) : BlockedForest :=
+  { forest with labels, loops }
+
+private theorem setInitialSeeds_self (forest : BlockedForest) :
+    setInitialSeeds forest forest.labels forest.loops = forest := by
+  cases forest
+  rfl
+
+private def initialIndexed (p : Problem) : BlockedForest :=
+  let seeds := indexedSeeds p
+  setInitialSeeds (initial p) (fun x => seeds[x.val].1) (fun x => seeds[x.val].2)
+
+-- Keep the logical initializer available to the existing forest theorems.
+-- The compiled solver builds and reuses the assertion seeds once per forest.
+@[csimp] private theorem initial_eq_indexed : initial = initialIndexed := by
+  funext p
+  have labels : (fun x : (initial p).Node => (indexedSeeds p)[x.val].1) =
+      (initial p).labels :=
+    funext fun x => congrArg Prod.fst (indexedSeeds_get p x)
+  have loops : (fun x : (initial p).Node => (indexedSeeds p)[x.val].2) =
+      (initial p).loops :=
+    funext fun x => congrArg Prod.snd (indexedSeeds_get p x)
+  unfold initialIndexed
+  dsimp only
+  rw [labels, loops]
+  exact (setInitialSeeds_self (initial p)).symm
+
+theorem initial_boundTo_iff {p : Problem} {ind : Individual} {x : (initial p).Node} :
+    (initial p).BoundTo ind x ↔ initNodeInd p x = some ind := by
+  cases ind with
+  | named a =>
+    dsimp only [BoundTo, initial]
+    exact mem_initNomPairs_iff
+  | anonymous d l =>
+    dsimp only [BoundTo, initial]
+    exact mem_initAnonPairs_iff
+
 private theorem initLookupInd_eq_some_iff {p : Problem} {ind : Individual}
     {x : Fin ((initNoms p).length + (initAnons p).length + 1)} :
     initLookupInd p ind = some x ↔ (initial p).BoundTo ind x := by
@@ -486,14 +601,14 @@ theorem initial_bindings (p : Problem) : (initial p).BindingsValid p := by
     have hlt : i + 1 < (initNoms p).length + (initAnons p).length + 1 := by omega
     refine ⟨⟨i + 1, hlt⟩, ?_⟩
     change (a, ⟨i + 1, hlt⟩) ∈ initNomPairs p
-    exact List.mem_map.mpr ⟨⟨i, hi⟩, List.mem_finRange _, Prod.ext (by simp [List.get_eq_getElem, heq]) rfl⟩
+    exact List.mem_map.mpr ⟨⟨i, hi⟩, List.mem_finRange _, Prod.ext (by simp [heq]) rfl⟩
   · intro k hk
     have hm : k ∈ initAnons p := List.mem_eraseDups.mpr hk
     obtain ⟨i, hi, heq⟩ := List.getElem_of_mem hm
     have hlt : (initNoms p).length + i + 1 < (initNoms p).length + (initAnons p).length + 1 := by omega
     refine ⟨⟨(initNoms p).length + i + 1, hlt⟩, ?_⟩
     change (k, ⟨(initNoms p).length + i + 1, hlt⟩) ∈ initAnonPairs p
-    exact List.mem_map.mpr ⟨⟨i, hi⟩, List.mem_finRange _, Prod.ext (by simp [List.get_eq_getElem, heq]) rfl⟩
+    exact List.mem_map.mpr ⟨⟨i, hi⟩, List.mem_finRange _, Prod.ext (by simp [heq]) rfl⟩
   · intro a r₁ r₂ h1 h2
     dsimp only [initial] at h1 h2
     have l1 := list_lookup_eq_some_of_nodup (nodup_keys_initNomPairs p) h1
@@ -509,7 +624,7 @@ theorem initial_within (rank : Rank) (p : Problem) : (initial p).Within rank p :
   refine ⟨?_, fun _ _ h => (List.not_mem_nil h).elim, ?_⟩
   · intro x c hc
     change c ∈ initLabels p x at hc
-    unfold initLabels at hc
+    unfold initLabels initLabelsFor at hc
     cases h : initNodeInd p x with
     | none =>
       simp only [h, List.mem_singleton] at hc
@@ -550,7 +665,7 @@ theorem initial_within (rank : Rank) (p : Problem) : (initial p).Within rank p :
       fun _ h => (List.not_mem_nil h).elim, ?_⟩, ?_, fun _ _ h => (List.not_mem_nil h).elim⟩
     · intro r hr
       change r ∈ initLoops p x at hr
-      unfold initLoops at hr
+      unfold initLoops initLoopsFor at hr
       cases h : initNodeInd p x with
       | none => simp [h] at hr
       | some ind =>
@@ -577,11 +692,11 @@ theorem initial_geom (rank : Rank) (p : Problem) : (initial p).ForestGeom rank p
 theorem initial_aboxSeeded (p : Problem) : (initial p).ABoxSeeded p := by
   constructor
   · change p.root ∈ initLabels p 0
-    simp [initLabels, initNodeInd]
+    simp [initLabels, initLabelsFor, initNodeInd]
   · intro ⟨a, c⟩ hm r hr
     have hi := initial_boundTo_iff.mp hr
     change c ∈ initLabels p r
-    simp only [initLabels, hi, List.mem_append, List.mem_filterMap]
+    simp only [initLabels, initLabelsFor, hi, List.mem_append, List.mem_filterMap]
     exact .inl (.inl (.inl (.inl (.inl ⟨(a, c), hm, by simp⟩))))
   · intro ⟨r, a, b⟩ hm r₁ r₂ h1 h2
     by_cases heq : r₁ = r₂
@@ -591,7 +706,7 @@ theorem initial_aboxSeeded (p : Problem) : (initial p).ABoxSeeded p := by
       have hi2 := initial_boundTo_iff.mp h2
       have hab : a = b := Option.some.inj (hi1.symm.trans hi2)
       change r ∈ initLoops p r₁
-      simp only [initLoops, hi1, List.mem_filterMap]
+      simp only [initLoops, initLoopsFor, hi1, List.mem_filterMap]
       exact ⟨(r, a, b), hm, by simp [hab]⟩
     · apply (edge_root_iff (b := initial p) rfl rfl heq).mpr
       dsimp only [RootEdge, initial, initRootEdges]
@@ -603,27 +718,27 @@ theorem initial_aboxSeeded (p : Problem) : (initial p).ABoxSeeded p := by
   · intro ⟨r, a, b⟩ hm r₁ h1
     have hi := initial_boundTo_iff.mp h1
     change .all (r, false) (.nom b false) ∈ initLabels p r₁
-    simp only [initLabels, hi, List.mem_append, List.mem_filterMap]
+    simp only [initLabels, initLabelsFor, hi, List.mem_append, List.mem_filterMap]
     exact .inl (.inl (.inl (.inl (.inr ⟨(r, a, b), hm, by simp⟩))))
   · intro ⟨a, b⟩ hm r₁ h1
     have hi := initial_boundTo_iff.mp h1
     change .nom b true ∈ initLabels p r₁
-    simp only [initLabels, hi, List.mem_append, List.mem_filterMap]
+    simp only [initLabels, initLabelsFor, hi, List.mem_append, List.mem_filterMap]
     exact .inl (.inl (.inl (.inr ⟨(a, b), hm, by simp⟩)))
   · intro ⟨a, b⟩ hm r₁ h1
     have hi := initial_boundTo_iff.mp h1
     change .nom b false ∈ initLabels p r₁
-    simp only [initLabels, hi, List.mem_append, List.mem_filterMap]
+    simp only [initLabels, initLabelsFor, hi, List.mem_append, List.mem_filterMap]
     exact .inl (.inl (.inr ⟨(a, b), hm, by simp⟩))
   · intro ⟨dp, a, l⟩ hm r₁ h1
     have hi := initial_boundTo_iff.mp h1
     change .dataValue dp l true ∈ initLabels p r₁
-    simp only [initLabels, hi, List.mem_append, List.mem_filterMap]
+    simp only [initLabels, initLabelsFor, hi, List.mem_append, List.mem_filterMap]
     exact .inl (.inr ⟨(dp, a, l), hm, by simp⟩)
   · intro ⟨dp, a, l⟩ hm r₁ h1
     have hi := initial_boundTo_iff.mp h1
     change .dataValue dp l false ∈ initLabels p r₁
-    simp only [initLabels, hi, List.mem_append, List.mem_filterMap]
+    simp only [initLabels, initLabelsFor, hi, List.mem_append, List.mem_filterMap]
     exact .inr ⟨(dp, a, l), hm, by simp⟩
 
 theorem initial_sat_iff (p : Problem) : (initial p).Sat p ↔ p.Sat := by
@@ -640,7 +755,7 @@ theorem initial_sat_iff (p : Problem) : (initial p).Sat p ↔ p.Sat := by
     case labels =>
       intro x c hc
       change c ∈ initLabels p x at hc
-      unfold initLabels at hc
+      unfold initLabels initLabelsFor at hc
       cases h : initNodeInd p x with
       | none =>
         simp only [h, List.mem_singleton] at hc
@@ -691,7 +806,7 @@ theorem initial_sat_iff (p : Problem) : (initial p).Sat p ↔ p.Sat := by
       intro r x y he
       rcases he with ⟨rfl, hl⟩ | ⟨_, _, hre⟩ | ⟨hc, _⟩ | ⟨hc, _⟩ | htr | htr
       · dsimp only [initial] at hl
-        unfold initLoops at hl
+        unfold initLoops initLoopsFor at hl
         cases h : initNodeInd p x with
         | none => simp [h] at hl
         | some ind =>

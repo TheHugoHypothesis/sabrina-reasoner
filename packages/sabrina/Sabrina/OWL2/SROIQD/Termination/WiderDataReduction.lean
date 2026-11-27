@@ -146,6 +146,41 @@ def intIntervalsDR : List (Nat × Nat) → DataRange
   | [p] => intIntervalDR p.1 p.2
   | p :: rest => .union (intIntervalDR p.1 p.2) (intIntervalsDR rest)
 
+private def prependInterval (iv : Nat × Nat) : List (Nat × Nat) → List (Nat × Nat)
+  | [] => [iv]
+  | next :: rest =>
+    if iv.1 ≤ iv.2 ∧ next.1 ≤ next.2 ∧ iv.1 ≤ next.2 + 1 ∧ next.1 ≤ iv.2 + 1 then
+      (min iv.1 next.1, max iv.2 next.2) :: rest
+    else iv :: next :: rest
+
+private def compactIntervals (ivs : List (Nat × Nat)) : List (Nat × Nat) :=
+  ivs.foldr prependInterval []
+
+private theorem prependInterval_covers (iv : Nat × Nat) (ivs : List (Nat × Nat)) (n : Nat) :
+    (∃ p ∈ prependInterval iv ivs, p.1 ≤ n ∧ n ≤ p.2) ↔
+    (iv.1 ≤ n ∧ n ≤ iv.2) ∨ ∃ p ∈ ivs, p.1 ≤ n ∧ n ≤ p.2 := by
+  cases ivs with
+  | nil => simp [prependInterval]
+  | cons next rest =>
+    by_cases h : iv.1 ≤ iv.2 ∧ next.1 ≤ next.2 ∧ iv.1 ≤ next.2 + 1 ∧ next.1 ≤ iv.2 + 1
+    · simp only [prependInterval, if_pos h]
+      have hmerge : (min iv.1 next.1 ≤ n ∧ n ≤ max iv.2 next.2) ↔
+          (iv.1 ≤ n ∧ n ≤ iv.2) ∨ (next.1 ≤ n ∧ n ≤ next.2) := by
+        obtain ⟨_, _, _, _⟩ := h
+        omega
+      simp only [List.mem_cons, exists_eq_or_imp, hmerge, or_assoc]
+    · simp only [prependInterval, if_neg h, List.mem_cons, exists_eq_or_imp]
+
+private theorem compactIntervals_covers (ivs : List (Nat × Nat)) (n : Nat) :
+    (∃ p ∈ compactIntervals ivs, p.1 ≤ n ∧ n ≤ p.2) ↔
+    ∃ p ∈ ivs, p.1 ≤ n ∧ n ≤ p.2 := by
+  induction ivs with
+  | nil => rfl
+  | cons iv rest ih =>
+    change (∃ p ∈ prependInterval iv (compactIntervals rest), p.1 ≤ n ∧ n ≤ p.2) ↔ _
+    rw [prependInterval_covers, ih]
+    simp only [List.mem_cons, exists_eq_or_imp]
+
 theorem dataHolds_intIntervalsDR_iff (i : Interpretation datatypeMap) (y : i.Data)
     (ivs : List (Nat × Nat)) :
     dataHolds i y (intIntervalsDR ivs) ↔
@@ -160,6 +195,18 @@ theorem dataHolds_intIntervalsDR_iff (i : Interpretation datatypeMap) (y : i.Dat
     | cons q qs =>
       simp only [intIntervalsDR, dataHolds, dataHolds_intIntervalDR_iff, ih, List.mem_cons,
         exists_eq_or_imp]
+
+private theorem dataHolds_intIntervalsDR_compact_iff (i : Interpretation datatypeMap) (y : i.Data)
+    (ivs : List (Nat × Nat)) :
+    dataHolds i y (intIntervalsDR (compactIntervals ivs)) ↔ dataHolds i y (intIntervalsDR ivs) := by
+  rw [dataHolds_intIntervalsDR_iff, dataHolds_intIntervalsDR_iff]
+  constructor
+  · rintro ⟨p, hp, n, hlo, hhi, hy⟩
+    obtain ⟨q, hq, hqlo, hqhi⟩ := (compactIntervals_covers ivs n).mp ⟨p, hp, hlo, hhi⟩
+    exact ⟨q, hq, n, hqlo, hqhi, hy⟩
+  · rintro ⟨p, hp, n, hlo, hhi, hy⟩
+    obtain ⟨q, hq, hqlo, hqhi⟩ := (compactIntervals_covers ivs n).mpr ⟨p, hp, hlo, hhi⟩
+    exact ⟨q, hq, n, hqlo, hqhi, hy⟩
 
 def allSlotsDR (totalSlots : Nat) : DataRange :=
   if totalSlots = 0 then .complement (.datatype literalDatatype)
@@ -1049,7 +1096,7 @@ def WiderEncoding.encodeIntervals (enc : WiderEncoding) (d : DataRange) : List (
   litIvs ++ cellIvs
 
 def WiderEncoding.encodeDataRange (enc : WiderEncoding) (d : DataRange) : DataRange :=
-  intIntervalsDR (enc.encodeIntervals d)
+  intIntervalsDR (compactIntervals (enc.encodeIntervals d))
 
 def WiderEncoding.encodeConcept (enc : WiderEncoding) : Concept → Concept
   | .top => .top
@@ -1536,7 +1583,7 @@ private theorem dataHolds_encodeDataRange_slot_iff {p : Problem} {enc : WiderEnc
     congrArg Prod.snd hv.htable.symm
   rw [hcellsEq, htotEq] at hspec
   obtain ⟨hmem, hdisj, hcov, _⟩ := hspec
-  rw [WiderEncoding.encodeDataRange, dataHolds_intIntervalsDR_iff]
+  rw [WiderEncoding.encodeDataRange, dataHolds_intIntervalsDR_compact_iff, dataHolds_intIntervalsDR_iff]
   have hnEq : ∀ m : Nat, i'.embedValue (.integer (Int.ofNat n)) = i'.embedValue (.integer (Int.ofNat m)) ↔ n = m := by
     intro m
     constructor
@@ -2786,7 +2833,8 @@ private theorem encodeWiderData_sat_of_source {p : Problem} {enc : WiderEncoding
   have hdataHolds_enc (x : i.Object) {y : i.Data} (hy : y ∈ W x) {d : DataRange}
       (hd : ∀ a ∈ atomsOfDataRange d, a ∈ enc.atoms) :
       dataHolds i' (some (.integer (Int.ofNat (φ x y)))) (enc.encodeDataRange d) ↔ dataHolds i y d := by
-    rw [WiderEncoding.encodeDataRange, dataHolds_intIntervalsDR_iff, hφ_dr x y hy d hd]
+    rw [WiderEncoding.encodeDataRange, dataHolds_intIntervalsDR_compact_iff,
+      dataHolds_intIntervalsDR_iff, hφ_dr x y hy d hd]
     constructor
     · rintro ⟨iv, hiv, m, hlo, hhi, heq⟩
       have hmeq : φ x y = m := by

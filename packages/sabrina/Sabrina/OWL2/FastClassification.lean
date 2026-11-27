@@ -1800,7 +1800,7 @@ private def hasWiderDataOrRealFast (p : Problem) : Bool :=
 private def checkTableauRolesOkFast (p : Problem) : Bool :=
   let closed := Sabrina.ALC.roleClosure p.rules
   p.simpleRoles.all (fun r => (RoleChains.SimpleRoles.firstComposite closed p.chains r).isNone) &&
-  RoleChains.checkRegular (RoleChains.inferRank p.rules p.chains) p.rules p.chains
+  RoleChains.checkInferredRank p.rules p.chains
 
 private def proposeInitModelPairs (o : Ontology) (namedClasses : List IRI) : List (IRI × IRI) :=
   match normalizeWithDefs o with
@@ -1821,7 +1821,7 @@ private def checkELRegular (elAxs : List ELAxiom) : Bool := Id.run do
     | .roleSub r s => rules := ⟨(r, false), (s, false)⟩ :: rules
     | .roleChain r1 r2 s => chains := RoleChains.Chain.named [r1, r2] s :: chains
     | _ => pure ()
-  return RoleChains.checkRegular (RoleChains.inferRank rules chains) rules chains
+  return RoleChains.checkInferredRank rules chains
 
 /-- Certified Enhanced Traversal + `SROIQDModel` countermodel seeding over `datatypeMap`. -/
 def classifyEnhancedStd (o : Ontology) (namedClasses : List IRI) : Option ClassHierarchy :=
@@ -1909,34 +1909,38 @@ def computeDirectTypesFast (types : List IRI) (subSet : Std.HashSet (IRI × IRI)
   let strictSub (a b : IRI) : Bool := subSet.contains (a, b) && !subSet.contains (b, a)
   types.filter fun c => !types.any fun moreSpec => strictSub moreSpec c
 
-/-- Fast hybrid runtime ABox realizer backed by `classifyOntologyFastRuntime` and
-    cached `FastLocality.LocalityIndex` per-assertion modules. -/
-def realizeOntologyFastRuntime (o : Ontology) (decls : List FunctionalSyntax.EntityDecl := []) :
-    Option RealizationResult :=
+/-- Realize an ABox using the hierarchy already computed for the same ontology. -/
+def realizeFromHierarchyRuntime (o : Ontology) (decls : List FunctionalSyntax.EntityDecl)
+    (hier : ClassHierarchy) : Option RealizationResult :=
   let namedClasses := collectNamedClasses o decls
   let namedInds := collectNamedIndividuals o decls
-  (classifyOntologyFastRuntime o decls).bind fun hier =>
-    if !hier.consistent then
-      some { consistent := false, individuals := namedInds, entries := [] }
-    else
-      let idx := LocalityIndex.build o
-      let subSet := setOfPairs hier.subsumptions
-      let rec goInds : List IRI → Option (List IndividualTypes)
-        | [] => some []
-        | ind :: rest =>
-          let rec goCls : List IRI → Option (List IRI)
-            | [] => some []
-            | c :: cs =>
-              let seed := axiomSig (.classAssertion (.named c) (.named ind))
-              let mod := (extractBotModuleWithIndex idx o seed).1
-              (decidesInstance fastConsistencyCheck mod c ind).bind fun holds =>
-                (goCls cs).map fun tl => if holds then c :: tl else tl
-          (goCls namedClasses).bind fun ts =>
-            (goInds rest).map fun tl =>
-              { individual := ind
-                allTypes := ts
-                directTypes := computeDirectTypesFast ts subSet } :: tl
-      (goInds namedInds).map fun entries =>
-        { consistent := true, individuals := namedInds, entries }
+  if !hier.consistent then
+    some { consistent := false, individuals := namedInds, entries := [] }
+  else
+    let idx := LocalityIndex.build o
+    let subSet := setOfPairs hier.subsumptions
+    let rec goInds : List IRI → Option (List IndividualTypes)
+      | [] => some []
+      | ind :: rest =>
+        let rec goCls : List IRI → Option (List IRI)
+          | [] => some []
+          | c :: cs =>
+            let seed := axiomSig (.classAssertion (.named c) (.named ind))
+            let mod := (extractBotModuleWithIndex idx o seed).1
+            (decidesInstance fastConsistencyCheck mod c ind).bind fun holds =>
+              (goCls cs).map fun tl => if holds then c :: tl else tl
+        (goCls namedClasses).bind fun ts =>
+          (goInds rest).map fun tl =>
+            { individual := ind
+              allTypes := ts
+              directTypes := computeDirectTypesFast ts subSet } :: tl
+    (goInds namedInds).map fun entries =>
+      { consistent := true, individuals := namedInds, entries }
+
+/-- Fast hybrid runtime ABox realizer backed by `classifyOntologyFastRuntime`
+    and cached locality indexing. -/
+def realizeOntologyFastRuntime (o : Ontology) (decls : List FunctionalSyntax.EntityDecl := []) :
+    Option RealizationResult :=
+  (classifyOntologyFastRuntime o decls).bind (realizeFromHierarchyRuntime o decls)
 
 end Sabrina.OWL2.FastClassification

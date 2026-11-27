@@ -503,63 +503,60 @@ theorem materializeReal_entailed {o : Ontology} {decls : List EntityDecl}
         ∀ i : Interpretation realDatatypeMap, models i res.materializedOntology ↔ models i o)) :=
   materializeWith_entailed decideRealOntology_iff hm
 
-/-- Fast hybrid runtime materializer backed by `FastClassification.classifyOntologyFastRuntime`,
-    `FastClassification.realizeOntologyFastRuntime`, and cached `FastLocality.LocalityIndex`. -/
+/-- Check extra entailments in export order without allocating the candidate cross products. -/
+private def materializeExtraRuntime (o : Ontology) (props inds : List IRI)
+    (opts : MaterializeOptions) : Option (List Axiom) := do
+  let idx := FastLocality.LocalityIndex.build o
+  let emit (inferred : Array Axiom) (ax : Axiom) : Option (Array Axiom) := do
+    let axioms := (FastLocality.extractBotModuleWithIndex idx o (Profile.axiomSig ax)).1
+    let entailed ← decidesAxiomEntails fastConsistencyCheck axioms ax
+    return if entailed then inferred.push ax else inferred
+  let mut inferred := #[]
+  if opts.includeSubObjectProperties then
+    for r in props do
+      for s in props do
+        if r != s then
+          inferred ← emit inferred (.subObjectProperty (.named r) (.named s))
+  if opts.includeObjectPropertyAssertions then
+    for r in props do
+      for a in inds do
+        for b in inds do
+          inferred ← emit inferred (.objectAssertion (.named r) (.named a) (.named b))
+  if opts.includeSameIndividuals then
+    let individuals := inds.toArray
+    for h : i in [:individuals.size] do
+      for h' : j in [i + 1:individuals.size] do
+        inferred ← emit inferred (.sameIndividuals [.named individuals[i], .named individuals[j]])
+  return inferred.toList
+
+/-- Fast hybrid runtime materializer that reuses its hierarchy during ABox realization. -/
 def materializeOntologyRuntime (o : Ontology) (decls : List EntityDecl := [])
-    (opts : MaterializeOptions := {}) : Option MaterializeResult :=
-  let namedInds := collectNamedIndividuals o decls
-  let namedObjProps := collectNamedObjectProperties o decls
-  (FastClassification.classifyOntologyFastRuntime o decls).bind fun hier =>
-    if !hier.consistent then
-      some {
-        consistent := false
-        assertedAxioms := o
-        inferredAxioms := []
-        materializedOntology := if opts.includeAsserted then o else []
-      }
-    else
-      (FastClassification.realizeOntologyFastRuntime o decls).bind fun real =>
-        if !real.consistent then
-          some {
-            consistent := false
-            assertedAxioms := o
-            inferredAxioms := []
-            materializedOntology := if opts.includeAsserted then o else []
-          }
-        else
-          let idx := FastLocality.LocalityIndex.build o
-          let extraCands : List Axiom :=
-            (if opts.includeSubObjectProperties then
-              (orderedDistinctPairs namedObjProps).map fun (r, s) =>
-                .subObjectProperty (.named r) (.named s)
-            else []) ++
-            (if opts.includeObjectPropertyAssertions then
-              namedObjProps.flatMap fun r =>
-                namedInds.flatMap fun a =>
-                  namedInds.map fun b => .objectAssertion (.named r) (.named a) (.named b)
-            else []) ++
-            (if opts.includeSameIndividuals then
-              (unorderedPairs namedInds).map fun (a, b) =>
-                .sameIndividuals [.named a, .named b]
-            else [])
-          let rec filterExtra : List Axiom → Option (List Axiom)
-            | [] => some []
-            | ax :: rest =>
-              let mod := (FastLocality.extractBotModuleWithIndex idx o (Profile.axiomSig ax)).1
-              (decidesAxiomEntails fastConsistencyCheck mod ax).bind fun b =>
-                (filterExtra rest).map fun kept => if b then ax :: kept else kept
-          (filterExtra extraCands).map fun extraInferred =>
-            let rawInferred :=
-              materializedClassAxioms hier opts ++
-              materializedTypeAxioms real opts ++
-              extraInferred
-            let deduped := dedupList rawInferred
-            let freshInferred := deduped.filter fun ax => !o.contains ax
-            let full := if opts.includeAsserted then o ++ freshInferred else freshInferred
-            { consistent := true
-              assertedAxioms := o
-              inferredAxioms := freshInferred
-              materializedOntology := full }
+    (opts : MaterializeOptions := {}) : Option MaterializeResult := do
+  let hier ← FastClassification.classifyOntologyFastRuntime o decls
+  if !hier.consistent then
+    return {
+      consistent := false
+      assertedAxioms := o
+      inferredAxioms := []
+      materializedOntology := if opts.includeAsserted then o else []
+    }
+  let real ← FastClassification.realizeFromHierarchyRuntime o decls hier
+  let extraInferred ←
+    if opts.includeSubObjectProperties || opts.includeObjectPropertyAssertions ||
+        opts.includeSameIndividuals then do
+      let props := if opts.includeSubObjectProperties || opts.includeObjectPropertyAssertions then
+        collectNamedObjectProperties o decls else []
+      materializeExtraRuntime o props real.individuals opts
+    else pure []
+  let rawInferred :=
+    materializedClassAxioms hier opts ++ materializedTypeAxioms real opts ++ extraInferred
+  let freshInferred := (dedupList rawInferred).filter fun ax => !o.contains ax
+  return {
+    consistent := true
+    assertedAxioms := o
+    inferredAxioms := freshInferred
+    materializedOntology := if opts.includeAsserted then o ++ freshInferred else freshInferred
+  }
 
 /-! ### 3. Output Formats & Serialization (`.ofn` / `.ttl` / `.owl`) -/
 

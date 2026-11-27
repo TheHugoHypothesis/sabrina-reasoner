@@ -20,6 +20,12 @@ def mirrored (rules : RoleTheory) : RoleTheory :=
 
 def roleClosure (rules : RoleTheory) : RoleTheory := ALCH.close (mirrored rules)
 
+private def roleClosureIndexed (rules : RoleTheory) : RoleTheory := ALCH.closeIndexed (mirrored rules)
+
+@[csimp] private theorem roleClosure_eq_indexed : roleClosure = roleClosureIndexed := by
+  funext rules
+  exact (ALCH.closeIndexed_eq (mirrored rules)).symm
+
 private theorem holdsRole_converse (i : Interpretation) (r : OrientedRole) (x y : i.Domain) :
     holdsRole i (converse r) y x ↔ holdsRole i r x y := by
   rcases r with ⟨r, _ | _⟩ <;> rfl
