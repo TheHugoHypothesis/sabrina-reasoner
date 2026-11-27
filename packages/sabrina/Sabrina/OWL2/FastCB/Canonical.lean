@@ -34,14 +34,64 @@ open Sabrina.OWL2.FastEL
 /-! ### 1. `CBCanonicalModel` & Exact Interpretation Bridge -/
 
 /-- Compact finite model indexed by node IDs `0 .. numNodes - 1`.
-    `outAdj` is the authoritative object-property relation; `inAdj` is the
-    converse index checked by `checkAdjConsistent`. -/
+    `outAdj` is the authoritative object-property relation; `inAdj`, `clsNodes`,
+    `roleOutNodes`, and `roleInNodes` are fast inverted indices verified by
+    `checkAdjConsistent` so axiom checking runs in $O(|\mathcal{O}| \cdot \text{support})$
+    instead of $O(|\mathcal{O}| \cdot |V|)$. -/
 structure CBCanonicalModel where
   numNodes : Nat
   nodeClasses : Array (Std.HashSet IRI)
   outAdj : Array (Std.HashMap IRI (Array Nat))
   inAdj : Array (Std.HashMap IRI (Array Nat))
+  clsNodes : Std.HashMap IRI (Array Nat) := {}
+  roleOutNodes : Std.HashMap IRI (Array Nat) := {}
+  roleInNodes : Std.HashMap IRI (Array Nat) := {}
   deriving Inhabited
+
+/-- $O(\log n)$ binary search on a sorted `Array Nat`.
+    Soundness (`binSearchContains_mem`) holds unconditionally for any array. -/
+def binSearchContains (xs : Array Nat) (v : Nat) : Bool :=
+  go xs v 0 xs.size xs.size
+where
+  go (xs : Array Nat) (v lo hi : Nat) : Nat → Bool
+    | 0 => false
+    | fuel + 1 =>
+      if lo >= hi then false
+      else
+        let mid := lo + (hi - lo) / 2
+        match xs[mid]? with
+        | none => false
+        | some u =>
+          if u == v then true
+          else if u < v then go xs v (mid + 1) hi fuel
+          else go xs v lo mid fuel
+
+private theorem binSearchContains_go_mem {xs : Array Nat} {v lo hi fuel : Nat}
+    (h : binSearchContains.go xs v lo hi fuel = true) : v ∈ xs.toList := by
+  induction fuel generalizing lo hi with
+  | zero => cases h
+  | succ fuel ih =>
+    unfold binSearchContains.go at h
+    split at h
+    · cases h
+    · cases hmid : xs[lo + (hi - lo) / 2]? with
+      | none => simp [hmid] at h
+      | some u =>
+        simp only [hmid] at h
+        split at h
+        · rename_i heq
+          have heq' : u = v := beq_iff_eq.mp heq
+          subst heq'
+          obtain ⟨hlt, hget⟩ := Array.getElem?_eq_some_iff.mp hmid
+          have hmem : xs[lo + (hi - lo) / 2] ∈ xs.toList := List.getElem_mem (by simpa using hlt)
+          rwa [hget] at hmem
+        · split at h
+          · exact ih h
+          · exact ih h
+
+private theorem binSearchContains_mem {xs : Array Nat} {v : Nat}
+    (h : binSearchContains xs v = true) : v ∈ xs.toList :=
+  binSearchContains_go_mem h
 
 def CBCanonicalModel.hasCls (m : CBCanonicalModel) (c : IRI) (x : Nat) : Bool :=
   if c == thing then true
@@ -179,19 +229,24 @@ def CBCanonicalModel.toInterpretation (dm : DatatypeMap) (m : CBCanonicalModel)
 /-! ### 2. Adjacency Consistency & Fast Exact `ClassExpr` Evaluator -/
 
 /-- Verify that `outAdj` and `inAdj` are strictly sorted, bounded by `numNodes`,
-    and exact converses of each other. -/
+    exact converses of each other, and complete with respect to the inverted
+    indices `clsNodes`, `roleOutNodes`, and `roleInNodes`. -/
 def checkAdjConsistent (m : CBCanonicalModel) (numWorkers : Nat := 8) : Bool :=
   m.numNodes > 0 &&
   m.outAdj.size == m.numNodes &&
   m.inAdj.size == m.numNodes &&
   allRangePar m.numNodes (fun x =>
+    let clsOk := (m.nodeClasses.getD x {}).toList.all fun c =>
+      binSearchContains (m.clsNodes.getD c #[]) x
     let outOk := (m.outAdj.getD x {}).toList.all fun (r, ys) =>
       isStrictSortedLt ys m.numNodes &&
-      ys.all fun y => (m.inNeighbors r y).contains x
+      (ys.isEmpty || binSearchContains (m.roleOutNodes.getD r #[]) x) &&
+      ys.all fun y => binSearchContains (m.inNeighbors r y) x
     let inOk := (m.inAdj.getD x {}).toList.all fun (r, ys) =>
       isStrictSortedLt ys m.numNodes &&
-      ys.all fun y => (m.outNeighbors r y).contains x
-    outOk && inOk) numWorkers
+      (ys.isEmpty || binSearchContains (m.roleInNodes.getD r #[]) x) &&
+      ys.all fun y => binSearchContains (m.outNeighbors r y) x
+    clsOk && outOk && inOk) numWorkers
 
 private theorem array_contains_iff' {α : Type} [BEq α] [LawfulBEq α] {xs : Array α} {a : α} :
     xs.contains a = true ↔ a ∈ xs.toList := by
@@ -230,13 +285,13 @@ private theorem adjConsistent_in_iff {m : CBCanonicalModel} {w : Nat}
     have hnx := hnodes x hx
     have hpair := List.all_eq_true.mp hnx.2 (r, ys) hmem
     have hback := (Bool.and_eq_true _ _).mp hpair
-    exact array_all_iff'.mp hback.2 y hyin
+    exact array_contains_iff'.mpr (binSearchContains_mem (array_all_iff'.mp hback.2 y hyin))
   · intro hout
     obtain ⟨ys, hmem, hxin⟩ := mem_toList_of_getD hout
     have hny := hnodes y hy
-    have hpair := List.all_eq_true.mp hny.1 (r, ys) hmem
+    have hpair := List.all_eq_true.mp hny.1.2 (r, ys) hmem
     have hback := (Bool.and_eq_true _ _).mp hpair
-    exact array_all_iff'.mp hback.2 x hxin
+    exact array_contains_iff'.mpr (binSearchContains_mem (array_all_iff'.mp hback.2 x hxin))
 
 private theorem adjConsistent_out_sorted {m : CBCanonicalModel} {w : Nat}
     (hadj : checkAdjConsistent m w = true) (r : IRI) {x : Nat} (hx : x < m.numNodes) :
@@ -255,9 +310,9 @@ private theorem adjConsistent_out_sorted {m : CBCanonicalModel} {w : Nat}
       rw [Std.HashMap.getD_eq_getD_getElem?, hm]; rfl
     rw [hget]
     have hnx := hnodes x hx
-    have hpair := List.all_eq_true.mp hnx.1 (r, ys)
+    have hpair := List.all_eq_true.mp hnx.1.2 (r, ys)
       (Std.HashMap.mem_toList_iff_getElem?_eq_some.mpr hm)
-    exact ((Bool.and_eq_true _ _).mp hpair).1
+    exact ((Bool.and_eq_true _ _).mp ((Bool.and_eq_true _ _).mp hpair).1).1
 
 private theorem adjConsistent_in_sorted {m : CBCanonicalModel} {w : Nat}
     (hadj : checkAdjConsistent m w = true) (r : IRI) {x : Nat} (hx : x < m.numNodes) :
@@ -278,7 +333,56 @@ private theorem adjConsistent_in_sorted {m : CBCanonicalModel} {w : Nat}
     have hnx := hnodes x hx
     have hpair := List.all_eq_true.mp hnx.2 (r, ys)
       (Std.HashMap.mem_toList_iff_getElem?_eq_some.mpr hm)
-    exact ((Bool.and_eq_true _ _).mp hpair).1
+    exact ((Bool.and_eq_true _ _).mp ((Bool.and_eq_true _ _).mp hpair).1).1
+
+private theorem adjConsistent_cls_mem {m : CBCanonicalModel} {w : Nat}
+    (hadj : checkAdjConsistent m w = true) {c : IRI} {x : Nat}
+    (hx : x < m.numNodes) (hct : (m.nodeClasses.getD x {}).contains c = true) :
+    x ∈ (m.clsNodes.getD c #[]).toList := by
+  unfold checkAdjConsistent at hadj
+  simp only [Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq, allRangePar_iff] at hadj
+  have hnx := (hadj.2 x hx).1.1
+  have hmem : c ∈ (m.nodeClasses.getD x {}).toList :=
+    Std.HashSet.mem_toList.mpr (Std.HashSet.contains_iff_mem.mp hct)
+  exact binSearchContains_mem (List.all_eq_true.mp hnx c hmem)
+
+private theorem adjConsistent_roleOut_mem {m : CBCanonicalModel} {w : Nat}
+    (hadj : checkAdjConsistent m w = true) {r : IRI} {x y : Nat}
+    (hx : x < m.numNodes) (hy : (m.outNeighbors r x).contains y = true) :
+    x ∈ (m.roleOutNodes.getD r #[]).toList := by
+  unfold checkAdjConsistent at hadj
+  simp only [Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq, allRangePar_iff] at hadj
+  obtain ⟨ys, hmem, hyin⟩ := mem_toList_of_getD hy
+  have hnx := (hadj.2 x hx).1.2
+  have hpair := List.all_eq_true.mp hnx (r, ys) hmem
+  have hor := ((Bool.and_eq_true _ _).mp ((Bool.and_eq_true _ _).mp hpair).1).2
+  cases hemp : ys.isEmpty with
+  | true =>
+    have hsz : ys.size = 0 := by simpa [Array.isEmpty] using hemp
+    have : ys.toList = [] := List.eq_nil_of_length_eq_zero (by simpa using hsz)
+    rw [this] at hyin; cases hyin
+  | false =>
+    simp only [hemp, Bool.false_or] at hor
+    exact binSearchContains_mem hor
+
+private theorem adjConsistent_roleIn_mem {m : CBCanonicalModel} {w : Nat}
+    (hadj : checkAdjConsistent m w = true) {r : IRI} {x y : Nat}
+    (hx : x < m.numNodes) (hy : (m.inNeighbors r x).contains y = true) :
+    x ∈ (m.roleInNodes.getD r #[]).toList := by
+  unfold checkAdjConsistent at hadj
+  simp only [Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq, allRangePar_iff] at hadj
+  obtain ⟨ys, hmem, hyin⟩ := mem_toList_of_getD hy
+  have hnx := (hadj.2 x hx).2
+  have hpair := List.all_eq_true.mp hnx (r, ys) hmem
+  have hor := ((Bool.and_eq_true _ _).mp ((Bool.and_eq_true _ _).mp hpair).1).2
+  cases hemp : ys.isEmpty with
+  | true =>
+    have hsz : ys.size = 0 := by simpa [Array.isEmpty] using hemp
+    have : ys.toList = [] := List.eq_nil_of_length_eq_zero (by simpa using hsz)
+    rw [this] at hyin; cases hyin
+  | false =>
+    simp only [hemp, Bool.false_or] at hor
+    exact binSearchContains_mem hor
 
 /-- Neighbors of `x` along oriented property `r` (returns `none` for `topObjectProperty`,
     which ranges over all `0 .. m.numNodes - 1`). -/
@@ -1114,24 +1218,193 @@ private def checkDisjointUnionGo (m : CBCanonicalModel) (x : Nat) (cnt : Nat) : 
     | some false => checkDisjointUnionGo m x cnt rest
     | some true => checkDisjointUnionGo m x (cnt + 1) rest
 
-/-- Check a single `Axiom` on `m` (assuming `checkAdjConsistent m`). -/
+/-- Check `p` on every node in `cands?` (or all `0 .. m.numNodes - 1` when `none`). -/
+def checkNodes (m : CBCanonicalModel) (cands? : Option (Array Nat)) (p : Nat → Bool) : Bool :=
+  match cands? with
+  | some xs => xs.all p
+  | none => allRangeSeq p 0 m.numNodes
+
+private theorem checkNodes_sound {m : CBCanonicalModel} {cands? : Option (Array Nat)}
+    {p : Nat → Bool} (hchk : checkNodes m cands? p = true)
+    (x : Fin m.numNodes) (hmem : ∀ xs, cands? = some xs → x.val ∈ xs.toList) :
+    p x.val = true := by
+  unfold checkNodes at hchk
+  cases hc : cands? with
+  | none =>
+    rw [hc, allRangeSeq_iff] at hchk
+    exact hchk x.val (Nat.zero_le _) x.isLt
+  | some xs => rw [hc] at hchk; exact array_all_iff'.mp hchk x.val (hmem xs hc)
+
+/-- Candidate source nodes that can have an outgoing `r`-edge in `m` (`none` = all nodes). -/
+def roleSourceNodes? (m : CBCanonicalModel) : ObjectProperty → Option (Array Nat)
+  | .named p =>
+    if p == topObjectProperty then none
+    else if p == bottomObjectProperty then some #[]
+    else some (m.roleOutNodes.getD p #[])
+  | .inverse p =>
+    if p == topObjectProperty then none
+    else if p == bottomObjectProperty then some #[]
+    else some (m.roleInNodes.getD p #[])
+
+private theorem roleSourceNodes?_complete {dm : DatatypeMap} {m : CBCanonicalModel} {w : Nat}
+    (hadj : checkAdjConsistent m w = true) (hne : 0 < m.numNodes)
+    (r : ObjectProperty) {xs : Array Nat} (h : roleSourceNodes? m r = some xs)
+    (x y : Fin m.numNodes) (hxy : objectHolds (m.toInterpretation dm hne) r x y) :
+    x.val ∈ xs.toList := by
+  cases r with
+  | named p =>
+    unfold roleSourceNodes? at h
+    by_cases ht : p = topObjectProperty
+    · subst ht; simp at h
+    · by_cases hb : p = bottomObjectProperty
+      · subst hb
+        have hbot : False := (m.toInterpretation dm hne).bottomObjectExt x y hxy
+        exact hbot.elim
+      · have hnt : (p == topObjectProperty) = false := beq_false_of_ne ht
+        have hnb : (p == bottomObjectProperty) = false := beq_false_of_ne hb
+        simp only [hnt, hnb, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at h
+        subst h
+        have hout : (m.outNeighbors p x.val).contains y.val = true := by
+          simpa [objectHolds, CBCanonicalModel.toInterpretation, CBCanonicalModel.hasNamedEdge,
+                 hnt, hnb] using hxy
+        exact adjConsistent_roleOut_mem hadj x.isLt hout
+  | inverse p =>
+    unfold roleSourceNodes? at h
+    by_cases ht : p = topObjectProperty
+    · subst ht; simp at h
+    · by_cases hb : p = bottomObjectProperty
+      · subst hb
+        have hbot : False := (m.toInterpretation dm hne).bottomObjectExt y x hxy
+        exact hbot.elim
+      · have hnt : (p == topObjectProperty) = false := beq_false_of_ne ht
+        have hnb : (p == bottomObjectProperty) = false := beq_false_of_ne hb
+        simp only [hnt, hnb, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at h
+        subst h
+        have hout : (m.outNeighbors p y.val).contains x.val = true := by
+          simpa [objectHolds, CBCanonicalModel.toInterpretation, CBCanonicalModel.hasNamedEdge,
+                 hnt, hnb] using hxy
+        have hin : (m.inNeighbors p x.val).contains y.val = true :=
+          (adjConsistent_in_iff hadj p x.isLt y.isLt).mpr hout
+        exact adjConsistent_roleIn_mem hadj x.isLt hin
+
+/-- Candidate nodes where `ClassExpr` can hold in `m` (`none` = all nodes). -/
+def candidateNodes? (m : CBCanonicalModel) : ClassExpr → Option (Array Nat)
+  | .named c =>
+    if c == thing then none
+    else if c == nothing then some #[]
+    else some (m.clsNodes.getD c #[])
+  | .intersection a b =>
+    match candidateNodes? m a, candidateNodes? m b with
+    | some xa, some xb => if xa.size ≤ xb.size then some xa else some xb
+    | some xa, none => some xa
+    | none, some xb => some xb
+    | none, none => none
+  | .objectSome r _ => roleSourceNodes? m r
+  | .objectSelf r => roleSourceNodes? m r
+  | .objectMin (_ + 1) r _ => roleSourceNodes? m r
+  | .objectExact (_ + 1) r _ => roleSourceNodes? m r
+  | _ => none
+
+private theorem candidateNodes?_complete {dm : DatatypeMap} {m : CBCanonicalModel} {w : Nat}
+    (hadj : checkAdjConsistent m w = true) (hne : 0 < m.numNodes) :
+    ∀ (e : ClassExpr) {xs : Array Nat},
+      candidateNodes? m e = some xs →
+      ∀ (x : Fin m.numNodes), classHolds (m.toInterpretation dm hne) x e →
+      x.val ∈ xs.toList
+  | .named c, xs, h, x, hx => by
+    unfold candidateNodes? at h
+    by_cases ht : c = thing
+    · subst ht; simp at h
+    · by_cases hn : c = nothing
+      · subst hn; exact ((m.toInterpretation dm hne).nothingExt x hx).elim
+      · have hnt : (c == thing) = false := beq_false_of_ne ht
+        have hnn : (c == nothing) = false := beq_false_of_ne hn
+        simp only [hnt, hnn, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at h
+        subst h
+        have hct : (m.nodeClasses.getD x.val {}).contains c = true := by
+          simpa [classHolds, CBCanonicalModel.toInterpretation, CBCanonicalModel.hasCls,
+                 hnt, hnn] using hx
+        exact adjConsistent_cls_mem hadj x.isLt hct
+  | .intersection a b, xs, h, x, ⟨hxa, hxb⟩ => by
+    unfold candidateNodes? at h
+    cases ha : candidateNodes? m a <;> cases hb : candidateNodes? m b <;>
+      simp only [ha, hb] at h
+    · cases h
+    · cases h; exact candidateNodes?_complete hadj hne b hb x hxb
+    · cases h; exact candidateNodes?_complete hadj hne a ha x hxa
+    · split at h <;> cases h
+      · exact candidateNodes?_complete hadj hne a ha x hxa
+      · exact candidateNodes?_complete hadj hne b hb x hxb
+  | .objectSome r _, xs, h, x, ⟨y, hxy, _⟩ =>
+    roleSourceNodes?_complete hadj hne r h x y hxy
+  | .objectSelf r, xs, h, x, hxx =>
+    roleSourceNodes?_complete hadj hne r h x x hxx
+  | .objectMin (_ + 1) r _, xs, h, x, ⟨ys, hlen, _, hpy⟩ => by
+    cases ys with
+    | nil => simp at hlen
+    | cons y _ =>
+      exact roleSourceNodes?_complete hadj hne r h x y (hpy y (List.mem_cons_self ..)).1
+  | .objectExact (_ + 1) r _, xs, h, x, ⟨⟨ys, hlen, _, hpy⟩, _⟩ => by
+    cases ys with
+    | nil => simp at hlen
+    | cons y _ =>
+      exact roleSourceNodes?_complete hadj hne r h x y (hpy y (List.mem_cons_self ..)).1
+  | .objectMin 0 _ _, _, h, _, _ => by cases h
+  | .objectExact 0 _ _, _, h, _, _ => by cases h
+  | .complement _, _, h, _, _ => by cases h
+  | .union _ _, _, h, _, _ => by cases h
+  | .oneOf _, _, h, _, _ => by cases h
+  | .objectAll _ _, _, h, _, _ => by cases h
+  | .objectValue _ _, _, h, _, _ => by cases h
+  | .objectMax _ _ _, _, h, _, _ => by cases h
+  | .dataSome _ _, _, h, _, _ => by cases h
+  | .dataAll _ _, _, h, _, _ => by cases h
+  | .dataValue _ _, _, h, _, _ => by cases h
+  | .dataMin _ _ _, _, h, _, _ => by cases h
+  | .dataMax _ _ _, _, h, _, _ => by cases h
+  | .dataExact _ _ _, _, h, _, _ => by cases h
+
+/-- Check a single `Axiom` on `m` in $O(\text{support})$ using inverted indices
+    (assuming `checkAdjConsistent m`). -/
 def checkCBAxiom (m : CBCanonicalModel) : Axiom → Bool
   | .subClassOf a b =>
-    allRangeSeq (fun x =>
+    checkNodes m (candidateNodes? m a) fun x =>
       match evalClassExpr m x a with
       | some false => true
       | some true => evalClassExpr m x b == some true
-      | none => false) 0 m.numNodes
+      | none => false
   | .equivalentClasses cs =>
     match cs with
     | [] | [_] => true
+    | [c0, c1] =>
+      match candidateNodes? m c0, candidateNodes? m c1 with
+      | some xs0, some xs1 =>
+        let chk (x : Nat) : Bool :=
+          match evalClassExpr m x c0, evalClassExpr m x c1 with
+          | some v0, some v1 => v0 == v1
+          | _, _ => false
+        xs0.all chk && xs1.all chk
+      | _, _ =>
+        allRangeSeq (fun x =>
+          match evalClassExpr m x c0 with
+          | none => false
+          | some v0 => evalClassExpr m x c1 == some v0) 0 m.numNodes
     | c0 :: rest =>
       allRangeSeq (fun x =>
         match evalClassExpr m x c0 with
         | none => false
         | some v0 => rest.all fun c => evalClassExpr m x c == some v0) 0 m.numNodes
   | .disjointClasses cs =>
-    allRangeSeq (fun x => checkDisjointGo m x false cs) 0 m.numNodes
+    match cs with
+    | [a, b] =>
+      let cands? := match candidateNodes? m a, candidateNodes? m b with
+        | some xa, some xb => if xa.size ≤ xb.size then some xa else some xb
+        | some xa, none => some xa
+        | none, some xb => some xb
+        | none, none => none
+      checkNodes m cands? (fun x => checkDisjointGo m x false [a, b])
+    | _ =>
+      allRangeSeq (fun x => checkDisjointGo m x false cs) 0 m.numNodes
   | .disjointUnion h cs =>
     allRangeSeq (fun x =>
       let hx := m.hasCls h x
@@ -1139,46 +1412,50 @@ def checkCBAxiom (m : CBCanonicalModel) : Axiom → Bool
       | none => false
       | some cnt => if hx then cnt == 1 else cnt == 0) 0 m.numNodes
   | .subObjectProperty r s =>
-    allRangeSeq (fun x => allNeighborsCheck m r x (fun y => m.hasObjEdge s x y)) 0 m.numNodes
+    checkNodes m (roleSourceNodes? m r) fun x =>
+      allNeighborsCheck m r x (fun y => m.hasObjEdge s x y)
   | .subObjectPropertyChain rs s =>
-    allRangeSeq (fun x => checkRoleChainFrom m s x rs x) 0 m.numNodes
+    let cands? := match rs with
+      | r0 :: _ => roleSourceNodes? m r0
+      | [] => none
+    checkNodes m cands? (fun x => checkRoleChainFrom m s x rs x)
   | .equivalentObjectProperties rs =>
     match rs with
     | [] | [_] => true
     | r0 :: rest =>
       rest.all fun r =>
-        allRangeSeq (fun x =>
-          allNeighborsCheck m r0 x (fun y => m.hasObjEdge r x y) &&
-          allNeighborsCheck m r x (fun y => m.hasObjEdge r0 x y)) 0 m.numNodes
+        checkNodes m (roleSourceNodes? m r0) (fun x => allNeighborsCheck m r0 x (fun y => m.hasObjEdge r x y)) &&
+        checkNodes m (roleSourceNodes? m r) (fun x => allNeighborsCheck m r x (fun y => m.hasObjEdge r0 x y))
   | .inverseObjectProperties r s =>
-    allRangeSeq (fun x =>
-      allNeighborsCheck m r x (fun y => m.hasObjEdge s y x) &&
-      allNeighborsCheck m s x (fun y => m.hasObjEdge r y x)) 0 m.numNodes
+    checkNodes m (roleSourceNodes? m r) (fun x => allNeighborsCheck m r x (fun y => m.hasObjEdge s y x)) &&
+    checkNodes m (roleSourceNodes? m s) (fun x => allNeighborsCheck m s x (fun y => m.hasObjEdge r y x))
   | .symmetricObjectProperty r =>
-    allRangeSeq (fun x => allNeighborsCheck m r x (fun y => m.hasObjEdge r y x)) 0 m.numNodes
+    checkNodes m (roleSourceNodes? m r) fun x =>
+      allNeighborsCheck m r x (fun y => m.hasObjEdge r y x)
   | .transitiveObjectProperty r =>
-    allRangeSeq (fun x =>
-      allNeighborsCheck m r x (fun y => allNeighborsCheck m r y (fun z => m.hasObjEdge r x z))) 0 m.numNodes
+    checkNodes m (roleSourceNodes? m r) fun x =>
+      allNeighborsCheck m r x (fun y =>
+        allNeighborsCheck m r y (fun z => m.hasObjEdge r x z))
   | .reflexiveObjectProperty r =>
     allRangeSeq (fun x => m.hasObjEdge r x x) 0 m.numNodes
   | .objectPropertyDomain r dom =>
-    allRangeSeq (fun x =>
+    checkNodes m (roleSourceNodes? m r) fun x =>
       match m.neighbors? r x with
       | some ys => if ys.isEmpty then true else evalClassExpr m x dom == some true
-      | none => evalClassExpr m x dom == some true) 0 m.numNodes
+      | none => evalClassExpr m x dom == some true
   | .objectPropertyRange r rng =>
-    allRangeSeq (fun x =>
-      allNeighborsCheck m r x (fun y => evalClassExpr m y rng == some true)) 0 m.numNodes
+    checkNodes m (roleSourceNodes? m r) fun x =>
+      allNeighborsCheck m r x (fun y => evalClassExpr m y rng == some true)
   | .functionalObjectProperty r =>
-    allRangeSeq (fun x =>
+    checkNodes m (roleSourceNodes? m r) fun x =>
       match m.neighbors? r x with
       | some ys => ys.size ≤ 1
-      | none => m.numNodes ≤ 1) 0 m.numNodes
+      | none => m.numNodes ≤ 1
   | .inverseFunctionalObjectProperty r =>
-    allRangeSeq (fun x =>
+    checkNodes m (roleSourceNodes? m r.converse) fun x =>
       match m.neighbors? r.converse x with
       | some ys => ys.size ≤ 1
-      | none => m.numNodes ≤ 1) 0 m.numNodes
+      | none => m.numNodes ≤ 1
   | _ => false
 
 /-- Parallel kernel-verified model checker for `o` on `CBCanonicalModel`. -/
@@ -1294,9 +1571,9 @@ private theorem checkCBAxiom_sound {dm : DatatypeMap} {m : CBCanonicalModel} {w 
     axiomHolds (m.toInterpretation dm hne) ax := by
   cases ax with
   | subClassOf a b =>
-    simp only [checkCBAxiom, allRangeSeq_iff] at hchk
+    simp only [checkCBAxiom] at hchk
     intro x hax
-    have hx := hchk x.val (Nat.zero_le _) x.isLt
+    have hx := checkNodes_sound hchk x (fun xs hc => candidateNodes?_complete hadj hne a hc x hax)
     cases ha : evalClassExpr m x.val a with
     | none => simp [ha] at hx
     | some v =>
@@ -1316,33 +1593,128 @@ private theorem checkCBAxiom_sound {dm : DatatypeMap} {m : CBCanonicalModel} {w 
         have := List.mem_singleton.mp ha; have := List.mem_singleton.mp hb
         subst_vars; rfl
       | cons c1 tl =>
-        simp only [checkCBAxiom, allRangeSeq_iff] at hchk
-        intro a ha b hb x
-        have hx := hchk x.val (Nat.zero_le _) x.isLt
-        cases h0 : evalClassExpr m x.val c0 with
-        | none => simp [h0] at hx
-        | some v0 =>
-          simp only [h0, List.all_eq_true, beq_iff_eq] at hx
-          have heval : ∀ c ∈ c0 :: c1 :: tl, evalClassExpr m x.val c = some v0 := by
-            intro c hc
-            rcases List.mem_cons.mp hc with rfl | hmem
-            · exact h0
-            · exact hx c hmem
-          have iha := evalClassExpr_iff dm hadj hne a x v0 (heval a ha)
-          have ihb := evalClassExpr_iff dm hadj hne b x v0 (heval b hb)
-          exact iha.symm.trans ihb
+        cases tl with
+        | nil =>
+          have hiff01 : ∀ x : Fin m.numNodes,
+              classHolds (m.toInterpretation dm hne) x c0 ↔
+              classHolds (m.toInterpretation dm hne) x c1 := by
+            intro x
+            unfold checkCBAxiom at hchk
+            dsimp only at hchk
+            cases hc0 : candidateNodes? m c0 with
+            | none =>
+              rw [hc0] at hchk; dsimp only at hchk
+              rw [allRangeSeq_iff] at hchk
+              have hx := hchk x.val (Nat.zero_le _) x.isLt
+              cases h0 : evalClassExpr m x.val c0 with
+              | none => simp [h0] at hx
+              | some v0 =>
+                simp only [h0, beq_iff_eq] at hx
+                exact (evalClassExpr_iff dm hadj hne c0 x v0 h0).symm.trans
+                      (evalClassExpr_iff dm hadj hne c1 x v0 hx)
+            | some xs0 =>
+              cases hc1 : candidateNodes? m c1 with
+              | none =>
+                rw [hc0, hc1] at hchk; dsimp only at hchk
+                rw [allRangeSeq_iff] at hchk
+                have hx := hchk x.val (Nat.zero_le _) x.isLt
+                cases h0 : evalClassExpr m x.val c0 with
+                | none => simp [h0] at hx
+                | some v0 =>
+                  simp only [h0, beq_iff_eq] at hx
+                  exact (evalClassExpr_iff dm hadj hne c0 x v0 h0).symm.trans
+                        (evalClassExpr_iff dm hadj hne c1 x v0 hx)
+              | some xs1 =>
+                rw [hc0, hc1] at hchk; dsimp only at hchk
+                obtain ⟨h0all, h1all⟩ := (Bool.and_eq_true _ _).mp hchk
+                constructor
+                · intro hx0
+                  have hmem0 := candidateNodes?_complete hadj hne c0 hc0 x hx0
+                  have hx := array_all_iff'.mp h0all x.val hmem0
+                  cases he0 : evalClassExpr m x.val c0 with
+                  | none => simp [he0] at hx
+                  | some v0 =>
+                    cases he1 : evalClassExpr m x.val c1 with
+                    | none => simp [he0, he1] at hx
+                    | some v1 =>
+                      simp only [he0, he1, beq_iff_eq] at hx
+                      subst hx
+                      exact (evalClassExpr_iff dm hadj hne c1 x v0 he1).mp
+                        ((evalClassExpr_iff dm hadj hne c0 x v0 he0).mpr hx0)
+                · intro hx1
+                  have hmem1 := candidateNodes?_complete hadj hne c1 hc1 x hx1
+                  have hx := array_all_iff'.mp h1all x.val hmem1
+                  cases he0 : evalClassExpr m x.val c0 with
+                  | none => simp [he0] at hx
+                  | some v0 =>
+                    cases he1 : evalClassExpr m x.val c1 with
+                    | none => simp [he0, he1] at hx
+                    | some v1 =>
+                      simp only [he0, he1, beq_iff_eq] at hx
+                      subst hx
+                      exact (evalClassExpr_iff dm hadj hne c0 x v0 he0).mp
+                        ((evalClassExpr_iff dm hadj hne c1 x v0 he1).mpr hx1)
+          intro a ha b hb x
+          rcases List.mem_cons.mp ha with rfl | ha1
+          · rcases List.mem_cons.mp hb with rfl | hb1
+            · rfl
+            · rw [List.mem_singleton.mp hb1]; exact hiff01 x
+          · rw [List.mem_singleton.mp ha1]
+            rcases List.mem_cons.mp hb with rfl | hb1
+            · exact (hiff01 x).symm
+            · rw [List.mem_singleton.mp hb1]
+        | cons c2 tl2 =>
+          simp only [checkCBAxiom, allRangeSeq_iff] at hchk
+          intro a ha b hb x
+          have hx := hchk x.val (Nat.zero_le _) x.isLt
+          cases h0 : evalClassExpr m x.val c0 with
+          | none => simp [h0] at hx
+          | some v0 =>
+            simp only [h0, List.all_eq_true, beq_iff_eq] at hx
+            have heval : ∀ c ∈ c0 :: c1 :: c2 :: tl2, evalClassExpr m x.val c = some v0 := by
+              intro c hc
+              rcases List.mem_cons.mp hc with rfl | hmem
+              · exact h0
+              · exact hx c hmem
+            have iha := evalClassExpr_iff dm hadj hne a x v0 (heval a ha)
+            have ihb := evalClassExpr_iff dm hadj hne b x v0 (heval b hb)
+            exact iha.symm.trans ihb
   | disjointClasses cs =>
-    simp only [checkCBAxiom, allRangeSeq_iff] at hchk
-    have hpw : ∀ x : Fin m.numNodes,
-        cs.Pairwise (fun a b => ¬ (classHolds (m.toInterpretation dm hne) x a ∧
-                                    classHolds (m.toInterpretation dm hne) x b)) :=
-      fun x => (checkDisjointGo_sound dm hadj hne x cs false (hchk x.val (Nat.zero_le _) x.isLt)).2
-    clear hchk
-    induction cs with
-    | nil => exact List.Pairwise.nil
-    | cons a rest ih =>
-      refine List.pairwise_cons.mpr ⟨fun b hb x => ?_, ih (fun x => (List.pairwise_cons.mp (hpw x)).2)⟩
-      exact (List.pairwise_cons.mp (hpw x)).1 b hb
+    match cs with
+    | [a, b] =>
+      simp only [checkCBAxiom] at hchk
+      refine List.pairwise_cons.mpr ⟨fun d hd x ⟨hxa, hxd⟩ => ?_,
+        List.pairwise_cons.mpr ⟨(fun _ h => nomatch h), List.Pairwise.nil⟩⟩
+      rcases List.mem_singleton.mp hd with rfl
+      have hx : checkDisjointGo m x.val false [a, d] = true := by
+        apply checkNodes_sound hchk x
+        intro xs hc
+        cases ha : candidateNodes? m a <;> cases hb : candidateNodes? m d <;>
+          simp only [ha, hb] at hc
+        · cases hc
+        · cases hc; exact candidateNodes?_complete hadj hne d hb x hxd
+        · cases hc; exact candidateNodes?_complete hadj hne a ha x hxa
+        · split at hc <;> cases hc
+          · exact candidateNodes?_complete hadj hne a ha x hxa
+          · exact candidateNodes?_complete hadj hne d hb x hxd
+      have hpw := (checkDisjointGo_sound dm hadj hne x [a, d] false hx).2
+      exact (List.pairwise_cons.mp hpw).1 d (List.mem_singleton.mpr rfl) ⟨hxa, hxd⟩
+    | [] => exact List.Pairwise.nil
+    | [a] => exact List.pairwise_cons.mpr ⟨(fun _ h => nomatch h), List.Pairwise.nil⟩
+    | a :: b :: c :: rest =>
+      simp only [checkCBAxiom, allRangeSeq_iff] at hchk
+      have hpw : ∀ x : Fin m.numNodes,
+          (a :: b :: c :: rest).Pairwise (fun u v => ¬ (classHolds (m.toInterpretation dm hne) x u ∧
+                                      classHolds (m.toInterpretation dm hne) x v)) :=
+        fun x => (checkDisjointGo_sound dm hadj hne x (a :: b :: c :: rest) false (hchk x.val (Nat.zero_le _) x.isLt)).2
+      clear hchk
+      generalize hls : (a :: b :: c :: rest) = ls at hpw ⊢
+      clear hls
+      induction ls with
+      | nil => exact List.Pairwise.nil
+      | cons u tl ih =>
+        refine List.pairwise_cons.mpr ⟨fun v hv x => ?_, ih (fun x => (List.pairwise_cons.mp (hpw x)).2)⟩
+        exact (List.pairwise_cons.mp (hpw x)).1 v hv
   | disjointUnion h cs =>
     simp only [checkCBAxiom, allRangeSeq_iff] at hchk
     have hper : ∀ x : Fin m.numNodes,
@@ -1375,14 +1747,22 @@ private theorem checkCBAxiom_sound {dm : DatatypeMap} {m : CBCanonicalModel} {w 
       refine List.pairwise_cons.mpr ⟨fun b hb x => ?_, ih (fun x => (List.pairwise_cons.mp (hpw x)).2)⟩
       exact (List.pairwise_cons.mp (hpw x)).1 b hb
   | subObjectProperty r s =>
-    simp only [checkCBAxiom, allRangeSeq_iff] at hchk
+    simp only [checkCBAxiom] at hchk
     intro x y hry
-    exact (hasObjEdge_iff s x y).mp
-      ((allNeighborsCheck_iff hadj hne r x _).mp (hchk x.val (Nat.zero_le _) x.isLt) y hry)
+    have hx := checkNodes_sound hchk x (fun xs hc => roleSourceNodes?_complete hadj hne r hc x y hry)
+    exact (hasObjEdge_iff s x y).mp ((allNeighborsCheck_iff hadj hne r x _).mp hx y hry)
   | subObjectPropertyChain rs s =>
-    simp only [checkCBAxiom, allRangeSeq_iff] at hchk
+    simp only [checkCBAxiom] at hchk
     intro x y hpath
-    exact checkRoleChainFrom_sound hadj hne s x rs x (hchk x.val (Nat.zero_le _) x.isLt) y hpath
+    have hx : checkRoleChainFrom m s x.val rs x.val = true := by
+      apply checkNodes_sound hchk x
+      intro xs hc
+      cases rs with
+      | nil => cases hc
+      | cons r0 tl =>
+        obtain ⟨nxt, hr0, _⟩ := hpath
+        exact roleSourceNodes?_complete hadj hne r0 hc x nxt hr0
+    exact checkRoleChainFrom_sound hadj hne s x rs x hx y hpath
   | equivalentObjectProperties rs =>
     cases rs with
     | nil => intro r hr; cases hr
@@ -1400,41 +1780,46 @@ private theorem checkCBAxiom_sound {dm : DatatypeMap} {m : CBCanonicalModel} {w 
           intro r hr x y
           rcases List.mem_cons.mp hr with rfl | hmem
           · rfl
-          · have hrchk := hchk r hmem
-            rw [allRangeSeq_iff] at hrchk
-            have ⟨h1, h2⟩ := (Bool.and_eq_true _ _).mp (hrchk x.val (Nat.zero_le _) x.isLt)
-            exact ⟨fun h => (hasObjEdge_iff r x y).mp ((allNeighborsCheck_iff hadj hne r0 x _).mp h1 y h),
-                   fun h => (hasObjEdge_iff r0 x y).mp ((allNeighborsCheck_iff hadj hne r x _).mp h2 y h)⟩
+          · have ⟨h1, h2⟩ := (Bool.and_eq_true _ _).mp (hchk r hmem)
+            constructor
+            · intro h
+              have hx := checkNodes_sound h1 x (fun xs hc => roleSourceNodes?_complete hadj hne r0 hc x y h)
+              exact (hasObjEdge_iff r x y).mp ((allNeighborsCheck_iff hadj hne r0 x _).mp hx y h)
+            · intro h
+              have hx := checkNodes_sound h2 x (fun xs hc => roleSourceNodes?_complete hadj hne r hc x y h)
+              exact (hasObjEdge_iff r0 x y).mp ((allNeighborsCheck_iff hadj hne r x _).mp hx y h)
         intro r hr s hs x y
         exact (hiff0 r hr x y).symm.trans (hiff0 s hs x y)
   | inverseObjectProperties r s =>
-    simp only [checkCBAxiom, allRangeSeq_iff] at hchk
+    simp only [checkCBAxiom, Bool.and_eq_true] at hchk
+    obtain ⟨h1, h2⟩ := hchk
     intro x y
     constructor
     · intro h
-      have ⟨h1, _⟩ := (Bool.and_eq_true _ _).mp (hchk x.val (Nat.zero_le _) x.isLt)
-      exact (hasObjEdge_iff s y x).mp ((allNeighborsCheck_iff hadj hne r x _).mp h1 y h)
+      have hx := checkNodes_sound h1 x (fun xs hc => roleSourceNodes?_complete hadj hne r hc x y h)
+      exact (hasObjEdge_iff s y x).mp ((allNeighborsCheck_iff hadj hne r x _).mp hx y h)
     · intro h
-      have ⟨_, h2⟩ := (Bool.and_eq_true _ _).mp (hchk y.val (Nat.zero_le _) y.isLt)
-      exact (hasObjEdge_iff r x y).mp ((allNeighborsCheck_iff hadj hne s y _).mp h2 x h)
+      have hy := checkNodes_sound h2 y (fun xs hc => roleSourceNodes?_complete hadj hne s hc y x h)
+      exact (hasObjEdge_iff r x y).mp ((allNeighborsCheck_iff hadj hne s y _).mp hy x h)
   | symmetricObjectProperty r =>
-    simp only [checkCBAxiom, allRangeSeq_iff] at hchk
+    simp only [checkCBAxiom] at hchk
     intro x y h
-    exact (hasObjEdge_iff r y x).mp
-      ((allNeighborsCheck_iff hadj hne r x _).mp (hchk x.val (Nat.zero_le _) x.isLt) y h)
+    have hx := checkNodes_sound hchk x (fun xs hc => roleSourceNodes?_complete hadj hne r hc x y h)
+    exact (hasObjEdge_iff r y x).mp ((allNeighborsCheck_iff hadj hne r x _).mp hx y h)
   | transitiveObjectProperty r =>
-    simp only [checkCBAxiom, allRangeSeq_iff] at hchk
+    simp only [checkCBAxiom] at hchk
     intro x y z hxy hyz
-    have hy := (allNeighborsCheck_iff hadj hne r x _).mp (hchk x.val (Nat.zero_le _) x.isLt) y hxy
+    have hx := checkNodes_sound hchk x (fun xs hc => roleSourceNodes?_complete hadj hne r hc x y hxy)
+    have hy := (allNeighborsCheck_iff hadj hne r x _).mp hx y hxy
     exact (hasObjEdge_iff r x z).mp ((allNeighborsCheck_iff hadj hne r y _).mp hy z hyz)
   | reflexiveObjectProperty r =>
     simp only [checkCBAxiom, allRangeSeq_iff] at hchk
     intro x
     exact (hasObjEdge_iff r x x).mp (hchk x.val (Nat.zero_le _) x.isLt)
   | objectPropertyDomain r dom =>
-    simp only [checkCBAxiom, allRangeSeq_iff] at hchk
+    simp only [checkCBAxiom] at hchk
     intro x y hxy
-    have hx := hchk x.val (Nat.zero_le _) x.isLt
+    have hx := checkNodes_sound hchk x (fun xs hc => roleSourceNodes?_complete hadj hne r hc x y hxy)
     have hnb := neighbors?_spec (dm := dm) hadj hne r x
     cases hnr : m.neighbors? r x.val with
     | some ys =>
@@ -1454,14 +1839,15 @@ private theorem checkCBAxiom_sound {dm : DatatypeMap} {m : CBCanonicalModel} {w 
       simp only [beq_iff_eq] at hx
       exact (evalClassExpr_iff dm hadj hne dom x true hx).mp rfl
   | objectPropertyRange r rng =>
-    simp only [checkCBAxiom, allRangeSeq_iff] at hchk
+    simp only [checkCBAxiom] at hchk
     intro x y hxy
-    have hy := (allNeighborsCheck_iff hadj hne r x _).mp (hchk x.val (Nat.zero_le _) x.isLt) y hxy
+    have hx := checkNodes_sound hchk x (fun xs hc => roleSourceNodes?_complete hadj hne r hc x y hxy)
+    have hy := (allNeighborsCheck_iff hadj hne r x _).mp hx y hxy
     exact (evalClassExpr_iff dm hadj hne rng y true (beq_iff_eq.mp hy)).mp rfl
   | functionalObjectProperty r =>
-    simp only [checkCBAxiom, allRangeSeq_iff] at hchk
+    simp only [checkCBAxiom] at hchk
     intro x y z hxy hxz
-    have hx := hchk x.val (Nat.zero_le _) x.isLt
+    have hx := checkNodes_sound hchk x (fun xs hc => roleSourceNodes?_complete hadj hne r hc x y hxy)
     have hnb := neighbors?_spec (dm := dm) hadj hne r x
     cases hnr : m.neighbors? r x.val with
     | some ys =>
@@ -1479,14 +1865,14 @@ private theorem checkCBAxiom_sound {dm : DatatypeMap} {m : CBCanonicalModel} {w 
       rw [hnr] at hx; simp only [decide_eq_true_eq] at hx
       exact Fin.ext (by omega)
   | inverseFunctionalObjectProperty r =>
-    simp only [checkCBAxiom, allRangeSeq_iff] at hchk
+    simp only [checkCBAxiom] at hchk
     intro x y z hyx hzx
-    have hx := hchk x.val (Nat.zero_le _) x.isLt
-    have hnb := neighbors?_spec (dm := dm) hadj hne r.converse x
     have hxy : objectHolds (m.toInterpretation dm hne) r.converse x y :=
       (objectHolds_converse _ r x y).mpr hyx
     have hxz : objectHolds (m.toInterpretation dm hne) r.converse x z :=
       (objectHolds_converse _ r x z).mpr hzx
+    have hx := checkNodes_sound hchk x (fun xs hc => roleSourceNodes?_complete hadj hne r.converse hc x y hxy)
+    have hnb := neighbors?_spec (dm := dm) hadj hne r.converse x
     cases hnr : m.neighbors? r.converse x.val with
     | some ys =>
       rw [hnr] at hx hnb
@@ -1588,16 +1974,18 @@ def buildCBCanonicalModel (o : Ontology) (norm : NormResult) (cert : CBCert) :
   if numNodes == 0 then
     return ({ numNodes := 0, nodeClasses := #[], outAdj := #[], inAdj := #[] }, {})
 
-  -- Populate `nodeClasses` and record singleton witness node per named class
+  -- Populate `nodeClasses`, `clsNodes` (strictly ascending by construction), and singleton witnesses
   let mut nodeClasses : Array (Std.HashSet IRI) := Array.replicate numNodes {}
+  let mut clsNodes : Std.HashMap IRI (Array Nat) := {}
   let mut witnessNode : Std.HashMap IRI Nat := {}
   for nid in [0:numNodes] do
     let h := newToOld[nid]!
     let mut clsSet : Std.HashSet IRI := {}
     for c in ctxDerived[h]! do
       if let some (.named iri) := norm.table.classes[c]? then
-        if iri != thing && iri != nothing then
+        if iri != thing && iri != nothing && !clsSet.contains iri then
           clsSet := clsSet.insert iri
+          clsNodes := clsNodes.insert iri ((clsNodes.getD iri #[]).push nid)
     nodeClasses := nodeClasses.set! nid clsSet
     let ctx := cert.contexts[h]!
     if ctx.size == 1 then
@@ -1622,17 +2010,24 @@ def buildCBCanonicalModel (o : Ontology) (norm : NormResult) (cert : CBCert) :
   let mut edgeSet : Std.HashSet (IRI × Nat × Nat) := {}
   let mut outAdj : Array (Std.HashMap IRI (Array Nat)) := Array.replicate numNodes {}
   let mut inAdj : Array (Std.HashMap IRI (Array Nat)) := Array.replicate numNodes {}
+  let mut activeOut : Std.HashMap IRI (Array Nat) := {}
+  let mut activeIn : Std.HashMap IRI (Array Nat) := {}
 
   let addEdge := fun (p : IRI) (u v : Nat)
       (edgeSet : Std.HashSet (IRI × Nat × Nat))
-      (outAdj inAdj : Array (Std.HashMap IRI (Array Nat))) =>
+      (outAdj inAdj : Array (Std.HashMap IRI (Array Nat)))
+      (activeOut activeIn : Std.HashMap IRI (Array Nat)) =>
     if p == topObjectProperty || p == bottomObjectProperty || edgeSet.contains (p, u, v) then
-      (edgeSet, outAdj, inAdj)
+      (edgeSet, outAdj, inAdj, activeOut, activeIn)
     else
       let es' := edgeSet.insert (p, u, v)
+      let hadOut := (outAdj[u]!).contains p
+      let hadIn := (inAdj[v]!).contains p
       let oa' := outAdj.modify u fun m => m.insert p ((m.getD p #[]).push v)
       let ia' := inAdj.modify v fun m => m.insert p ((m.getD p #[]).push u)
-      (es', oa', ia')
+      let ao' := if hadOut then activeOut else activeOut.insert p ((activeOut.getD p #[]).push u)
+      let ai' := if hadIn then activeIn else activeIn.insert p ((activeIn.getD p #[]).push v)
+      (es', oa', ia', ao', ai')
 
   for ((h, r), ks) in linksByHR.toList do
     if let some u := oldToNew[h]! then
@@ -1652,10 +2047,14 @@ def buildCBCanonicalModel (o : Ontology) (norm : NormResult) (cert : CBCert) :
         for k in maximalKs do
           if let some v := oldToNew[k]! then
             match op with
-            | .named p => (edgeSet, outAdj, inAdj) := addEdge p u v edgeSet outAdj inAdj
-            | .inverse p => (edgeSet, outAdj, inAdj) := addEdge p v u edgeSet outAdj inAdj
+            | .named p =>
+              (edgeSet, outAdj, inAdj, activeOut, activeIn) :=
+                addEdge p u v edgeSet outAdj inAdj activeOut activeIn
+            | .inverse p =>
+              (edgeSet, outAdj, inAdj, activeOut, activeIn) :=
+                addEdge p v u edgeSet outAdj inAdj activeOut activeIn
 
-  -- Close edges under RBox axioms of `o`
+  -- Close edges under RBox axioms of `o` (iterating only active role nodes)
   let mut rSub : List (ObjectProperty × ObjectProperty) := []
   let mut rChains : List (List ObjectProperty × ObjectProperty) := []
   let mut rRefl : List ObjectProperty := []
@@ -1686,9 +2085,10 @@ def buildCBCanonicalModel (o : Ontology) (norm : NormResult) (cert : CBCert) :
     match r with
     | .named p | .inverse p =>
       for u in [0:numNodes] do
-        (edgeSet, outAdj, inAdj) := addEdge p u u edgeSet outAdj inAdj
+        (edgeSet, outAdj, inAdj, activeOut, activeIn) :=
+          addEdge p u u edgeSet outAdj inAdj activeOut activeIn
 
-  let mut changed := true
+  let mut changed := !rSub.isEmpty || !rChains.isEmpty
   let mut rounds : Nat := 0
   while changed && rounds < 16 do
     changed := false
@@ -1697,40 +2097,58 @@ def buildCBCanonicalModel (o : Ontology) (norm : NormResult) (cert : CBCert) :
     for (r, s) in rSub do
       match r with
       | .named pr =>
-        for u in [0:numNodes] do
+        for u in activeOut.getD pr #[] do
           for v in (outAdj[u]!).getD pr #[] do
             match s with
-            | .named ps => (edgeSet, outAdj, inAdj) := addEdge ps u v edgeSet outAdj inAdj
-            | .inverse ps => (edgeSet, outAdj, inAdj) := addEdge ps v u edgeSet outAdj inAdj
+            | .named ps =>
+              (edgeSet, outAdj, inAdj, activeOut, activeIn) :=
+                addEdge ps u v edgeSet outAdj inAdj activeOut activeIn
+            | .inverse ps =>
+              (edgeSet, outAdj, inAdj, activeOut, activeIn) :=
+                addEdge ps v u edgeSet outAdj inAdj activeOut activeIn
       | .inverse pr =>
-        for u in [0:numNodes] do
+        for u in activeIn.getD pr #[] do
           for v in (inAdj[u]!).getD pr #[] do
             match s with
-            | .named ps => (edgeSet, outAdj, inAdj) := addEdge ps u v edgeSet outAdj inAdj
-            | .inverse ps => (edgeSet, outAdj, inAdj) := addEdge ps v u edgeSet outAdj inAdj
+            | .named ps =>
+              (edgeSet, outAdj, inAdj, activeOut, activeIn) :=
+                addEdge ps u v edgeSet outAdj inAdj activeOut activeIn
+            | .inverse ps =>
+              (edgeSet, outAdj, inAdj, activeOut, activeIn) :=
+                addEdge ps v u edgeSet outAdj inAdj activeOut activeIn
     for (rs, s) in rChains do
-      for u in [0:numNodes] do
-        let mut frontier : Array Nat := #[u]
-        for step in rs do
-          let mut nextF : Array Nat := #[]
-          let mut seenF : Std.HashSet Nat := {}
-          for cur in frontier do
-            let nbrs : Array Nat := match step with
-              | .named p => (outAdj[cur]!).getD p #[]
-              | .inverse p => (inAdj[cur]!).getD p #[]
-            for nxt in nbrs do
-              if !seenF.contains nxt then
-                seenF := seenF.insert nxt
-                nextF := nextF.push nxt
-          frontier := nextF
-          if frontier.isEmpty then break
-        for v in frontier do
-          match s with
-          | .named ps => (edgeSet, outAdj, inAdj) := addEdge ps u v edgeSet outAdj inAdj
-          | .inverse ps => (edgeSet, outAdj, inAdj) := addEdge ps v u edgeSet outAdj inAdj
+      match rs with
+      | [] => pure ()
+      | r0 :: _ =>
+        let startNodes : Array Nat := match r0 with
+          | .named p0 => activeOut.getD p0 #[]
+          | .inverse p0 => activeIn.getD p0 #[]
+        for u in startNodes do
+          let mut frontier : Array Nat := #[u]
+          for step in rs do
+            let mut nextF : Array Nat := #[]
+            let mut seenF : Std.HashSet Nat := {}
+            for cur in frontier do
+              let nbrs : Array Nat := match step with
+                | .named p => (outAdj[cur]!).getD p #[]
+                | .inverse p => (inAdj[cur]!).getD p #[]
+              for nxt in nbrs do
+                if !seenF.contains nxt then
+                  seenF := seenF.insert nxt
+                  nextF := nextF.push nxt
+            frontier := nextF
+            if frontier.isEmpty then break
+          for v in frontier do
+            match s with
+            | .named ps =>
+              (edgeSet, outAdj, inAdj, activeOut, activeIn) :=
+                addEdge ps u v edgeSet outAdj inAdj activeOut activeIn
+            | .inverse ps =>
+              (edgeSet, outAdj, inAdj, activeOut, activeIn) :=
+                addEdge ps v u edgeSet outAdj inAdj activeOut activeIn
     if edgeSet.size > beforeSz then changed := true
 
-  -- Strictly sort and deduplicate all adjacency lists
+  -- Strictly sort and deduplicate all adjacency lists and role source indices
   for u in [0:numNodes] do
     let mut om : Std.HashMap IRI (Array Nat) := {}
     for (r, ys) in (outAdj[u]!).toList do
@@ -1741,7 +2159,15 @@ def buildCBCanonicalModel (o : Ontology) (norm : NormResult) (cert : CBCert) :
       im := im.insert r (dedupSortNat ys)
     inAdj := inAdj.set! u im
 
-  return ({ numNodes := numNodes, nodeClasses := nodeClasses, outAdj := outAdj, inAdj := inAdj },
+  let mut roleOutNodes : Std.HashMap IRI (Array Nat) := {}
+  for (p, us) in activeOut.toList do
+    roleOutNodes := roleOutNodes.insert p (dedupSortNat us)
+  let mut roleInNodes : Std.HashMap IRI (Array Nat) := {}
+  for (p, vs) in activeIn.toList do
+    roleInNodes := roleInNodes.insert p (dedupSortNat vs)
+
+  return ({ numNodes := numNodes, nodeClasses := nodeClasses, outAdj := outAdj, inAdj := inAdj,
+            clsNodes := clsNodes, roleOutNodes := roleOutNodes, roleInNodes := roleInNodes },
           witnessNode)
 
 /-! ### 6. Zero-Tableau Complete Classifier for Pure Horn-$\mathcal{SHIQ}$ (`classifyFastCB`) -/
@@ -1806,7 +2232,9 @@ def classifyFastCB (o : Ontology) (namedClasses : List IRI) (numWorkers : Nat :=
   let norm := extractHornSHIQ o
   if !norm.isPureHornSHIQ then none
   else
-    let cert := saturateHornSHI norm maxContexts maxCtxSize maxLinks
+    let effMaxContexts := max maxContexts (norm.table.classes.size * 4)
+    let effMaxLinks := max maxLinks (norm.table.classes.size * 32)
+    let cert := saturateHornSHI norm effMaxContexts maxCtxSize effMaxLinks
     if !checkCBSound norm cert numWorkers then none
     else
       let cbUnsats := extractNamedUnsats norm cert

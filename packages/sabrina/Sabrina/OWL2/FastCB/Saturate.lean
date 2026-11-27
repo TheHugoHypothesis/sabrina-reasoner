@@ -1578,11 +1578,15 @@ def extractNamedUnsats (norm : NormResult) (cert : CBCert) : List IRI :=
     else none
 
 /-- Run Horn-$\mathcal{SHIQ}$ extraction, Horn-$\mathcal{SHI}$ saturation, and parallel
-    kernel-verified soundness checking on `o`. Only returns facts if `checkCBSound` passes. -/
+    kernel-verified soundness checking on `o`. Only returns facts if `checkCBSound` passes.
+    Automatically scales context and link budgets so all named-class singleton contexts
+    are always covered even on 10k–50k class non-Horn ontologies. -/
 def runFastCB (o : Ontology) (numWorkers : Nat := 8)
     (maxContexts : Nat := 4096) (maxCtxSize : Nat := 10) (maxLinks : Nat := 32768) : FastCBResult :=
   let norm := extractHornSHIQ o
-  let cert := saturateHornSHI norm maxContexts maxCtxSize maxLinks
+  let effMaxContexts := max maxContexts (norm.namedClassIds.size + 4096)
+  let effMaxLinks := max maxLinks (norm.namedClassIds.size * 8)
+  let cert := saturateHornSHI norm effMaxContexts maxCtxSize effMaxLinks
   if checkCBSound norm cert numWorkers then
     { subs := extractNamedSubs norm cert
       unsats := extractNamedUnsats norm cert
@@ -1627,12 +1631,17 @@ theorem runFastCB_subs_sound {dm : DatatypeMap} {o : Ontology}
     have ⟨hwf, hax, _⟩ := extractHornSHIQ_sound (i := j) hsat
     have ⟨_, hSubHolds, _⟩ := checkCBSound_holds hwf hax hcheck
     obtain ⟨idx, hidxLt, hidxEq⟩ := List.getElem_of_mem hsfMem
-    have hidxLt' : idx < (saturateHornSHI (extractHornSHIQ o) maxContexts maxCtxSize maxLinks).subFacts.size := by
+    let cert := saturateHornSHI (extractHornSHIQ o)
+      (max maxContexts ((extractHornSHIQ o).namedClassIds.size + 4096)) maxCtxSize
+      (max maxLinks ((extractHornSHIQ o).namedClassIds.size * 8))
+    have hidxLt' : idx < cert.subFacts.size := by
       simpa using hidxLt
-    have hsfGet : (saturateHornSHI (extractHornSHIQ o) maxContexts maxCtxSize maxLinks).subFacts[idx]? = some sf := by
+    have hsfGet : cert.subFacts[idx]? = some sf := by
       rw [Array.getElem?_eq_getElem hidxLt']; exact congrArg some hidxEq
     have hsfH := hSubHolds idx sf hsfGet
-    cases hctx : (saturateHornSHI (extractHornSHIQ o) maxContexts maxCtxSize maxLinks).contexts[sf.h]? with
+    cases hctx : (saturateHornSHI (extractHornSHIQ o)
+        (max maxContexts ((extractHornSHIQ o).namedClassIds.size + 4096)) maxCtxSize
+        (max maxLinks ((extractHornSHIQ o).namedClassIds.size * 8))).contexts[sf.h]? with
     | none => simp [hctx] at hsfEq
     | some ctx =>
       simp only [hctx] at hsfEq
@@ -1682,15 +1691,20 @@ theorem runFastCB_unsats_sound {dm : DatatypeMap} {o : Ontology}
     have ⟨hwf, hax, _⟩ := extractHornSHIQ_sound (i := j) hsat
     have ⟨_, hSubHolds, _⟩ := checkCBSound_holds hwf hax hcheck
     obtain ⟨idx, hidxLt, hidxEq⟩ := List.getElem_of_mem hsfMem
-    have hidxLt' : idx < (saturateHornSHI (extractHornSHIQ o) maxContexts maxCtxSize maxLinks).subFacts.size := by
+    let cert := saturateHornSHI (extractHornSHIQ o)
+      (max maxContexts ((extractHornSHIQ o).namedClassIds.size + 4096)) maxCtxSize
+      (max maxLinks ((extractHornSHIQ o).namedClassIds.size * 8))
+    have hidxLt' : idx < cert.subFacts.size := by
       simpa using hidxLt
-    have hsfGet : (saturateHornSHI (extractHornSHIQ o) maxContexts maxCtxSize maxLinks).subFacts[idx]? = some sf := by
+    have hsfGet : cert.subFacts[idx]? = some sf := by
       rw [Array.getElem?_eq_getElem hidxLt']; exact congrArg some hidxEq
     have hsfH := hSubHolds idx sf hsfGet
     split at hsfEq
     · rename_i hc1
       have hc1' : sf.c = 1 := beq_iff_eq.mp hc1
-      cases hctx : (saturateHornSHI (extractHornSHIQ o) maxContexts maxCtxSize maxLinks).contexts[sf.h]? with
+      cases hctx : (saturateHornSHI (extractHornSHIQ o)
+        (max maxContexts ((extractHornSHIQ o).namedClassIds.size + 4096)) maxCtxSize
+        (max maxLinks ((extractHornSHIQ o).namedClassIds.size * 8))).contexts[sf.h]? with
       | none => simp [hctx] at hsfEq
       | some ctx =>
         simp only [hctx] at hsfEq
