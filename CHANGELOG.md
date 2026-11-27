@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.2.0 (2026-11-27)
+
+### Added
+- **Kernel-verified DL-Safe SWRL rules (`SWRL.lean`, `SWRLBuiltins.lean`, `SWRLReduction.lean`, `FunctionalSyntax.lean`, `RDF/OWLMapping.lean`, `RDF/Serialize.lean`, `StrictTyping.lean`, `Materialize.lean`, `CLI/OFNQuery.lean`, `CLI/SessionMain.lean`):**
+  - Orthogonal DL-Safe SWRL AST, Direct Semantics, and DL-safety validator preserving `Sabrina.OWL2.Axiom` compatibility.
+  - W3C Functional-Style Syntax (`DLSafeRule`), Turtle 1.1, and RDF/XML 1.1 (`swrl:Imp`) parsing and serialization with kernel-verified RDF round-trip (`owl2_rdf_swrl_roundtrip`).
+  - Kernel-verified local data-variable and facet built-in roll-up (`rollupOneDataVar_holds_iff`), body-only individual-variable tree roll-up (`rollupOneIndVar_holds_iff`), direct single-individual grounding (`encodeSingleIndGroundRule_holds_iff`), nominal-guarded unary encoding (`encodeUnaryRule_holds_iff`), smart partial grounding (`encodeDLSafeRule_holds_iff`, `groundAllRules_sat_iff`, `groundAllRules_entails_iff`, `decideRealWithSWRL_iff`), and verified lazy CEGAR grounding (`decideWithSWRLFast?`).
+  - Multi-rule concrete fixpoint chaining across arbitrary rule ordering and data subproperties, plus rule-level source-property pre-filtering.
+  - Extended `swrlb:*` built-in coverage: exact arithmetic (including `pow` and `roundHalfToEven`), string operations (including `normalizeSpace`, `translate`, `substringBefore`, `substringAfter`, and regex `replace` with capture groups and ordered alternation), temporal/duration built-ins, and unconditional `builtinToDataRange_real_iff` for order, `matches`, and `stringLength`.
+  - Inferred `DataPropertyAssertion` materialization (with opt-out option), SWRL entity-declaration checks under `--strict-owl2dl`, and SWRL-aware minimal justifications surfacing `DLSafeRule(...)`.
+- **Non-EL tableau and justification speedups (`SROIQD/Model.lean`, `SROIQD/Search.lean`, `SROIQD/Termination/SROIQSearch.lean`, `Classification.lean`, `FastClassification.lean`, `Justification.lean`):**
+  - Generalized GCI absorption (`absorptionPremises_sound`) to arbitrary $n$-ary positive atomic/nominal/self/data-value conjunctions (`A₁ ⊓ … ⊓ Aₙ ⊑ C`) and nominal-anchored / disjunctive nominal-guarded axioms (`nominalDisj?_sound`, `nominalGuard?_sound`), with direct label and ABox-edge existential triggering and deferred splitting.
+  - Dependency-directed backjumping in both bounded and exact tableaux.
+  - Parallel non-EL TBox classification, ABox realization, and batch-parallel Reiter Hitting-Set Tree (HST) justification enumeration via `Task.spawn`, with kernel-proved worker-count invariance (`findAllUnsatJustificationsParWith_workers_eq`, `findAllJustificationsParWith_workers_eq`) and soundness (`findAllUnsatJustificationsParReal_sound`, `findAllJustificationsParReal_sound`).
+
+### Changed
+- Scaled default SROIQ(D) world limits (`Limits.forProblem`) with input individuals.
+- Updated package versions and `CITATION.cff` to `1.2.0`; expanded `scripts/verify_axioms.py` to 84 headline theorems.
+
 ## 1.1.1 (2026-11-26)
 
 ### Added

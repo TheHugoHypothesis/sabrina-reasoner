@@ -479,4 +479,112 @@ private def cegarBaseOnt : Ontology :=
   code == 0 && jsonFieldStr j "verdict" == "EXPLAINED" &&
   (j.compress.splitOn "DLSafeRule(").length ≥ 2
 
+/-! ### 9. Extended Built-Ins, Multi-Rule Fixpoint Chaining, Data-Property Materialization, and Strict SWRL Typing -/
+
+#guard evalBuiltinOutput? "http://www.w3.org/2003/11/swrlb#replace"
+  [.string "foo-123 bar-456", .string "([a-z]+)-([0-9]+)", .string "$2:$1"] ==
+  some (.string "123:foo 456:bar")
+
+#guard evalBuiltinOutput? "http://www.w3.org/2003/11/swrlb#replace"
+  [.string "cat dog bird", .string "cat|bird", .string "pet"] ==
+  some (.string "pet dog pet")
+
+#guard evalBuiltinOutput? "http://www.w3.org/2003/11/swrlb#pow"
+  [.number 2, .number 10] == some (.number 1024)
+
+#guard evalBuiltinOutput? "http://www.w3.org/2003/11/swrlb#roundHalfToEven"
+  [.number (5 / 2)] == some (.number 2)
+
+#guard evalBuiltinOutput? "http://www.w3.org/2003/11/swrlb#normalizeSpace"
+  [.string "  alpha \t\n  beta  "] == some (.string "alpha beta")
+
+#guard evalBuiltinOutput? "http://www.w3.org/2003/11/swrlb#translate"
+  [.string "a-b-c", .string "abc-", .string "XYZ"] == some (.string "XYZ")
+
+#guard evalBuiltinOutput? "http://www.w3.org/2003/11/swrlb#substringBefore"
+  [.string "left:right", .string ":"] == some (.string "left")
+
+#guard evalBuiltinOutput? "http://www.w3.org/2003/11/swrlb#substringAfter"
+  [.string "left:right", .string ":"] == some (.string "right")
+
+-- Reverse-ordered two-rule concrete chain with a data subproperty supplying the input value
+private def chainedDataSWRLDoc : String := "
+Prefix(ex:=<http://example.org/swrl#>)
+Prefix(var:=<urn:swrl:var#>)
+Prefix(xsd:=<http://www.w3.org/2001/XMLSchema#>)
+Prefix(swrlb:=<http://www.w3.org/2003/11/swrlb#>)
+Ontology(<http://example.org/swrl/chain>
+  Declaration(DataProperty(ex:rawScore))
+  Declaration(DataProperty(ex:score))
+  Declaration(DataProperty(ex:scaled))
+  Declaration(DataProperty(ex:finalScore))
+  Declaration(NamedIndividual(ex:item1))
+  SubDataPropertyOf(ex:rawScore ex:score)
+  DataPropertyAssertion(ex:rawScore ex:item1 \"3\"^^xsd:integer)
+  DLSafeRule(
+    Body(
+      DataPropertyAtom(ex:scaled Variable(var:x) Variable(var:m))
+      BuiltInAtom(swrlb:add Variable(var:f) Variable(var:m) \"1\"^^xsd:integer)
+    )
+    Head(
+      DataPropertyAtom(ex:finalScore Variable(var:x) Variable(var:f))
+    )
+  )
+  DLSafeRule(
+    Body(
+      DataPropertyAtom(ex:score Variable(var:x) Variable(var:s))
+      BuiltInAtom(swrlb:multiply Variable(var:m) Variable(var:s) \"2\"^^xsd:integer)
+    )
+    Head(
+      DataPropertyAtom(ex:scaled Variable(var:x) Variable(var:m))
+    )
+  )
+)
+"
+
+#guard
+  let (c, j) := OFNQuery.run (Json.arr #[
+    toJson OFNQuery.requestFormat, toJson "chain-pos", toJson chainedDataSWRLDoc,
+    toJson "DataPropertyAssertion(ex:finalScore ex:item1 \"7\"^^xsd:integer)"
+  ])
+  c == 0 && jsonFieldStr j "verdict" == "ENTAILED"
+
+#guard
+  let expectedFinal : Axiom :=
+    .dataAssertion (ex "finalScore") (.named (ex "item1"))
+      { lexical := "7", datatype := "http://www.w3.org/2001/XMLSchema#integer" }
+  let (cOn, jOn, txtOn) := OFNQuery.runMaterializeDocument "chain-mat-on" chainedDataSWRLDoc [] false .ofn {}
+  let (cOff, jOff, txtOff) := OFNQuery.runMaterializeDocument "chain-mat-off" chainedDataSWRLDoc [] false .ofn
+    { includeDataPropertyAssertions := false }
+  match txtOn, txtOff with
+  | some sOn, some sOff =>
+    cOn == 0 && jsonFieldStr jOn "verdict" == "MATERIALIZED" &&
+    cOff == 0 && jsonFieldStr jOff "verdict" == "MATERIALIZED" &&
+    match parseDocument sOn, parseDocument sOff with
+    | .ok dOn, .ok dOff =>
+      dOn.ontology.contains expectedFinal && !dOff.ontology.contains expectedFinal
+    | _, _ => false
+  | _, _ => false
+
+-- Strict OWL 2 DL typing rejects an undeclared entity appearing only inside a SWRL rule
+private def undeclaredSWRLDoc : String := "
+Prefix(ex:=<http://example.org/swrl#>)
+Prefix(var:=<urn:swrl:var#>)
+Ontology(<http://example.org/swrl/undecl>
+  Declaration(Class(ex:A))
+  Declaration(NamedIndividual(ex:i1))
+  ClassAssertion(ex:A ex:i1)
+  DLSafeRule(
+    Body(ClassAtom(ex:A Variable(var:x)))
+    Head(ClassAtom(ex:UndeclaredOnlyInRule Variable(var:x)))
+  )
+)
+"
+
+#guard
+  match parseDocument undeclaredSWRLDoc with
+  | .ok doc =>
+    (StrictTyping.diagnoseStrictTypedOWL2DLWithRules doc.declarations doc.annotationAxioms doc.ontology doc.rules).isSome
+  | .error _ => false
+
 end SabrinaTests.SWRLTests
