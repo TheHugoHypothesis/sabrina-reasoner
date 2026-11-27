@@ -911,7 +911,12 @@ def classifyOntologyFastWithModelRuntime (o : Ontology)
           | none => enhanced ()
       else enhanced ()
     | none => enhanced ()
-  else enhanced ()
+  else
+    if initModel?.isNone then
+      match FastCB.classifyFastCB o namedClasses numWorkers with
+      | some h => some h
+      | none => enhanced ()
+    else enhanced ()
 
 def classifyOntologyFastRuntime (o : Ontology) (decls : List FunctionalSyntax.EntityDecl := [])
     (numWorkers : Nat := 8) (auxiliaryClass? : Option IRI := none) :
@@ -926,6 +931,7 @@ theorem classifyOntologyFastRuntime_nonEL_workers_eq (o : Ontology)
       classifyOntologyFastRuntime o decls 1 auxiliaryClass? := by
   simp only [classifyOntologyFastRuntime, classifyOntologyFastWithModelRuntime,
     classifyEnhancedRuntimeCore, beq_iff_eq, h, ↓reduceIte,
+    FastCB.classifyFastCB_workers_eq,
     FastCB.runFastCB_workers_eq,
     seedKPFromBatchModels, checkComponentBatches, mapIndependent_eq,
     sweepKPSatParallel_eq, verifyKPPairsParallel_eq]

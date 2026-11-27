@@ -1,9 +1,21 @@
 # Changelog
 
-## Unreleased
+## 1.2.2 (2026-11-27)
 
+### Added
+- **Kernel-verified Horn-$\mathcal{SHIQ}$ consequence-based saturation engine & zero-tableau complete classifier (`FastCB/Normalize.lean`, `FastCB/Saturate.lean`, `FastCB/Canonical.lean`, `FastCB.lean`, `tests/SabrinaTests/FastCBTests.lean`):**
+  - Integer-interned Horn-$\mathcal{SHIQ}$ normalizer (`extractHornSHIQ`, `extractHornSHIQ_sound`) with converse-paired role IDs, binary role-chain decomposition, Kazakov transitive-universal expansion (`expandTransAll`), and `isPureHornSHIQ` detection.
+  - Worklist-driven Horn-$\mathcal{SHIQ}$ context saturation (`saturateHornSHI`) covering conjunction, existential, universal, inverse universal, role hierarchy/chains/reflexivity, bottom propagation, and `maxOne` sibling-merge (`LinkJust.siblingMerge`) and inverse parent-child merge (`SubJust.parentMerge`) rules for `FunctionalObjectProperty`, `InverseFunctionalObjectProperty`, and qualified `≤1 R.B`/`=1 R.B`, backed by parallel linear-time certificate verification (`checkCBSound`, `checkCBSound_holds`, `runFastCB_subs_sound`, `runFastCB_unsats_sound`, `runFastCB_workers_eq`).
+  - Parallel kernel-verified CB canonical model checker (`CBCanonicalModel`, `checkCBCanonicalModel`, `checkCBCanonicalModel_sound`, `checkCBCanonicalModel_counter_sub`, `checkCBCanonicalModel_witness_sat`) and zero-tableau complete classifier `classifyFastCB` (`classifyFastCB_workers_eq`) wired ahead of KP enhanced traversal for pure Horn-$\mathcal{SHIQ}$ TBoxes (2,008-class Horn-$\mathcal{SHIQ}$ TBox classified in 0.65 s / 84 MB; 5,008-class in 3.82 s / 96 MB).
+  - Pre-seeding of KP enhanced traversal from verified CB subsumption and unsatisfiability lower bounds on general non-Horn ontologies.
+- **Fast ABox classification, realization, and materialization (`FastClassification/Runtime.lean`, `Materialize.lean`, `SROIQD/Search.lean`):**
+  - TBox disjoint-component fast path (`TBoxFastCtx`, `counterWithoutIndividuals`, nominal-right GCI simplification, parallel component batch checking) for batch seeding, class sat/subsumption queries, and `SubObjectPropertyOf` on large ABoxes.
+  - Strictly monotone positive ABox forward-chaining closure (`computePositiveABoxClosure`), 2-hop ego-neighborhood monotonicity locality (`ABoxEgoIndex`), kernel-checked soft-negative countermodel refutation (`proposeSoftIndividualModel`), and two-phase role witness harvesting.
+
+### Changed
 - Removed the fragment-specific JSON query formats. Use the OWL 2 document or unified SROIQ(D) query interface. JSON query results use `sabrina-result-v1`.
-- Split fast classification into EL, certified reference, and optimized runtime modules and removed unused private declarations.
+- Split fast classification into EL (`FastClassification/EL.lean`), certified reference (`FastClassification/Reference.lean`), and optimized runtime (`FastClassification/Runtime.lean`) modules and removed unused private declarations.
+- Updated package versions, `CITATION.cff`, `ROADMAP.md`, and `scripts/verify_axioms.py` (93 headline theorems) for `v1.2.2`.
 
 ## 1.2.1 (2026-11-27)
 

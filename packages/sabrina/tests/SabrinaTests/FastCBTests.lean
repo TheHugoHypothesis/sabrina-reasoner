@@ -121,4 +121,76 @@ private def ontChain3 : Ontology := [
 
 #guard hasSub (runFastCB ontChain3 1) "A" "E"
 
+-- 12. H.4a FunctionalObjectProperty sibling merge (`Functional(r)`, `A ⊑ ∃r.B`, `A ⊑ ∃r.C`, `B ⊓ C ⊑ D`, `∃r.D ⊑ E`)
+private def ontFuncSibling : Ontology := [
+  .functionalObjectProperty (.named "r"),
+  .subClassOf (.named "A") (.objectSome (.named "r") (.named "B")),
+  .subClassOf (.named "A") (.objectSome (.named "r") (.named "C")),
+  .subClassOf (.intersection (.named "B") (.named "C")) (.named "D"),
+  .subClassOf (.objectSome (.named "r") (.named "D")) (.named "E")
+]
+
+#guard hasSub (runFastCB ontFuncSibling 1) "A" "E"
+#guard (runFastCB ontFuncSibling 1).isPureHornSHIQ
+
+-- 13. H.4a Qualified `objectMax 1` sibling merge (`A ⊑ ≤1 r.B`, `A ⊑ ∃r.(B ⊓ C)`, `A ⊑ ∃r.(B ⊓ D)`, `C ⊓ D ⊑ E`)
+private def ontMaxOneQCR : Ontology := [
+  .subClassOf (.named "A") (.objectMax 1 (.named "r") (.named "B")),
+  .subClassOf (.named "A") (.objectSome (.named "r") (.intersection (.named "B") (.named "C"))),
+  .subClassOf (.named "A") (.objectSome (.named "r") (.intersection (.named "B") (.named "D"))),
+  .subClassOf (.intersection (.named "C") (.named "D")) (.named "E"),
+  .subClassOf (.objectSome (.named "r") (.named "E")) (.named "F")
+]
+
+#guard hasSub (runFastCB ontMaxOneQCR 1) "A" "F"
+#guard (runFastCB ontMaxOneQCR 1).isPureHornSHIQ
+
+-- 14. H.4a InverseFunctionalObjectProperty parent-child merge (`InverseFunctional(r)`, `A ⊑ ∃r.B`, `B ⊑ ∃r⁻.C` ⇒ `A ⊑ C`)
+private def ontInvFuncParent : Ontology := [
+  .inverseFunctionalObjectProperty (.named "r"),
+  .subClassOf (.named "A") (.objectSome (.named "r") (.named "B")),
+  .subClassOf (.named "B") (.objectSome (.inverse "r") (.named "C"))
+]
+
+#guard hasSub (runFastCB ontInvFuncParent 1) "A" "C"
+#guard (runFastCB ontInvFuncParent 1).isPureHornSHIQ
+
+-- 15. H.4a `objectExact 1` sibling merge + bottom propagation (`A ⊑ =1 r.B`, `A ⊑ ∃r.C`, `C ⊑ B`, `Disjoint(B, C)` ⇒ `A ⊑ ⊥`)
+private def ontExactOne : Ontology := [
+  .subClassOf (.named "A") (.objectExact 1 (.named "r") (.named "B")),
+  .subClassOf (.named "A") (.objectSome (.named "r") (.named "C")),
+  .subClassOf (.named "C") (.named "B"),
+  .subClassOf (.intersection (.named "B") (.named "C")) (.named "D"),
+  .subClassOf (.objectSome (.named "r") (.named "D")) (.named "E")
+]
+
+#guard hasSub (runFastCB ontExactOne 1) "A" "E"
+
+-- 16. H.4b Zero-tableau complete classification (`classifyFastCB` returns `some h`) on pure Horn-SHI & Horn-SHIQ
+private def checkCBComplete (o : Ontology) (cls : List IRI) (sub : IRI × IRI) (notSub : IRI × IRI) : Bool :=
+  match classifyFastCB o cls 1 with
+  | none => false
+  | some h =>
+    h.consistent &&
+    h.subsumptions.contains sub &&
+    !h.subsumptions.contains notSub
+
+#guard checkCBComplete ontExAll ["A", "B", "C", "D", "E"] ("A", "E") ("E", "A")
+#guard checkCBComplete ontInvAll ["A", "B", "C"] ("A", "C") ("C", "A")
+#guard checkCBComplete ontTransAll ["A", "B", "C", "D", "E", "X"] ("A", "E") ("E", "A")
+#guard checkCBComplete ontDomRange ["A", "Dom", "Rng", "Back"] ("A", "Back") ("Back", "A")
+#guard checkCBComplete ontReflAll ["A", "B"] ("A", "B") ("B", "A")
+#guard checkCBComplete ontFuncSibling ["A", "B", "C", "D", "E"] ("A", "E") ("E", "A")
+#guard checkCBComplete ontMaxOneQCR ["A", "B", "C", "D", "E", "F"] ("A", "F") ("F", "A")
+#guard checkCBComplete ontInvFuncParent ["A", "B", "C"] ("A", "C") ("C", "A")
+#guard checkCBComplete ontExactOne ["A", "B", "C", "D", "E"] ("A", "E") ("E", "A")
+
+-- 17. H.4b Unsatisfiable class handled completely by `classifyFastCB`
+#guard match classifyFastCB ontBotProp ["A", "B", "C"] 1 with
+  | some h => h.consistent && h.unsatisfiable.contains "A" && !h.unsatisfiable.contains "B"
+  | none => false
+
+-- 18. H.4b Non-Horn ontology returns `none` cleanly (falls back to KP)
+#guard (classifyFastCB ontMixed ["X", "Y", "Z", "A", "B", "C"] 1).isNone
+
 end SabrinaTests.FastCBTests

@@ -61,6 +61,7 @@ inductive SubJust where
   | invAll (axIdx linkIdx rfIdx subKIdx : Nat)
   | botLink (linkIdx subKBotIdx : Nat)
   | reflAll (reflAxIdx rfIdx allAxIdx subAIdx : Nat)
+  | parentMerge (maxAxIdx link1Idx rf1Idx subHBIdx subKAIdx link2Idx rf2Idx subK2BIdx subK2CIdx : Nat)
   deriving DecidableEq, Repr, Inhabited
 
 /-- A certified context subsumption `⋀ contexts[h] ⊑ c` with rank-stratified justification. -/
@@ -77,6 +78,7 @@ inductive LinkJust where
   | allProp (prevLinkIdx : Nat) (allPrems : Array (Nat × Nat × Nat))
   | chainComp (axIdx link1Idx rf1Idx link2Idx rf2Idx : Nat)
   | reflLink (reflAxIdx rfIdx : Nat)
+  | siblingMerge (maxAxIdx subAIdx link1Idx rf1Idx subK1BIdx link2Idx rf2Idx subK2BIdx : Nat)
   deriving DecidableEq, Repr, Inhabited
 
 /-- A certified existential context link `⋀ contexts[h] ⊑ ∃r.(⋀ contexts[k])`. -/
@@ -214,6 +216,23 @@ def checkSubFact (norm : NormResult) (cert : CBCert) (idx : Nat) : Bool :=
         b == sf.c && rf.r == r0 && rf.s == s &&
         sfA.h == sf.h && sfA.c == a && sfA.rank < sf.rank
       | _, _, _, _ => false
+    | .parentMerge maxAxIdx link1Idx rf1Idx subHBIdx subKAIdx link2Idx rf2Idx subK2BIdx subK2CIdx =>
+      match norm.axioms[maxAxIdx]?, cert.linkFacts[link1Idx]?, cert.roleFacts[rf1Idx]?,
+            cert.subFacts[subHBIdx]?, cert.subFacts[subKAIdx]?,
+            cert.linkFacts[link2Idx]?, cert.roleFacts[rf2Idx]?,
+            cert.subFacts[subK2BIdx]?, cert.subFacts[subK2CIdx]? with
+      | some (.maxOne a s b), some l1, some rf1, some sfHB, some sfKA,
+        some l2, some rf2, some sfK2B, some sfK2C =>
+        l1.h == sf.h && l1.rank < sf.rank &&
+        rf1.r == l1.r && rf1.s == invRole s &&
+        sfHB.h == sf.h && sfHB.c == b && sfHB.rank < sf.rank &&
+        sfKA.h == l1.k && sfKA.c == a && sfKA.rank < sf.rank &&
+        l2.h == l1.k && l2.rank < sf.rank &&
+        rf2.r == l2.r && rf2.s == s &&
+        sfK2B.h == l2.k && sfK2B.c == b && sfK2B.rank < sf.rank &&
+        sfK2C.h == l2.k && sfK2C.c == sf.c && sfK2C.rank < sf.rank &&
+        (cert.contexts[l1.k]?).isSome && (cert.contexts[l2.k]?).isSome
+      | _, _, _, _, _, _, _, _, _ => false
 
 /-- Check a single `LinkFact` at index `idx` (strictly rank-decreasing premises). -/
 def checkLinkFact (norm : NormResult) (cert : CBCert) (idx : Nat) : Bool :=
@@ -257,6 +276,24 @@ def checkLinkFact (norm : NormResult) (cert : CBCert) (idx : Nat) : Bool :=
         | some (.roleRefl r0), some rf =>
           lf.k == lf.h && rf.r == r0 && rf.s == lf.r
         | _, _ => false
+      | .siblingMerge maxAxIdx subAIdx link1Idx rf1Idx subK1BIdx link2Idx rf2Idx subK2BIdx =>
+        match norm.axioms[maxAxIdx]?, cert.subFacts[subAIdx]?,
+              cert.linkFacts[link1Idx]?, cert.roleFacts[rf1Idx]?, cert.subFacts[subK1BIdx]?,
+              cert.linkFacts[link2Idx]?, cert.roleFacts[rf2Idx]?, cert.subFacts[subK2BIdx]? with
+        | some (.maxOne a s b), some sfA, some l1, some rf1, some sfK1B,
+          some l2, some rf2, some sfK2B =>
+          match cert.contexts[l1.k]?, cert.contexts[l2.k]? with
+          | some ctxK1, some ctxK2 =>
+            sfA.h == lf.h && sfA.c == a && sfA.rank < lf.rank &&
+            l1.h == lf.h && l1.r == lf.r && l1.rank < lf.rank &&
+            rf1.r == l1.r && rf1.s == s &&
+            sfK1B.h == l1.k && sfK1B.c == b && sfK1B.rank < lf.rank &&
+            l2.h == lf.h && l2.rank < lf.rank &&
+            rf2.r == l2.r && rf2.s == s &&
+            sfK2B.h == l2.k && sfK2B.c == b && sfK2B.rank < lf.rank &&
+            ctxK.all fun c => ctxK1.contains c || ctxK2.contains c
+          | _, _ => false
+        | _, _, _, _, _, _, _, _ => false
 
 /-- Parallel linear-time soundness verifier for a consequence-based derivation certificate. -/
 def checkCBSound (norm : NormResult) (cert : CBCert) (numWorkers : Nat := 8) : Bool :=
@@ -564,6 +601,64 @@ theorem checkCBSound_holds {dm : DatatypeMap} {norm : NormResult} {cert : CBCert
                       exact hallA x hxa x hsxx
                     | _ => cases hchk
                   | _ => cases hchk
+        | parentMerge maxAxIdx link1Idx rf1Idx subHBIdx subKAIdx link2Idx rf2Idx subK2BIdx subK2CIdx =>
+          simp only [hj] at hchk
+          cases hgetM : norm.axioms[maxAxIdx]? with
+          | none => simp [hgetM] at hchk
+          | some axM =>
+            cases hgetL1 : cert.linkFacts[link1Idx]? with
+            | none => simp [hgetM, hgetL1] at hchk
+            | some l1 =>
+              cases hgetRf1 : cert.roleFacts[rf1Idx]? with
+              | none => simp [hgetM, hgetL1, hgetRf1] at hchk
+              | some rf1 =>
+                cases hgetHB : cert.subFacts[subHBIdx]? with
+                | none => simp [hgetM, hgetL1, hgetRf1, hgetHB] at hchk
+                | some sfHB =>
+                  cases hgetKA : cert.subFacts[subKAIdx]? with
+                  | none => simp [hgetM, hgetL1, hgetRf1, hgetHB, hgetKA] at hchk
+                  | some sfKA =>
+                    cases hgetL2 : cert.linkFacts[link2Idx]? with
+                    | none => simp [hgetM, hgetL1, hgetRf1, hgetHB, hgetKA, hgetL2] at hchk
+                    | some l2 =>
+                      cases hgetRf2 : cert.roleFacts[rf2Idx]? with
+                      | none => simp [hgetM, hgetL1, hgetRf1, hgetHB, hgetKA, hgetL2, hgetRf2] at hchk
+                      | some rf2 =>
+                        cases hgetK2B : cert.subFacts[subK2BIdx]? with
+                        | none => simp [hgetM, hgetL1, hgetRf1, hgetHB, hgetKA, hgetL2, hgetRf2, hgetK2B] at hchk
+                        | some sfK2B =>
+                          cases hgetK2C : cert.subFacts[subK2CIdx]? with
+                          | none => simp [hgetM, hgetL1, hgetRf1, hgetHB, hgetKA, hgetL2, hgetRf2, hgetK2B, hgetK2C] at hchk
+                          | some sfK2C =>
+                            simp only [hgetM, hgetL1, hgetRf1, hgetHB, hgetKA, hgetL2, hgetRf2, hgetK2B, hgetK2C] at hchk
+                            cases axM with
+                            | maxOne a s b =>
+                              simp only [Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq,
+                                Option.isSome_iff_exists, and_assoc] at hchk
+                              obtain ⟨hl1h, hl1r, hrf1r, hrf1s, hhbH, hhbC, hhbR,
+                                hkaH, hkaC, hkaR, hl2h, hl2r, hrf2r, hrf2s,
+                                hk2bH, hk2bC, hk2bR, hk2cH, hk2cC, hk2cR,
+                                ⟨ctxK1, hctxK1⟩, ⟨ctxK2, hctxK2⟩⟩ := hchk
+                              obtain ⟨y, hr1y, hyK1⟩ :=
+                                hlinkLT link1Idx l1 hgetL1 (hrk ▸ hl1r) ctxH ctxK1 (hl1h.symm ▸ hctxH) hctxK1 x hx
+                              have hsyx := hroles rf1Idx rf1 hgetRf1 x y (hrf1r.symm ▸ hr1y)
+                              rw [hrf1s, CBTable.roleOf_invRole hwf i s x y] at hsyx
+                              have hxb := hsubLT subHBIdx sfHB hgetHB (hrk ▸ hhbR) ctxH (hhbH.symm ▸ hctxH) x hx
+                              rw [hhbC] at hxb
+                              have hya := hsubLT subKAIdx sfKA hgetKA (hrk ▸ hkaR) ctxK1 (hkaH.symm ▸ hctxK1) y hyK1
+                              rw [hkaC] at hya
+                              obtain ⟨z, hr2z, hzK2⟩ :=
+                                hlinkLT link2Idx l2 hgetL2 (hrk ▸ hl2r) ctxK1 ctxK2 (hl2h.symm ▸ hctxK1) hctxK2 y hyK1
+                              have hsyz := hroles rf2Idx rf2 hgetRf2 y z (hrf2r.symm ▸ hr2z)
+                              rw [hrf2s] at hsyz
+                              have hzb := hsubLT subK2BIdx sfK2B hgetK2B (hrk ▸ hk2bR) ctxK2 (hk2bH.symm ▸ hctxK2) z hzK2
+                              rw [hk2bC] at hzb
+                              have hzc := hsubLT subK2CIdx sfK2C hgetK2C (hrk ▸ hk2cR) ctxK2 (hk2cH.symm ▸ hctxK2) z hzK2
+                              rw [hk2cC] at hzc
+                              have hmax := hax (.maxOne a s b) (mem_toList_of_getElem? hgetM)
+                              have hxz : x = z := hmax y hya x z hsyx hxb hsyz hzb
+                              exact hxz ▸ hzc
+                            | _ => cases hchk
       · -- LinkFact case
         intro idx lf hlf hrk ctxH ctxK hctxH hctxK x hx
         have hlt : idx < cert.linkFacts.size := by
@@ -675,6 +770,69 @@ theorem checkCBSound_holds {dm : DatatypeMap} {norm : NormResult} {cert : CBCert
                   rw [hk] at hctxK; rw [hctxK] at hctxH; exact Option.some.inj hctxH
                 exact ⟨x, hrx, heqCtx ▸ hx⟩
               | _ => cases hchk
+        | siblingMerge maxAxIdx subAIdx link1Idx rf1Idx subK1BIdx link2Idx rf2Idx subK2BIdx =>
+          simp only [hj] at hchk
+          cases hgetM : norm.axioms[maxAxIdx]? with
+          | none => simp [hgetM] at hchk
+          | some axM =>
+            cases hgetA : cert.subFacts[subAIdx]? with
+            | none => simp [hgetM, hgetA] at hchk
+            | some sfA =>
+              cases hgetL1 : cert.linkFacts[link1Idx]? with
+              | none => simp [hgetM, hgetA, hgetL1] at hchk
+              | some l1 =>
+                cases hgetRf1 : cert.roleFacts[rf1Idx]? with
+                | none => simp [hgetM, hgetA, hgetL1, hgetRf1] at hchk
+                | some rf1 =>
+                  cases hgetK1B : cert.subFacts[subK1BIdx]? with
+                  | none => simp [hgetM, hgetA, hgetL1, hgetRf1, hgetK1B] at hchk
+                  | some sfK1B =>
+                    cases hgetL2 : cert.linkFacts[link2Idx]? with
+                    | none => simp [hgetM, hgetA, hgetL1, hgetRf1, hgetK1B, hgetL2] at hchk
+                    | some l2 =>
+                      cases hgetRf2 : cert.roleFacts[rf2Idx]? with
+                      | none => simp [hgetM, hgetA, hgetL1, hgetRf1, hgetK1B, hgetL2, hgetRf2] at hchk
+                      | some rf2 =>
+                        cases hgetK2B : cert.subFacts[subK2BIdx]? with
+                        | none => simp [hgetM, hgetA, hgetL1, hgetRf1, hgetK1B, hgetL2, hgetRf2, hgetK2B] at hchk
+                        | some sfK2B =>
+                          simp only [hgetM, hgetA, hgetL1, hgetRf1, hgetK1B, hgetL2, hgetRf2, hgetK2B] at hchk
+                          cases axM with
+                          | maxOne a s b =>
+                            cases hctx1 : cert.contexts[l1.k]? with
+                            | none => simp [hctx1] at hchk
+                            | some ctxK1 =>
+                              cases hctx2 : cert.contexts[l2.k]? with
+                              | none => simp [hctx1, hctx2] at hchk
+                              | some ctxK2 =>
+                                simp only [hctx1, hctx2, Bool.and_eq_true, beq_iff_eq,
+                                  decide_eq_true_eq, and_assoc] at hchk
+                                obtain ⟨hha, hca, hra, hl1h, hl1r, hl1rk, hrf1r, hrf1s,
+                                  hk1H, hk1C, hk1R, hl2h, hl2rk, hrf2r, hrf2s,
+                                  hk2H, hk2C, hk2R, hcov⟩ := hchk
+                                have hxa := hsubLT subAIdx sfA hgetA (hrk ▸ hra) ctxH (hha.symm ▸ hctxH) x hx
+                                rw [hca] at hxa
+                                obtain ⟨y1, hr1y1, hy1K1⟩ :=
+                                  hlinkLT link1Idx l1 hgetL1 (hrk ▸ hl1rk) ctxH ctxK1 (hl1h.symm ▸ hctxH) hctx1 x hx
+                                have hsy1 := hroles rf1Idx rf1 hgetRf1 x y1 (hrf1r.symm ▸ hr1y1)
+                                rw [hrf1s] at hsy1
+                                have hy1b := hsubLT subK1BIdx sfK1B hgetK1B (hrk ▸ hk1R) ctxK1 (hk1H.symm ▸ hctx1) y1 hy1K1
+                                rw [hk1C] at hy1b
+                                obtain ⟨y2, hr2y2, hy2K2⟩ :=
+                                  hlinkLT link2Idx l2 hgetL2 (hrk ▸ hl2rk) ctxH ctxK2 (hl2h.symm ▸ hctxH) hctx2 x hx
+                                have hsy2 := hroles rf2Idx rf2 hgetRf2 x y2 (hrf2r.symm ▸ hr2y2)
+                                rw [hrf2s] at hsy2
+                                have hy2b := hsubLT subK2BIdx sfK2B hgetK2B (hrk ▸ hk2R) ctxK2 (hk2H.symm ▸ hctx2) y2 hy2K2
+                                rw [hk2C] at hy2b
+                                have hmax := hax (.maxOne a s b) (mem_toList_of_getElem? hgetM)
+                                have heqY : y1 = y2 := hmax x hxa y1 y2 hsy1 hy1b hsy2 hy2b
+                                refine ⟨y1, hl1r ▸ hr1y1, fun c hc => ?_⟩
+                                have hmem := array_all_iff.mp hcov c hc
+                                simp only [Bool.or_eq_true] at hmem
+                                rcases hmem with h1 | h2
+                                · exact hy1K1 c (array_contains_iff.mp h1)
+                                · exact heqY ▸ hy2K2 c (array_contains_iff.mp h2)
+                          | _ => cases hchk
   exact ⟨hroles,
          fun idx sf hsf => (hmut sf.rank).1 idx sf hsf rfl,
          fun idx lf hlf => (hmut lf.rank).2 idx lf hlf rfl⟩
@@ -718,6 +876,10 @@ def saturateHornSHI (norm : NormResult)
   let mut exLeftByA : Array (Array (Nat × Nat × Nat)) := Array.replicate nCls #[]
   let mut allRightByA : Array (Array (Nat × Nat × Nat)) := Array.replicate nCls #[]
   let mut globalAllByRole : Array (Array (Nat × Nat)) := Array.replicate nRoles #[]
+  let mut maxOneByA : Array (Array (Nat × Nat × Nat)) := Array.replicate nCls #[]
+  let mut globalMaxByRole : Array (Array (Nat × Nat)) := Array.replicate nRoles #[]
+  let mut isMaxFiller : Array Bool := Array.replicate nCls false
+  let mut hasMaxOne : Bool := false
   let mut directRoleSub : Array (Array (Nat × Nat)) := Array.replicate nRoles #[]
   let mut chainsByS1 : Array (Array (Nat × Nat × Nat)) := Array.replicate nRoles #[]
   let mut chainsByS2 : Array (Array (Nat × Nat × Nat)) := Array.replicate nRoles #[]
@@ -752,7 +914,14 @@ def saturateHornSHI (norm : NormResult)
         chainsByS2 := chainsByS2.modify s2 (·.push (axIdx, s1, s))
     | .roleRefl r =>
       if r < nRoles then reflRoleAxs := reflRoleAxs.push (axIdx, r)
-    | .maxOne .. => pure ()
+    | .maxOne a s b =>
+      if s < nRoles && b < nCls then
+        hasMaxOne := true
+        isMaxFiller := isMaxFiller.set! b true
+        if a == 0 then
+          globalMaxByRole := globalMaxByRole.modify s (·.push (axIdx, b))
+        else if a < nCls then
+          maxOneByA := maxOneByA.modify a (·.push (axIdx, s, b))
 
   -- 2. Compute reflexive-transitive role hierarchy closure with justifications
   let mut roleFacts : Array RoleFact := #[]
@@ -818,6 +987,8 @@ def saturateHornSHI (norm : NormResult)
   let mut ctxTopIdx : Array Nat := #[]                   -- `sfIdx` of `(h, 0)` (rank 0)
   -- Per-context active non-`Thing` universals indexed by role `s`: `(allAxIdx, sfIdx, d)`
   let mut ctxAlls : Array (Std.HashMap Nat (Array (Nat × Nat × Nat))) := #[]
+  -- Per-context active non-`Thing` `maxOne` axioms indexed by role `s`: `(maxAxIdx, sfIdx, b)`
+  let mut ctxMaxOnes : Array (Std.HashMap Nat (Array (Nat × Nat × Nat))) := #[]
   -- Outgoing/incoming links: `(r, k, linkIdx)` / `(h, r, linkIdx)` and dedup set `(h, r, k)`
   let mut outLinks : Array (Array (Nat × Nat × Nat)) := #[]
   let mut inLinks : Array (Array (Nat × Nat × Nat)) := #[]
@@ -864,16 +1035,17 @@ def saturateHornSHI (norm : NormResult)
       (subFacts : Array SubFact) (ctxSubIdx : Array (Std.HashMap Nat Nat))
       (ctxSubList : Array (Array (Nat × Nat))) (ctxTopIdx : Array Nat)
       (ctxAlls : Array (Std.HashMap Nat (Array (Nat × Nat × Nat))))
+      (ctxMaxOnes : Array (Std.HashMap Nat (Array (Nat × Nat × Nat))))
       (outLinks inLinks : Array (Array (Nat × Nat × Nat)))
       (linkFacts : Array LinkFact) (linkSet : Std.HashSet (Nat × Nat × Nat))
       (subQueue exQueue linkQueue : Array Nat) =>
     match ctxMap[elems]? with
     | some cid =>
-      (some cid, contexts, ctxMap, subFacts, ctxSubIdx, ctxSubList, ctxTopIdx, ctxAlls,
+      (some cid, contexts, ctxMap, subFacts, ctxSubIdx, ctxSubList, ctxTopIdx, ctxAlls, ctxMaxOnes,
        outLinks, inLinks, linkFacts, linkSet, subQueue, exQueue, linkQueue)
     | none =>
       if contexts.size >= maxContexts || elems.size > maxCtxSize then
-        (none, contexts, ctxMap, subFacts, ctxSubIdx, ctxSubList, ctxTopIdx, ctxAlls,
+        (none, contexts, ctxMap, subFacts, ctxSubIdx, ctxSubList, ctxTopIdx, ctxAlls, ctxMaxOnes,
          outLinks, inLinks, linkFacts, linkSet, subQueue, exQueue, linkQueue)
       else Id.run do
         let cid := contexts.size
@@ -883,6 +1055,7 @@ def saturateHornSHI (norm : NormResult)
         let mut ctxSubIdx' := ctxSubIdx.push {}
         let mut ctxSubList' := ctxSubList.push #[]
         let mut ctxAlls' := ctxAlls.push {}
+        let mut ctxMaxOnes' := ctxMaxOnes.push {}
         let mut outLinks' := outLinks.push #[]
         let mut inLinks' := inLinks.push #[]
         let mut linkFacts' := linkFacts
@@ -911,18 +1084,27 @@ def saturateHornSHI (norm : NormResult)
           (linkFacts', outLinks', inLinks', linkSet', linkQueue') :=
             addLink cid r0 cid 0 (.reflLink reflAxIdx rfIdx)
               linkFacts' outLinks' inLinks' linkSet' linkQueue'
-        return (some cid, contexts', ctxMap', subFacts', ctxSubIdx', ctxSubList', ctxTopIdx', ctxAlls',
-                outLinks', inLinks', linkFacts', linkSet', subQueue', exQueue', linkQueue')
+        return (some cid, contexts', ctxMap', subFacts', ctxSubIdx', ctxSubList', ctxTopIdx',
+                ctxAlls', ctxMaxOnes', outLinks', inLinks', linkFacts', linkSet', subQueue', exQueue', linkQueue')
 
   -- Seed one singleton context for every named class (except `owl:Nothing`)
   for (_, id) in norm.namedClassIds do
     if id != 1 then
-      let (_, c1, cm1, sf1, csi1, csl1, cti1, ca1, ol1, il1, lf1, ls1, sq1, eq1, lq1) :=
-        getOrCreateCtx #[id] contexts ctxMap subFacts ctxSubIdx ctxSubList ctxTopIdx ctxAlls
+      let (_, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, lf1, ls1, sq1, eq1, lq1) :=
+        getOrCreateCtx #[id] contexts ctxMap subFacts ctxSubIdx ctxSubList ctxTopIdx ctxAlls ctxMaxOnes
           outLinks inLinks linkFacts linkSet subQueue exQueue linkQueue
       contexts := c1; ctxMap := cm1; subFacts := sf1; ctxSubIdx := csi1
-      ctxSubList := csl1; ctxTopIdx := cti1; ctxAlls := ca1; outLinks := ol1; inLinks := il1
-      linkFacts := lf1; linkSet := ls1; subQueue := sq1; exQueue := eq1; linkQueue := lq1
+      ctxSubList := csl1; ctxTopIdx := cti1; ctxAlls := ca1; ctxMaxOnes := cmo1
+      outLinks := ol1; inLinks := il1; linkFacts := lf1; linkSet := ls1
+      subQueue := sq1; exQueue := eq1; linkQueue := lq1
+
+  -- Helper: collect all active `maxOne` constraints `(maxAxIdx, sfAIdx, b)` at `(h, s)`
+  let getMaxOnesAt := fun (h s : Nat) (ctxTopIdx : Array Nat)
+      (ctxMaxOnes : Array (Std.HashMap Nat (Array (Nat × Nat × Nat)))) =>
+    let topIdx := ctxTopIdx[h]!
+    let g := if s < nRoles then (globalMaxByRole[s]!).map fun (ax, b) => (ax, topIdx, b) else #[]
+    let l := (ctxMaxOnes[h]!).getD s #[]
+    if g.isEmpty then l else if l.isEmpty then g else g ++ l
 
   -- 4. Main worklist fixpoint (draining `subQueue` before `exQueue` so base subsumptions
   --    are already known when existential successor contexts are created)
@@ -987,12 +1169,13 @@ def saturateHornSHI (norm : NormResult)
                 let elems0 := contexts[k0]!
                 let newElems := insertSortedUnique elems0 d
                 let lRk := linkFacts[lIdx]!.rank
-                let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, ol1, il1, lf1, ls1, sq1, eq1, lq1) :=
-                  getOrCreateCtx newElems contexts ctxMap subFacts ctxSubIdx ctxSubList ctxTopIdx ctxAlls
+                let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, lf1, ls1, sq1, eq1, lq1) :=
+                  getOrCreateCtx newElems contexts ctxMap subFacts ctxSubIdx ctxSubList ctxTopIdx ctxAlls ctxMaxOnes
                     outLinks inLinks linkFacts linkSet subQueue exQueue linkQueue
                 contexts := c1; ctxMap := cm1; subFacts := sf1; ctxSubIdx := csi1
-                ctxSubList := csl1; ctxTopIdx := cti1; ctxAlls := ca1; outLinks := ol1; inLinks := il1
-                linkFacts := lf1; linkSet := ls1; subQueue := sq1; exQueue := eq1; linkQueue := lq1
+                ctxSubList := csl1; ctxTopIdx := cti1; ctxAlls := ca1; ctxMaxOnes := cmo1
+                outLinks := ol1; inLinks := il1; linkFacts := lf1; linkSet := ls1
+                subQueue := sq1; exQueue := eq1; linkQueue := lq1
                 if let some kNew := k? then
                   (linkFacts, outLinks, inLinks, linkSet, linkQueue) :=
                     addLink h r kNew (max rk lRk + 1) (.allProp lIdx #[(axIdx, sfIdx, rfIdx)])
@@ -1014,6 +1197,134 @@ def saturateHornSHI (norm : NormResult)
               (subFacts, ctxSubIdx, ctxSubList, subQueue, exQueue) :=
                 addSub hPrev b (max rk lRk + 1) (.exElim axIdx lIdx rfIdx sfIdx)
                   subFacts ctxSubIdx ctxSubList subQueue exQueue
+
+        -- (f2) Horn-SHIQ `maxOne` rules triggered by `(h, c)`
+        if hasMaxOne then
+          -- Activate non-`Thing` `maxOne c s b` on `h`
+          for (maxAxIdx, s, b) in maxOneByA[c]! do
+            ctxMaxOnes := ctxMaxOnes.modify h fun m => m.insert s ((m.getD s #[]).push (maxAxIdx, sfIdx, b))
+            -- Sibling merges among existing outgoing links of `h`
+            let curOut := outLinks[h]!
+            for (r1, k1, l1Idx) in curOut do
+              if linkFacts.size < maxLinks then
+                if let some rf1Idx := roleFactMap[(r1, s)]? then
+                  if let some sfK1B := (ctxSubIdx[k1]!)[b]? then
+                    for (r2, k2, l2Idx) in curOut do
+                      if k1 != k2 && linkFacts.size < maxLinks then
+                        if let some rf2Idx := roleFactMap[(r2, s)]? then
+                          if let some sfK2B := (ctxSubIdx[k2]!)[b]? then
+                            if !(contexts[k2]!.all fun e => (ctxSubIdx[k1]!).contains e) then
+                              let merged := mergeSortedUnique contexts[k1]! contexts[k2]!
+                              let mRk := max (max rk (max linkFacts[l1Idx]!.rank linkFacts[l2Idx]!.rank))
+                                             (max subFacts[sfK1B]!.rank subFacts[sfK2B]!.rank)
+                              let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, lf1, ls1, sq1, eq1, lq1) :=
+                                getOrCreateCtx merged contexts ctxMap subFacts ctxSubIdx ctxSubList ctxTopIdx ctxAlls ctxMaxOnes
+                                  outLinks inLinks linkFacts linkSet subQueue exQueue linkQueue
+                              contexts := c1; ctxMap := cm1; subFacts := sf1; ctxSubIdx := csi1
+                              ctxSubList := csl1; ctxTopIdx := cti1; ctxAlls := ca1; ctxMaxOnes := cmo1
+                              outLinks := ol1; inLinks := il1; linkFacts := lf1; linkSet := ls1
+                              subQueue := sq1; exQueue := eq1; linkQueue := lq1
+                              if let some kNew := k? then
+                                (linkFacts, outLinks, inLinks, linkSet, linkQueue) :=
+                                  addLink h r1 kNew (mRk + 1)
+                                    (.siblingMerge maxAxIdx sfIdx l1Idx rf1Idx sfK1B l2Idx rf2Idx sfK2B)
+                                    linkFacts outLinks inLinks linkSet linkQueue
+            -- Parent merges between `inLinks[h]` and `outLinks[h]`
+            let sInv := invRole s
+            for (hPrev, r1, l1Idx) in inLinks[h]! do
+              if let some rf1Idx := roleFactMap[(r1, sInv)]? then
+                if let some sfHB := (ctxSubIdx[hPrev]!)[b]? then
+                  let baseRk := max (max rk linkFacts[l1Idx]!.rank) subFacts[sfHB]!.rank
+                  for (r2, k2, l2Idx) in outLinks[h]! do
+                    if let some rf2Idx := roleFactMap[(r2, s)]? then
+                      if let some sfK2B := (ctxSubIdx[k2]!)[b]? then
+                        let baseRk2 := max (max baseRk linkFacts[l2Idx]!.rank) subFacts[sfK2B]!.rank
+                        for (c2, sfK2C) in ctxSubList[k2]! do
+                          if !(ctxSubIdx[hPrev]!).contains c2 then
+                            (subFacts, ctxSubIdx, ctxSubList, subQueue, exQueue) :=
+                              addSub hPrev c2 (max baseRk2 subFacts[sfK2C]!.rank + 1)
+                                (.parentMerge maxAxIdx l1Idx rf1Idx sfHB sfIdx l2Idx rf2Idx sfK2B sfK2C)
+                                subFacts ctxSubIdx ctxSubList subQueue exQueue
+          -- If `c` is a `maxOne` filler: fire siblingMerge & parentMerge where `h` plays `k1`/`k2`/`hPrev`
+          if isMaxFiller[c]! then
+            for (hPar, r1, l1Idx) in inLinks[h]! do
+              if r1 < nRoles then
+                for (s, rf1Idx) in roleSups[r1]! do
+                  for (maxAxIdx, sfAIdx, b) in getMaxOnesAt hPar s ctxTopIdx ctxMaxOnes do
+                    if b == c then
+                      -- Sibling merge at `hPar` between `(r1, h)` and other outgoing links
+                      let curOut := outLinks[hPar]!
+                      for (r2, k2, l2Idx) in curOut do
+                        if h != k2 && linkFacts.size < maxLinks then
+                          if let some rf2Idx := roleFactMap[(r2, s)]? then
+                            if let some sfK2B := (ctxSubIdx[k2]!)[b]? then
+                              if !(contexts[k2]!.all fun e => (ctxSubIdx[h]!).contains e) then
+                                let merged := mergeSortedUnique contexts[h]! contexts[k2]!
+                                let mRk := max (max subFacts[sfAIdx]!.rank (max linkFacts[l1Idx]!.rank linkFacts[l2Idx]!.rank))
+                                               (max rk subFacts[sfK2B]!.rank)
+                                let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, lf1, ls1, sq1, eq1, lq1) :=
+                                  getOrCreateCtx merged contexts ctxMap subFacts ctxSubIdx ctxSubList ctxTopIdx ctxAlls ctxMaxOnes
+                                    outLinks inLinks linkFacts linkSet subQueue exQueue linkQueue
+                                contexts := c1; ctxMap := cm1; subFacts := sf1; ctxSubIdx := csi1
+                                ctxSubList := csl1; ctxTopIdx := cti1; ctxAlls := ca1; ctxMaxOnes := cmo1
+                                outLinks := ol1; inLinks := il1; linkFacts := lf1; linkSet := ls1
+                                subQueue := sq1; exQueue := eq1; linkQueue := lq1
+                                if let some kNew := k? then
+                                  (linkFacts, outLinks, inLinks, linkSet, linkQueue) :=
+                                    addLink hPar r1 kNew (mRk + 1)
+                                      (.siblingMerge maxAxIdx sfAIdx l1Idx rf1Idx sfIdx l2Idx rf2Idx sfK2B)
+                                      linkFacts outLinks inLinks linkSet linkQueue
+                      -- Parent merge with `h` as `k2` through `hPar`
+                      let sInv := invRole s
+                      for (hGrand, r0, l0Idx) in inLinks[hPar]! do
+                        if let some rf0Idx := roleFactMap[(r0, sInv)]? then
+                          if let some sfHB := (ctxSubIdx[hGrand]!)[b]? then
+                            let baseRk := max (max subFacts[sfAIdx]!.rank (max linkFacts[l0Idx]!.rank linkFacts[l1Idx]!.rank))
+                                              (max sfHB rk)
+                            let baseRk' := max (max baseRk subFacts[sfHB]!.rank) rk
+                            for (c2, sfK2C) in ctxSubList[h]! do
+                              if !(ctxSubIdx[hGrand]!).contains c2 then
+                                (subFacts, ctxSubIdx, ctxSubList, subQueue, exQueue) :=
+                                  addSub hGrand c2 (max baseRk' subFacts[sfK2C]!.rank + 1)
+                                    (.parentMerge maxAxIdx l0Idx rf0Idx sfHB sfAIdx l1Idx rf1Idx sfIdx sfK2C)
+                                    subFacts ctxSubIdx ctxSubList subQueue exQueue
+            -- Parent merge with `h` as `hPrev` (gaining filler `b = c`)
+            for (r1, kMid, l1Idx) in outLinks[h]! do
+              if r1 < nRoles then
+                for (sInv, rf1Idx) in roleSups[r1]! do
+                  let s := invRole sInv
+                  for (maxAxIdx, sfAIdx, b) in getMaxOnesAt kMid s ctxTopIdx ctxMaxOnes do
+                    if b == c then
+                      let baseRk := max (max rk subFacts[sfAIdx]!.rank) linkFacts[l1Idx]!.rank
+                      for (r2, k2, l2Idx) in outLinks[kMid]! do
+                        if let some rf2Idx := roleFactMap[(r2, s)]? then
+                          if let some sfK2B := (ctxSubIdx[k2]!)[b]? then
+                            let baseRk2 := max (max baseRk linkFacts[l2Idx]!.rank) subFacts[sfK2B]!.rank
+                            for (c2, sfK2C) in ctxSubList[k2]! do
+                              if !(ctxSubIdx[h]!).contains c2 then
+                                (subFacts, ctxSubIdx, ctxSubList, subQueue, exQueue) :=
+                                  addSub h c2 (max baseRk2 subFacts[sfK2C]!.rank + 1)
+                                    (.parentMerge maxAxIdx l1Idx rf1Idx sfIdx sfAIdx l2Idx rf2Idx sfK2B sfK2C)
+                                    subFacts ctxSubIdx ctxSubList subQueue exQueue
+          -- Propagate newly derived `(h, c)` upward via `parentMerge` (`h` plays `k2`)
+          for (hMid, r2, l2Idx) in inLinks[h]! do
+            if r2 < nRoles then
+              for (s, rf2Idx) in roleSups[r2]! do
+                let mList := getMaxOnesAt hMid s ctxTopIdx ctxMaxOnes
+                if !mList.isEmpty then
+                  let sInv := invRole s
+                  for (maxAxIdx, sfAIdx, b) in mList do
+                    if let some sfK2B := (ctxSubIdx[h]!)[b]? then
+                      let baseRk := max (max rk subFacts[sfAIdx]!.rank) (max linkFacts[l2Idx]!.rank subFacts[sfK2B]!.rank)
+                      for (hPrev, r1, l1Idx) in inLinks[hMid]! do
+                        if !(ctxSubIdx[hPrev]!).contains c then
+                          if let some rf1Idx := roleFactMap[(r1, sInv)]? then
+                            if let some sfHB := (ctxSubIdx[hPrev]!)[b]? then
+                              let mRk := max baseRk (max linkFacts[l1Idx]!.rank subFacts[sfHB]!.rank)
+                              (subFacts, ctxSubIdx, ctxSubList, subQueue, exQueue) :=
+                                addSub hPrev c (mRk + 1)
+                                  (.parentMerge maxAxIdx l1Idx rf1Idx sfHB sfAIdx l2Idx rf2Idx sfK2B sfIdx)
+                                  subFacts ctxSubIdx ctxSubList subQueue exQueue
 
     -- (d) Existential introduction `c ⊑ ∃r.b` (with O(|roleSups[r]|) global + local universal lookup)
     if subHead >= subQueue.size && exHead < exQueue.size then
@@ -1044,12 +1355,13 @@ def saturateHornSHI (norm : NormResult)
                 allPrems := allPrems.push (allAxIdx, sfAllIdx, rfIdx)
                 let aRk := subFacts[sfAllIdx]!.rank
                 if aRk > maxRk then maxRk := aRk
-          let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, ol1, il1, lf1, ls1, sq1, eq1, lq1) :=
-            getOrCreateCtx targetElems contexts ctxMap subFacts ctxSubIdx ctxSubList ctxTopIdx ctxAlls
+          let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, lf1, ls1, sq1, eq1, lq1) :=
+            getOrCreateCtx targetElems contexts ctxMap subFacts ctxSubIdx ctxSubList ctxTopIdx ctxAlls ctxMaxOnes
               outLinks inLinks linkFacts linkSet subQueue exQueue linkQueue
           contexts := c1; ctxMap := cm1; subFacts := sf1; ctxSubIdx := csi1
-          ctxSubList := csl1; ctxTopIdx := cti1; ctxAlls := ca1; outLinks := ol1; inLinks := il1
-          linkFacts := lf1; linkSet := ls1; subQueue := sq1; exQueue := eq1; linkQueue := lq1
+          ctxSubList := csl1; ctxTopIdx := cti1; ctxAlls := ca1; ctxMaxOnes := cmo1
+          outLinks := ol1; inLinks := il1; linkFacts := lf1; linkSet := ls1
+          subQueue := sq1; exQueue := eq1; linkQueue := lq1
           if let some kId := k? then
             (linkFacts, outLinks, inLinks, linkSet, linkQueue) :=
               addLink h r kId (maxRk + 1) (.exIntro axIdx sfIdx allPrems)
@@ -1094,12 +1406,13 @@ def saturateHornSHI (norm : NormResult)
               if aRk > maxAllRk then maxAllRk := aRk
         if !extraDs.isEmpty then
           let newElems := mergeSortedUnique elems0 extraDs
-          let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, ol1, il1, lf1, ls1, sq1, eq1, lq1) :=
-            getOrCreateCtx newElems contexts ctxMap subFacts ctxSubIdx ctxSubList ctxTopIdx ctxAlls
+          let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, lf1, ls1, sq1, eq1, lq1) :=
+            getOrCreateCtx newElems contexts ctxMap subFacts ctxSubIdx ctxSubList ctxTopIdx ctxAlls ctxMaxOnes
               outLinks inLinks linkFacts linkSet subQueue exQueue linkQueue
           contexts := c1; ctxMap := cm1; subFacts := sf1; ctxSubIdx := csi1
-          ctxSubList := csl1; ctxTopIdx := cti1; ctxAlls := ca1; outLinks := ol1; inLinks := il1
-          linkFacts := lf1; linkSet := ls1; subQueue := sq1; exQueue := eq1; linkQueue := lq1
+          ctxSubList := csl1; ctxTopIdx := cti1; ctxAlls := ca1; ctxMaxOnes := cmo1
+          outLinks := ol1; inLinks := il1; linkFacts := lf1; linkSet := ls1
+          subQueue := sq1; exQueue := eq1; linkQueue := lq1
           if let some kNew := k? then
             (linkFacts, outLinks, inLinks, linkSet, linkQueue) :=
               addLink h r kNew (maxAllRk + 1) (.allProp lIdx allPrems)
@@ -1149,6 +1462,71 @@ def saturateHornSHI (norm : NormResult)
                   (linkFacts, outLinks, inLinks, linkSet, linkQueue) :=
                     addLink hPrev s k (max lRk r1Rk + 1) (.chainComp axIdx l1Idx rf1Idx lIdx rf2Idx)
                       linkFacts outLinks inLinks linkSet linkQueue
+
+      -- (k) Horn-SHIQ `maxOne` siblingMerge & parentMerge triggered by new link `(h, r, k)`
+      if hasMaxOne && r < nRoles then
+        for (s, rf1Idx) in roleSups[r]! do
+          for (maxAxIdx, sfAIdx, b) in getMaxOnesAt h s ctxTopIdx ctxMaxOnes do
+            if let some sfKB := (ctxSubIdx[k]!)[b]? then
+              -- Sibling merge at `h` between `(r, k)` and existing outgoing links `(r2, k2)`
+              let curOut := outLinks[h]!
+              for (r2, k2, l2Idx) in curOut do
+                if k != k2 && linkFacts.size < maxLinks then
+                  if let some rf2Idx := roleFactMap[(r2, s)]? then
+                    if let some sfK2B := (ctxSubIdx[k2]!)[b]? then
+                      let merged := mergeSortedUnique contexts[k]! contexts[k2]!
+                      let mRk := max (max subFacts[sfAIdx]!.rank (max lRk linkFacts[l2Idx]!.rank))
+                                     (max subFacts[sfKB]!.rank subFacts[sfK2B]!.rank)
+                      let need1 := !(contexts[k2]!.all fun e => (ctxSubIdx[k]!).contains e)
+                      let need2 := !(contexts[k]!.all fun e => (ctxSubIdx[k2]!).contains e)
+                      if need1 || need2 then
+                        let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, lf1, ls1, sq1, eq1, lq1) :=
+                          getOrCreateCtx merged contexts ctxMap subFacts ctxSubIdx ctxSubList ctxTopIdx ctxAlls ctxMaxOnes
+                            outLinks inLinks linkFacts linkSet subQueue exQueue linkQueue
+                        contexts := c1; ctxMap := cm1; subFacts := sf1; ctxSubIdx := csi1
+                        ctxSubList := csl1; ctxTopIdx := cti1; ctxAlls := ca1; ctxMaxOnes := cmo1
+                        outLinks := ol1; inLinks := il1; linkFacts := lf1; linkSet := ls1
+                        subQueue := sq1; exQueue := eq1; linkQueue := lq1
+                        if let some kNew := k? then
+                          if need1 then
+                            (linkFacts, outLinks, inLinks, linkSet, linkQueue) :=
+                              addLink h r kNew (mRk + 1)
+                                (.siblingMerge maxAxIdx sfAIdx lIdx rf1Idx sfKB l2Idx rf2Idx sfK2B)
+                                linkFacts outLinks inLinks linkSet linkQueue
+                          if need2 then
+                            (linkFacts, outLinks, inLinks, linkSet, linkQueue) :=
+                              addLink h r2 kNew (mRk + 1)
+                                (.siblingMerge maxAxIdx sfAIdx l2Idx rf2Idx sfK2B lIdx rf1Idx sfKB)
+                                linkFacts outLinks inLinks linkSet linkQueue
+              -- Parent merge with `(h, r, k)` as `l2` (`hPrev -r1-> h -r-> k`)
+              let sInv := invRole s
+              for (hPrev, r1, l1Idx) in inLinks[h]! do
+                if let some rf0Idx := roleFactMap[(r1, sInv)]? then
+                  if let some sfHB := (ctxSubIdx[hPrev]!)[b]? then
+                    let baseRk := max (max subFacts[sfAIdx]!.rank (max linkFacts[l1Idx]!.rank lRk))
+                                      (max subFacts[sfHB]!.rank subFacts[sfKB]!.rank)
+                    for (c2, sfK2C) in ctxSubList[k]! do
+                      if !(ctxSubIdx[hPrev]!).contains c2 then
+                        (subFacts, ctxSubIdx, ctxSubList, subQueue, exQueue) :=
+                          addSub hPrev c2 (max baseRk subFacts[sfK2C]!.rank + 1)
+                            (.parentMerge maxAxIdx l1Idx rf0Idx sfHB sfAIdx lIdx rf1Idx sfKB sfK2C)
+                            subFacts ctxSubIdx ctxSubList subQueue exQueue
+        -- Parent merge with `(h, r, k)` as `l1` (`h -r-> k -r2-> k2`)
+        for (sInv, rf1Idx) in roleSups[r]! do
+          let s := invRole sInv
+          for (maxAxIdx, sfAIdx, b) in getMaxOnesAt k s ctxTopIdx ctxMaxOnes do
+            if let some sfHB := (ctxSubIdx[h]!)[b]? then
+              let baseRk := max (max subFacts[sfAIdx]!.rank lRk) subFacts[sfHB]!.rank
+              for (r2, k2, l2Idx) in outLinks[k]! do
+                if let some rf2Idx := roleFactMap[(r2, s)]? then
+                  if let some sfK2B := (ctxSubIdx[k2]!)[b]? then
+                    let baseRk2 := max (max baseRk linkFacts[l2Idx]!.rank) subFacts[sfK2B]!.rank
+                    for (c2, sfK2C) in ctxSubList[k2]! do
+                      if !(ctxSubIdx[h]!).contains c2 then
+                        (subFacts, ctxSubIdx, ctxSubList, subQueue, exQueue) :=
+                          addSub h c2 (max baseRk2 subFacts[sfK2C]!.rank + 1)
+                            (.parentMerge maxAxIdx lIdx rf1Idx sfHB sfAIdx l2Idx rf2Idx sfK2B sfK2C)
+                            subFacts ctxSubIdx ctxSubList subQueue exQueue
 
   return {
     contexts := contexts

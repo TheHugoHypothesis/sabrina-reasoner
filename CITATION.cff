@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "If you use SABRINA, its Lean 4 formalization, or its role-hierarchy counterexamples, please cite this artifact."
 title: "Cycles at the Edge of Decidability: SABRINA, a Kernel-Verified SROIQ(D) OWL 2 DL Reasoner"
 type: software
-version: "1.2.1"
+version: "1.2.2"
 license: MIT
 repository-code: "https://github.com/TheHugoHypothesis/sabrina-reasoner"
 authors:

@@ -2,7 +2,7 @@ import Lake
 open Lake DSL
 
 package logicCore where
-  version := v!"1.2.1"
+  version := v!"1.2.2"
 
 
 @[default_target]

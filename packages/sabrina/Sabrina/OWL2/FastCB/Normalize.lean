@@ -1932,9 +1932,153 @@ private theorem extractAxioms_valid {dm : DatatypeMap} {i : Interpretation dm} :
       (extractAxiom_valid hv (hsat ax (List.mem_cons_self ..)))
       (fun a ha => hsat a (List.mem_cons_of_mem _ ha))
 
+private def collectTransRoles : List HornAxiom → List Nat
+  | [] => []
+  | .roleChain r1 r2 s :: rest =>
+    if r1 == s && r2 == s then s :: collectTransRoles rest else collectTransRoles rest
+  | _ :: rest => collectTransRoles rest
+
+private theorem mem_collectTransRoles :
+    ∀ {axs : List HornAxiom} {r : Nat}, r ∈ collectTransRoles axs →
+      HornAxiom.roleChain r r r ∈ axs
+  | [], _, h => nomatch h
+  | .roleChain r1 r2 s :: rest, r, h => by
+    unfold collectTransRoles at h
+    split at h
+    · rename_i heq
+      simp only [Bool.and_eq_true, beq_iff_eq] at heq
+      rcases List.mem_cons.mp h with rfl | hmem
+      · rw [heq.1, heq.2]; exact List.mem_cons_self ..
+      · exact List.mem_cons_of_mem _ (mem_collectTransRoles hmem)
+    · exact List.mem_cons_of_mem _ (mem_collectTransRoles h)
+  | .sub .. :: rest, r, h => List.mem_cons_of_mem _ (mem_collectTransRoles (axs := rest) h)
+  | .existR .. :: rest, r, h => List.mem_cons_of_mem _ (mem_collectTransRoles (axs := rest) h)
+  | .existL .. :: rest, r, h => List.mem_cons_of_mem _ (mem_collectTransRoles (axs := rest) h)
+  | .allR .. :: rest, r, h => List.mem_cons_of_mem _ (mem_collectTransRoles (axs := rest) h)
+  | .maxOne .. :: rest, r, h => List.mem_cons_of_mem _ (mem_collectTransRoles (axs := rest) h)
+  | .roleSub .. :: rest, r, h => List.mem_cons_of_mem _ (mem_collectTransRoles (axs := rest) h)
+  | .roleRefl .. :: rest, r, h => List.mem_cons_of_mem _ (mem_collectTransRoles (axs := rest) h)
+
+/-- For every transitive single-step role `r` (`r ∘ r ⊑ r`) and universal axiom `a ⊑ ∀r.d`,
+    emit the standard Kazakov / Horn-$\mathcal{SHI}$ transitive-universal encoding:
+    `a ⊑ (∀r.d)`, `(∀r.d) ⊑ ∀r.(∀r.d)`, and `(∀r.d) ⊑ ∀r.d`.
+    This ensures downstream contexts inherit `∀r.d` along transitive chains so the
+    canonical model remains closed under `Transitive(r)`. -/
+private def expandTransAll (transRoles : List Nat) : List HornAxiom → ExtState → ExtState
+  | [], st => st
+  | .allR a r d :: rest, st =>
+    let st' :=
+      if transRoles.contains r then
+        match st.table.roles[r]?, st.table.classes[d]? with
+        | some [op], some dExpr =>
+          let (cAll, st1) := internExpr (.objectAll op dExpr) st
+          let st2 := emitAxiom (.sub #[a] cAll) st1
+          let st3 := emitAxiom (.allR cAll r cAll) st2
+          emitAxiom (.allR cAll r d) st3
+        | _, _ => st
+      else st
+    expandTransAll transRoles rest st'
+  | _ :: rest, st => expandTransAll transRoles rest st
+
+private theorem expandTransAll_valid {dm : DatatypeMap} {i : Interpretation dm}
+    {transRoles : List Nat} {t0 : CBTable}
+    (htrans : ∀ r ∈ transRoles,
+      (HornAxiom.roleChain r r r).inBounds t0 ∧ (HornAxiom.roleChain r r r).holds t0 i) :
+    ∀ (axs : List HornAxiom) (st : ExtState),
+      st.Valid i → t0.Extends st.table →
+      (∀ ax ∈ axs, ax.inBounds t0 ∧ ax.holds t0 i) →
+      (expandTransAll transRoles axs st).Valid i
+  | [], st, hv, _, _ => hv
+  | .allR a r d :: rest, st, hv, hext, haxs => by
+    simp only [expandTransAll]
+    have hrest : ∀ ax ∈ rest, ax.inBounds t0 ∧ ax.holds t0 i :=
+      fun ax hax => haxs ax (List.mem_cons_of_mem _ hax)
+    by_cases htr : transRoles.contains r = true
+    · simp only [htr, ↓reduceIte]
+      have htrMem : r ∈ transRoles := by simpa using htr
+      obtain ⟨hbChain, hChain⟩ := htrans r htrMem
+      obtain ⟨hbAll, hAll⟩ := haxs (.allR a r d) (List.mem_cons_self ..)
+      cases hr : st.table.roles[r]? with
+      | none => exact expandTransAll_valid htrans rest st hv hext hrest
+      | some rp =>
+        cases rp with
+        | nil => exact expandTransAll_valid htrans rest st hv hext hrest
+        | cons op tl =>
+          cases tl with
+          | cons _ _ => exact expandTransAll_valid htrans rest st hv hext hrest
+          | nil =>
+            cases hd : st.table.classes[d]? with
+            | none => exact expandTransAll_valid htrans rest st hv hext hrest
+            | some dExpr =>
+              dsimp only
+              have hsp1 := internExpr_spec (.objectAll op dExpr) hv
+              rcases h1 : internExpr (.objectAll op dExpr) st with ⟨cAll, st1⟩
+              rw [h1] at hsp1; dsimp only at hsp1 ⊢
+              obtain ⟨hv1, hext1, hltAll, heqAll⟩ := hsp1
+              have hext01 : t0.Extends st1.table := hext.trans hext1
+              have ha1 : a < st1.table.classes.size := Nat.lt_of_lt_of_le hbAll.1 hext01.1
+              have hr1 : r < st1.table.roles.size := Nat.lt_of_lt_of_le hbAll.2.1 hext01.2.1
+              have hd1 : d < st1.table.classes.size := Nat.lt_of_lt_of_le hbAll.2.2 hext01.1
+              have hrEq1 : st1.table.roles[r]? = some [op] := by
+                rw [hext1.2.2.2 r (Nat.lt_of_lt_of_le hbAll.2.1 hext.2.1), hr]
+              have hdEq1 : st1.table.classes[d]? = some dExpr := by
+                rw [hext1.2.2.1 d (Nat.lt_of_lt_of_le hbAll.2.2 hext.1), hd]
+              have hAll1 := HornAxiom.holds_mono hext01 hbAll hAll
+              have hChain1 := HornAxiom.holds_mono hext01 hbChain hChain
+              have hv2 : (emitAxiom (.sub #[a] cAll) st1).Valid i := by
+                apply emitAxiom_valid hv1
+                · exact ⟨fun c hc => by simp at hc; subst hc; exact ha1, hltAll⟩
+                · intro x hx
+                  have hxa : classHolds i x (st1.table.exprOf a) := hx a (by simp)
+                  rw [exprOf_of_getElem? heqAll]
+                  intro y hry
+                  have hry' : rolePath i (st1.table.roleOf r) x y := by
+                    rw [roleOf_of_getElem? hrEq1, rolePath_singleton]; exact hry
+                  have hyd := hAll1 x hxa y hry'
+                  rwa [exprOf_of_getElem? hdEq1] at hyd
+              have hv3 : (emitAxiom (.allR cAll r cAll) (emitAxiom (.sub #[a] cAll) st1)).Valid i := by
+                apply emitAxiom_valid hv2
+                · exact ⟨hltAll, hr1, hltAll⟩
+                · intro x hx y hry
+                  simp only [emitAxiom, exprOf_of_getElem? heqAll] at hx ⊢
+                  simp only [emitAxiom, roleOf_of_getElem? hrEq1, rolePath_singleton] at hry
+                  intro z hyz
+                  have hxz := hChain1 x y z
+                    (by rw [roleOf_of_getElem? hrEq1, rolePath_singleton]; exact hry)
+                    (by rw [roleOf_of_getElem? hrEq1, rolePath_singleton]; exact hyz)
+                  rw [roleOf_of_getElem? hrEq1, rolePath_singleton] at hxz
+                  exact hx z hxz
+              have hv4 : (emitAxiom (.allR cAll r d) (emitAxiom (.allR cAll r cAll) (emitAxiom (.sub #[a] cAll) st1))).Valid i := by
+                apply emitAxiom_valid hv3
+                · exact ⟨hltAll, hr1, hd1⟩
+                · intro x hx y hry
+                  simp only [emitAxiom, exprOf_of_getElem? heqAll] at hx
+                  simp only [emitAxiom, roleOf_of_getElem? hrEq1, rolePath_singleton] at hry
+                  simp only [emitAxiom, exprOf_of_getElem? hdEq1]
+                  exact hx y hry
+              exact expandTransAll_valid htrans rest _ hv4 hext01 hrest
+    · simp only [htr, Bool.false_eq_true, ↓reduceIte]
+      exact expandTransAll_valid htrans rest st hv hext hrest
+  | .sub .. :: rest, st, hv, hext, haxs =>
+    expandTransAll_valid htrans rest st hv hext (fun ax hax => haxs ax (List.mem_cons_of_mem _ hax))
+  | .existR .. :: rest, st, hv, hext, haxs =>
+    expandTransAll_valid htrans rest st hv hext (fun ax hax => haxs ax (List.mem_cons_of_mem _ hax))
+  | .existL .. :: rest, st, hv, hext, haxs =>
+    expandTransAll_valid htrans rest st hv hext (fun ax hax => haxs ax (List.mem_cons_of_mem _ hax))
+  | .maxOne .. :: rest, st, hv, hext, haxs =>
+    expandTransAll_valid htrans rest st hv hext (fun ax hax => haxs ax (List.mem_cons_of_mem _ hax))
+  | .roleSub .. :: rest, st, hv, hext, haxs =>
+    expandTransAll_valid htrans rest st hv hext (fun ax hax => haxs ax (List.mem_cons_of_mem _ hax))
+  | .roleChain .. :: rest, st, hv, hext, haxs =>
+    expandTransAll_valid htrans rest st hv hext (fun ax hax => haxs ax (List.mem_cons_of_mem _ hax))
+  | .roleRefl .. :: rest, st, hv, hext, haxs =>
+    expandTransAll_valid htrans rest st hv hext (fun ax hax => haxs ax (List.mem_cons_of_mem _ hax))
+
 /-- Extract the integer-interned Horn-$\mathcal{SHIQ}$ normal-form representation of `o`. -/
 def extractHornSHIQ (o : Ontology) : NormResult :=
-  let st := extractAxioms o ExtState.empty
+  let st0 := extractAxioms o ExtState.empty
+  let transRoles := collectTransRoles st0.axioms.toList
+  let st := if transRoles.isEmpty then st0 else expandTransAll transRoles st0.axioms.toList st0
   { table := st.table
     axioms := st.axioms
     namedClassIds := st.namedClassIds
@@ -1950,7 +2094,16 @@ theorem extractHornSHIQ_sound {dm : DatatypeMap} {o : Ontology} {i : Interpretat
     res.table.WF ∧
     (∀ ax ∈ res.axioms.toList, ax.holds res.table i) ∧
     (∀ p ∈ res.namedClassIds.toList, res.table.exprOf p.2 = .named p.1) := by
-  have hv := extractAxioms_valid (ExtState.valid_empty i) hsat
+  have hv0 := extractAxioms_valid (ExtState.valid_empty i) hsat
+  have hv : (let st0 := extractAxioms o ExtState.empty
+             let transRoles := collectTransRoles st0.axioms.toList
+             if transRoles.isEmpty then st0 else expandTransAll transRoles st0.axioms.toList st0).Valid i := by
+    dsimp only
+    split
+    · exact hv0
+    · exact expandTransAll_valid
+        (fun r hr => hv0.2.1 _ (mem_collectTransRoles hr))
+        _ _ hv0 (CBTable.Extends.refl _) hv0.2.1
   refine ⟨hv.1, fun ax hax => (hv.2.1 ax hax).2, fun p hp => exprOf_of_getElem? (hv.2.2 p hp).2⟩
 
 end Sabrina.OWL2.FastCB
