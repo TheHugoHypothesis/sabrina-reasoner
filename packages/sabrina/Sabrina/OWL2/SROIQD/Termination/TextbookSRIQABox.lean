@@ -294,14 +294,18 @@ private theorem addAxiom_of_textbook {p : Problem} (hp : PureTextbookProblem p)
   · rcases inc with ⟨first, rest, head⟩
     cases rest with
     | nil =>
-      refine ⟨_, rfl, ⟨hp.root, hp.tbox, ?_, hp.chains, hp.reflexive, hp.irreflexive,
-        hp.asymmetric, hp.disjoint, hp.classAssertions, hp.objAssertions, hp.negObjAssertions,
-        hp.keys, hp.subData, hp.disjointData, hp.funcData, hp.dataRanges, hp.dataAssertions,
-        hp.negDataAssertions⟩⟩
-      intro rs hrs
-      rcases List.mem_cons.mp hrs with rfl | hmem
-      · cases first <;> simp [Role.toOWL, Normalize.toOriented, encodeName_isCoreObjProp]
-      · exact hp.rules rs hmem
+      change ∃ p', Normalize.addAxiom p (.subObjectProperty first.toOWL (.named (encodeName head))) = some p' ∧ PureTextbookProblem p'
+      simp only [Normalize.addAxiom]
+      split
+      · exact ⟨p, rfl, hp⟩
+      · refine ⟨_, rfl, ⟨hp.root, hp.tbox, ?_, hp.chains, hp.reflexive, hp.irreflexive,
+          hp.asymmetric, hp.disjoint, hp.classAssertions, hp.objAssertions, hp.negObjAssertions,
+          hp.keys, hp.subData, hp.disjointData, hp.funcData, hp.dataRanges, hp.dataAssertions,
+          hp.negDataAssertions⟩⟩
+        intro rs hrs
+        rcases List.mem_cons.mp hrs with rfl | hmem
+        · cases first <;> simp [Role.toOWL, Normalize.toOriented, encodeName_isCoreObjProp]
+        · exact hp.rules rs hmem
     | cons r rs =>
       let ch : RoleChains.Chain :=
         ⟨((first :: r :: rs).map Role.toOWL).map Normalize.toOriented, encodeName head⟩

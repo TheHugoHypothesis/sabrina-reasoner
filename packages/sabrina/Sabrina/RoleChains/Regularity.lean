@@ -1,3 +1,5 @@
+import Std.Data.HashMap
+import Std.Data.HashSet
 import Sabrina.RoleChains.Semantics
 
 namespace Sabrina.RoleChains
@@ -109,25 +111,55 @@ private def lowerRoles (c : Chain) : List OrientedRole :=
 private def tableRank (table : List (String × Nat)) (r : String) : Nat :=
   (table.lookup r).getD 0
 
-@[noinline] private def inferRankTable (rules : RoleTheory) (chains : List Chain) :
-    List (String × Nat) :=
-  let constraints := (rules.map fun (r,s) => (r.1,s.1,0)) ++
-    chains.flatMap (fun c => (lowerRoles c).map (fun r => (r.1,c.head,1)))
-  let names := (constraints.flatMap fun (r,s,_) => [r,s]).eraseDups
-  let relax := fun (table : List (String × Nat)) =>
-    constraints.foldl (fun table (r,s,w) =>
-      let k := tableRank table r + w
-      table.map fun (t,v) => (t, if t == s then max v k else v)) table
-  names.foldl (fun table _ => relax table) (names.map fun r => (r,0))
+private def bumpTable (table : List (String × Nat)) (r : String) (k : Nat) : List (String × Nat) :=
+  let cur := tableRank table r
+  if k ≤ cur then table else (r, k) :: table.filter fun e => e.1 != r
+
+private def inferRankTableSmall (rules : RoleTheory) (chains : List Chain) : List (String × Nat) :=
+  let constraints : List (String × String × Nat) :=
+    rules.map (fun (r, s) => (r.1, s.1, 0)) ++
+    chains.flatMap (fun c => (lowerRoles c).map fun r => (r.1, c.head, 1))
+  let steps := rules.length + chains.length + 2
+  (List.range steps).foldl (fun tab _ =>
+    constraints.foldl (fun acc (r, s, w) => bumpTable acc s (tableRank acc r + w)) tab) []
+
+@[noinline] private def inferRankMap (rules : RoleTheory) (chains : List Chain) :
+    Std.HashMap String Nat := Id.run do
+  let mut constraints : Array (String × String × Nat) := Array.mkEmpty (rules.length + chains.length * 2)
+  let mut nodes : Std.HashSet String := {}
+  for (r, s) in rules do
+    constraints := constraints.push (r.1, s.1, 0)
+    nodes := nodes.insert r.1
+    nodes := nodes.insert s.1
+  for c in chains do
+    nodes := nodes.insert c.head
+    for r in lowerRoles c do
+      constraints := constraints.push (r.1, c.head, 1)
+      nodes := nodes.insert r.1
+  let mut ranks : Std.HashMap String Nat := Std.HashMap.emptyWithCapacity nodes.size
+  let maxIters := nodes.size + 1
+  for _ in [0:maxIters] do
+    let mut changed := false
+    for (r, s, w) in constraints do
+      let k := ranks.getD r 0 + w
+      let cur := ranks.getD s 0
+      if k > cur then
+        ranks := ranks.insert s k
+        changed := true
+    if !changed then break
+  return ranks
 
 /-- Find a potential rank witness with bounded relaxation. -/
 def inferRank (rules : RoleTheory) (chains : List Chain) : Rank :=
-  tableRank (inferRankTable rules chains)
+  if rules.length ≤ 16 && chains.length ≤ 16 then
+    tableRank (inferRankTableSmall rules chains)
+  else
+    let ranks := inferRankMap rules chains
+    fun r => ranks.getD r 0
 
-/-- Validate the inferred rank using a single table for all role lookups. -/
+/-- Validate the inferred rank using a single hash table for all role lookups. -/
 def checkInferredRank (rules : RoleTheory) (chains : List Chain) : Bool :=
-  let table := inferRankTable rules chains
-  checkRegular (fun r => tableRank table r) rules chains
+  checkRegular (inferRank rules chains) rules chains
 
 private def roleNames (rules : RoleTheory) (chains : List Chain) : List String :=
   ((rules.flatMap fun (r, s) => [r.1, s.1]) ++
@@ -229,8 +261,8 @@ private theorem rankTable_ranked {rules chains rank} (h : Ranked rank rules chai
 /-- Complete search for a rank in the implemented regular chain fragment.
 Use the inexpensive relaxation first. The finite fallback is exhaustive. -/
 def findRank (rules : RoleTheory) (chains : List Chain) : Option Rank :=
-  let table := inferRankTable rules chains
-  let rank := fun r => tableRank table r
+  let ranks := inferRankMap rules chains
+  let rank := fun r => ranks.getD r 0
   if checkRegular rank rules chains then some rank
   else
     let names := roleNames rules chains

@@ -530,45 +530,268 @@ theorem materializeReal_entailed {o : Ontology} {decls : List EntityDecl}
         ∀ i : Interpretation realDatatypeMap, models i res.materializedOntology ↔ models i o)) :=
   materializeWith_entailed decideRealOntology_iff hm
 
-/-- Check extra entailments in export order without allocating the candidate cross products. -/
+private def walkRoleChainTargets (outAdj inAdj : Std.HashMap (IRI × IRI) (List IRI))
+    (x : IRI) : List Sabrina.ALC.OrientedRole → List IRI
+  | [] => [x]
+  | r :: rs =>
+    (if r.2 then inAdj.getD (r.1, x) [] else outAdj.getD (r.1, x) []).flatMap fun y =>
+      walkRoleChainTargets outAdj inAdj y rs
+
+/-- Deterministic role-hierarchy, inverse, chain, and reflexivity closure over
+    asserted named-individual `ObjectPropertyAssertion`s (every derived edge is
+    provably entailed by `o` with zero tableau calls). -/
+private def computeToldObjEdges (p : SROIQD.Problem) (inds : List IRI) :
+    Std.HashSet (IRI × IRI × IRI) := Id.run do
+  let mut edgeSet : Std.HashSet (IRI × IRI × IRI) := {}
+  let mut outAdj : Std.HashMap (IRI × IRI) (List IRI) := {}
+  let mut inAdj : Std.HashMap (IRI × IRI) (List IRI) := {}
+  let mut byRole : Std.HashMap IRI (List (IRI × IRI)) := {}
+  let addE (es : Std.HashSet (IRI × IRI × IRI)) (oa ia : Std.HashMap (IRI × IRI) (List IRI))
+      (br : Std.HashMap IRI (List (IRI × IRI))) (r a b : IRI) :=
+    if es.contains (r, a, b) then (es, oa, ia, br, false)
+    else
+      (es.insert (r, a, b),
+       oa.insert (r, a) (b :: oa.getD (r, a) []),
+       ia.insert (r, b) (a :: ia.getD (r, b) []),
+       br.insert r ((a, b) :: br.getD r []),
+       true)
+  for (r, ia, ib) in p.objAssertions do
+    match ia, ib with
+    | .named a, .named b =>
+      let (es', oa', ia', br', _) := addE edgeSet outAdj inAdj byRole r a b
+      edgeSet := es'; outAdj := oa'; inAdj := ia'; byRole := br'
+    | _, _ => pure ()
+  for r in p.chars.reflexive do
+    for a in inds do
+      let (es', oa', ia', br', _) := addE edgeSet outAdj inAdj byRole r a a
+      edgeSet := es'; outAdj := oa'; inAdj := ia'; byRole := br'
+  let mut changed := true
+  let mut iter := 0
+  while changed && iter < 32 do
+    changed := false
+    iter := iter + 1
+    let mut newEdges : Array (IRI × IRI × IRI) := #[]
+    for (r, t) in p.rules do
+      for (u, v) in byRole.getD r.1 [] do
+        let (x, y) := if r.2 then (v, u) else (u, v)
+        let (rn, a, b) := if t.2 then (t.1, y, x) else (t.1, x, y)
+        if !edgeSet.contains (rn, a, b) then newEdges := newEdges.push (rn, a, b)
+    for c in p.chains do
+      match c.body with
+      | [] =>
+        for a in inds do
+          if !edgeSet.contains (c.head, a, a) then newEdges := newEdges.push (c.head, a, a)
+      | r0 :: rs =>
+        for (u, v) in byRole.getD r0.1 [] do
+          let (x, mid) := if r0.2 then (v, u) else (u, v)
+          for y in walkRoleChainTargets outAdj inAdj mid rs do
+            if !edgeSet.contains (c.head, x, y) then newEdges := newEdges.push (c.head, x, y)
+    for (rn, a, b) in newEdges do
+      let (es', oa', ia', br', ch) := addE edgeSet outAdj inAdj byRole rn a b
+      edgeSet := es'; outAdj := oa'; inAdj := ia'; byRole := br'
+      if ch then changed := true
+  return edgeSet
+
+/-- Every recorded row lists the superproperties still possible at one edge of a
+    previously unpopulated role. The edge comes from a checked model of `p`. -/
+private def roleWitnessSuperproperties (p : SROIQD.Problem) {m : SROIQD.SROIQDModel}
+    (base : SROIQD.ModelIndex m) (props : List IRI) (numWorkers : Nat) :
+    Std.HashMap IRI (Std.HashSet IRI) :=
+  let missing := (props.filter fun r => (base.edgesByRole.getD r []).isEmpty).toArray
+  let batchSize := 16
+  let batches := List.range ((missing.size + batchSize - 1) / batchSize)
+  let rows := FastClassification.mapIndependent numWorkers (fun i =>
+    let roles := (missing.extract (i * batchSize) ((i + 1) * batchSize)).toList
+    let seeds := roles.map fun r => SROIQD.Concept.some (r, false) .top
+    match SROIQD.proposeSeededCanonicalModel p seeds with
+    | none => []
+    | some model =>
+      let idx := SROIQD.ModelIndex.build model.val
+      roles.filterMap fun r => do
+        let (src, dst) ← (idx.edgesByRole.getD r []).head?
+        let supers := props.foldl (fun (acc : Std.HashSet IRI) s =>
+          if idx.edgeSet.contains (s, src, dst) then acc.insert s else acc) {}
+        return (r, supers)) batches
+  rows.foldl (fun acc batch => batch.foldl (fun acc (r, supers) => acc.insert r supers) acc) {}
+
+/-- Check extra entailments using sound & complete model-based pre-filtering
+    (any assertion false in a kernel-verified model `m ⊨ o` cannot be entailed by `o`),
+    deterministic role/data-property closure, and parallel ⊥-local module verification. -/
 private def materializeExtraRuntime (o : Ontology) (decls : List EntityDecl) (props inds : List IRI)
-    (opts : MaterializeOptions) : Option (List Axiom) := do
+    (opts : MaterializeOptions) (verifiedModel? : Option (SROIQD.SROIQDModel × SROIQD.Problem) := none)
+    (numWorkers : Nat := 8) : Option (List Axiom) := do
   let idx := FastLocality.LocalityIndex.build o
-  let emit (inferred : Array Axiom) (ax : Axiom) : Option (Array Axiom) := do
+  let checkAx (ax : Axiom) : Option (Option Axiom) := do
     let axioms := (FastLocality.extractBotModuleWithIndex idx o (Profile.axiomSig ax)).1
     let entailed ← decidesAxiomEntails fastConsistencyCheck axioms ax
-    return if entailed then inferred.push ax else inferred
-  let mut inferred := #[]
+    return if entailed then some ax else none
+  let checkBatch (cands : List Axiom) : Option (List Axiom) := do
+    let results ← (FastClassification.mapIndependent numWorkers checkAx cands).mapM id
+    return results.filterMap id
+  let midx? : Option (Sigma fun m => SROIQD.Problem × SROIQD.ModelIndex m) :=
+    verifiedModel?.map fun (m, p) => ⟨m, p, SROIQD.ModelIndex.build m⟩
+  let mut inferred : Array Axiom := #[]
   if opts.includeSubObjectProperties then
+    let mut toldSub : Std.HashSet (IRI × IRI) := {}
+    if let some ⟨_, p, _⟩ := midx? then
+      for (r, s) in Sabrina.ALC.roleClosure p.rules do
+        if !r.2 && !s.2 && r.1 != s.1 then
+          toldSub := toldSub.insert (r.1, s.1)
+    let witnessSupers := match midx? with
+      | some ⟨_, p, midx⟩ => roleWitnessSuperproperties p midx props numWorkers
+      | none => {}
+    let mut toCheck : Array Axiom := #[]
     for r in props do
+      let possibleSupers := witnessSupers[r]?
       for s in props do
         if r != s then
-          inferred ← emit inferred (.subObjectProperty (.named r) (.named s))
+          let ax := Axiom.subObjectProperty (.named r) (.named s)
+          if toldSub.contains (r, s) then
+            inferred := inferred.push ax
+          else
+            let refutedByModel := match possibleSupers, midx? with
+              | some supers, _ => !supers.contains s
+              | none, some ⟨_, _, midx⟩ =>
+                (midx.edgesByRole.getD r []).any fun (u, v) => !midx.edgeSet.contains (s, u, v)
+              | none, none => false
+            if !refutedByModel then
+              toCheck := toCheck.push ax
+    let checked ← checkBatch toCheck.toList
+    for ax in checked do inferred := inferred.push ax
   if opts.includeObjectPropertyAssertions then
-    for r in props do
+    match midx? with
+    | some ⟨m, p, midx⟩ =>
+      let propSet : Std.HashSet IRI := props.foldl (fun s r => s.insert r) {}
+      let toldEdges := computeToldObjEdges p inds
+      let mut indsAtWorld : Std.HashMap Nat (List IRI) := {}
       for a in inds do
-        for b in inds do
-          inferred ← emit inferred (.objectAssertion (.named r) (.named a) (.named b))
+        let w := (midx.indVal (.named a)).val
+        indsAtWorld := indsAtWorld.insert w (a :: indsAtWorld.getD w [])
+      let mut seenEdge : Std.HashSet (IRI × IRI × IRI) := {}
+      let mut toCheck : Array Axiom := #[]
+      for (r, wa, wb) in m.graph.edges do
+        if !propSet.contains r then continue
+        let as := indsAtWorld.getD wa.val []
+        if as.isEmpty then continue
+        let bs := indsAtWorld.getD wb.val []
+        if bs.isEmpty then continue
+        for a in as do
+          for b in bs do
+            if !seenEdge.contains (r, a, b) then
+              seenEdge := seenEdge.insert (r, a, b)
+              let ax := Axiom.objectAssertion (.named r) (.named a) (.named b)
+              if toldEdges.contains (r, a, b) then
+                inferred := inferred.push ax
+              else
+                toCheck := toCheck.push ax
+      let checked ← checkBatch toCheck.toList
+      for ax in checked do inferred := inferred.push ax
+    | none =>
+      let mut toCheck : Array Axiom := #[]
+      for r in props do
+        for a in inds do
+          for b in inds do
+            toCheck := toCheck.push (.objectAssertion (.named r) (.named a) (.named b))
+      let checked ← checkBatch toCheck.toList
+      for ax in checked do inferred := inferred.push ax
   if opts.includeSameIndividuals then
-    let individuals := inds.toArray
-    for h : i in [:individuals.size] do
-      for h' : j in [i + 1:individuals.size] do
-        inferred ← emit inferred (.sameIndividuals [.named individuals[i], .named individuals[j]])
+    match midx? with
+    | some ⟨_, _, midx⟩ =>
+      let mut byWorld : Std.HashMap Nat (List IRI) := {}
+      for a in inds do
+        let w := (midx.indVal (.named a)).val
+        byWorld := byWorld.insert w (a :: byWorld.getD w [])
+      let mut toCheck : Array Axiom := #[]
+      for (_, grp) in byWorld do
+        let arr := grp.reverse.toArray
+        if arr.size ≥ 2 then
+          for h : i in [:arr.size] do
+            for h' : j in [i + 1:arr.size] do
+              toCheck := toCheck.push (.sameIndividuals [.named arr[i], .named arr[j]])
+      let checked ← checkBatch toCheck.toList
+      for ax in checked do inferred := inferred.push ax
+    | none =>
+      let individuals := inds.toArray
+      let mut toCheck : Array Axiom := #[]
+      for h : i in [:individuals.size] do
+        for h' : j in [i + 1:individuals.size] do
+          toCheck := toCheck.push (.sameIndividuals [.named individuals[i], .named individuals[j]])
+      let checked ← checkBatch toCheck.toList
+      for ax in checked do inferred := inferred.push ax
   if opts.includeDataPropertyAssertions then
     let lits := dataCandidateLiterals o
     if !lits.isEmpty then
-      for p in dataCandidateProperties o decls do
-        for ind in inds do
-          for lit in lits do
-            let ax := Axiom.dataAssertion p (.named ind) lit
-            if !o.contains ax then
-              inferred ← emit inferred ax
+      let dProps := dataCandidateProperties o decls
+      let assertedSet : Std.HashSet (IRI × IRI × String × IRI) := Id.run do
+        let mut s : Std.HashSet (IRI × IRI × String × IRI) := {}
+        for ax in o do
+          match ax with
+          | .dataAssertion dp (.named ind) lit => s := s.insert (dp, ind, lit.lexical, lit.datatype)
+          | _ => pure ()
+        return s
+      match midx? with
+      | some ⟨_, p, midx⟩ =>
+        -- Close asserted data assertions along `p.subData` deterministically
+        let mut toldData : Std.HashMap (IRI × IRI) (List Datatypes.Value) := {}
+        for (dp, ia, lit) in p.dataAssertions do
+          if let (.named ind, some v) := (ia, Datatypes.decodeLiteral lit) then
+            let cur := toldData.getD (dp, ind) []
+            if !cur.contains v then
+              toldData := toldData.insert (dp, ind) (v :: cur)
+        let mut dChanged := true
+        let mut dIter := 0
+        while dChanged && dIter < p.subData.length + 2 do
+          dChanged := false
+          dIter := dIter + 1
+          let mut addD : Array (IRI × IRI × Datatypes.Value) := #[]
+          for (r, t) in p.subData do
+            for ((dp, ind), vs) in toldData do
+              if dp == r then
+                let curT := toldData.getD (t, ind) []
+                for v in vs do
+                  if !curT.contains v then
+                    addD := addD.push (t, ind, v)
+          for (t, ind, v) in addD do
+            let curT := toldData.getD (t, ind) []
+            if !curT.contains v then
+              toldData := toldData.insert (t, ind) (v :: curT)
+              dChanged := true
+        let decodedLits : List (Literal × Datatypes.Value) :=
+          lits.filterMap fun l => (Datatypes.decodeLiteral l).map (l, ·)
+        let mut toCheck : Array Axiom := #[]
+        for dp in dProps do
+          for ind in inds do
+            let vals := midx.dataVals dp (midx.indVal (.named ind))
+            if vals.isEmpty then continue
+            let toldVals := toldData.getD (dp, ind) []
+            for (lit, v) in decodedLits do
+              if vals.contains v && !assertedSet.contains (dp, ind, lit.lexical, lit.datatype) then
+                let ax := Axiom.dataAssertion dp (.named ind) lit
+                if toldVals.contains v then
+                  inferred := inferred.push ax
+                else
+                  toCheck := toCheck.push ax
+        let checked ← checkBatch toCheck.toList
+        for ax in checked do inferred := inferred.push ax
+      | none =>
+        let mut toCheck : Array Axiom := #[]
+        for dp in dProps do
+          for ind in inds do
+            for lit in lits do
+              if !assertedSet.contains (dp, ind, lit.lexical, lit.datatype) then
+                toCheck := toCheck.push (.dataAssertion dp (.named ind) lit)
+        let checked ← checkBatch toCheck.toList
+        for ax in checked do inferred := inferred.push ax
   return inferred.toList
 
-/-- Fast hybrid runtime materializer that reuses its hierarchy during ABox realization. -/
+/-- Fast hybrid runtime materializer that reuses a single kernel-verified model
+    and its hierarchy across classification, realization, and extra entailments. -/
 def materializeOntologyRuntime (o : Ontology) (decls : List EntityDecl := [])
-    (opts : MaterializeOptions := {}) : Option MaterializeResult := do
-  let hier ← FastClassification.classifyOntologyFastRuntime o decls
+    (opts : MaterializeOptions := {}) (numWorkers : Nat := 8)
+    (auxiliaryClass? : Option IRI := none) : Option MaterializeResult := do
+  let verifiedModel? := FastClassification.proposeVerifiedModel o
+  let m0? := verifiedModel?.map Prod.fst
+  let hier ← FastClassification.classifyOntologyFastWithModelRuntime o decls numWorkers m0? auxiliaryClass?
   if !hier.consistent then
     return {
       consistent := false
@@ -576,17 +799,32 @@ def materializeOntologyRuntime (o : Ontology) (decls : List EntityDecl := [])
       inferredAxioms := []
       materializedOntology := if opts.includeAsserted then o else []
     }
-  let real ← FastClassification.realizeFromHierarchyRuntime o decls hier
+  let real ← FastClassification.realizeFromHierarchyWithModelRuntime o decls hier numWorkers m0? auxiliaryClass?
   let extraInferred ←
     if opts.includeSubObjectProperties || opts.includeObjectPropertyAssertions ||
         opts.includeSameIndividuals || opts.includeDataPropertyAssertions then do
       let props := if opts.includeSubObjectProperties || opts.includeObjectPropertyAssertions then
         collectNamedObjectProperties o decls else []
-      materializeExtraRuntime o decls props real.individuals opts
+      materializeExtraRuntime o decls props real.individuals opts verifiedModel? numWorkers
     else pure []
   let rawInferred :=
     materializedClassAxioms hier opts ++ materializedTypeAxioms real opts ++ extraInferred
-  let freshInferred := (dedupList rawInferred).filter fun ax => !o.contains ax
+  let assertedByKey : Std.HashMap String (List Axiom) := Id.run do
+    let mut m : Std.HashMap String (List Axiom) := {}
+    for a in o do
+      let k := renderAxiom a
+      m := m.insert k (a :: m.getD k [])
+    return m
+  let mut seenByKey : Std.HashMap String (List Axiom) := {}
+  let mut freshArr : Array Axiom := #[]
+  for ax in rawInferred do
+    let k := renderAxiom ax
+    let inAsserted := (assertedByKey.getD k []).contains ax
+    let inSeen := (seenByKey.getD k []).contains ax
+    if !inAsserted && !inSeen then
+      seenByKey := seenByKey.insert k (ax :: seenByKey.getD k [])
+      freshArr := freshArr.push ax
+  let freshInferred := freshArr.toList
   return {
     consistent := true
     assertedAxioms := o

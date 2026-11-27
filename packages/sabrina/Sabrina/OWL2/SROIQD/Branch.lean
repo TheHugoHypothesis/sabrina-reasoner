@@ -472,21 +472,61 @@ private theorem env_retarget {α : Type} {env : Nat → α} {keep drop : Nat}
   · rename_i h; subst h; exact he
   · rfl
 
+private def eraseBranchDupsFast {α β : Type} [BEq α] [LawfulBEq α]
+    [BEq β] [LawfulBEq β] [Hashable β] [LawfulHashable β]
+    (key : α → β) (xs : List α) : List α :=
+  go xs {} []
+where
+  go : List α → Std.HashMap β (List α) → List α → List α
+    | [], _, kept => kept.reverse
+    | a :: rest, seen, kept =>
+      let bucket := seen.getD (key a) []
+      if bucket.contains a then go rest seen kept
+      else go rest (seen.insert (key a) (a :: bucket)) (a :: kept)
+
+private def eraseBranchDups {α β : Type} [BEq α] [LawfulBEq α]
+    [BEq β] [LawfulBEq β] [Hashable β] [LawfulHashable β]
+    (_key : α → β) (xs : List α) : List α := xs.eraseDups
+
+/-- Bucket the equality checks while preserving the first occurrence and list order. -/
+@[csimp] private theorem eraseBranchDups_eq : @eraseBranchDups = @eraseBranchDupsFast := by
+  funext α β _ _ _ _ _ _ key xs
+  have sameLoop (todo : List α) (seen : Std.HashMap β (List α)) (kept : List α)
+      (h : ∀ a, a ∈ seen.getD (key a) [] ↔ a ∈ kept) :
+      eraseBranchDupsFast.go key todo seen kept = List.eraseDupsBy.loop (· == ·) todo kept := by
+    induction todo generalizing seen kept with
+    | nil => rfl
+    | cons a rest ih =>
+      have hc : (seen.getD (key a) []).contains a = kept.any (a == ·) := by
+        apply Bool.eq_iff_iff.mpr
+        simpa [List.contains_iff_mem, List.any_eq_true, beq_iff_eq] using h a
+      simp only [eraseBranchDupsFast.go, List.eraseDupsBy.loop, hc]
+      cases kept.any (a == ·)
+      · apply ih
+        intro b
+        simp only [Std.HashMap.getD_insert, beq_iff_eq]
+        by_cases hk : key a = key b
+        · simp [hk, h b]
+        · have hab : b ≠ a := fun e => hk (congrArg key e.symm)
+          simp [hk, hab, h b]
+      · exact ih _ _ h
+  exact (sameLoop xs {} [] (by simp)).symm
+
 /-- Merge `drop` into `keep`, preserving all object labels, object edges,
     negative object edges, inequalities, nominal/anonymous bindings, data edges,
     negative data edges, and data constraints. -/
 def Branch.merge (s : Branch) (keep drop : Nat) : Branch :=
   let move := retarget keep drop
-  { labels := (s.labels.map fun (x, c) => (move x, c)).eraseDups
-    edges := (s.edges.map fun (r, x, y) => (r, move x, move y)).eraseDups
-    negEdges := (s.negEdges.map fun (r, x, y) => (r, move x, move y)).eraseDups
-    unequal := (s.unequal.map fun (x, y) => (move x, move y)).eraseDups
-    expanded := (s.expanded.map fun (x, c) => (move x, c)).eraseDups
-    noms := (s.noms.map fun (a, x) => (a, move x)).eraseDups
-    anons := (s.anons.map fun (k, x) => (k, move x)).eraseDups
-    dataEdges := (s.dataEdges.map fun (dp, x, v) => (dp, move x, v)).eraseDups
-    negDataEdges := (s.negDataEdges.map fun (dp, x, v) => (dp, move x, v)).eraseDups
-    dataConstraints := (s.dataConstraints.map fun (x, dp, d) => (move x, dp, d)).eraseDups }
+  { labels := eraseBranchDups Prod.fst (s.labels.map fun (x, c) => (move x, c))
+    edges := eraseBranchDups id (s.edges.map fun (r, x, y) => (r, move x, move y))
+    negEdges := eraseBranchDups id (s.negEdges.map fun (r, x, y) => (r, move x, move y))
+    unequal := eraseBranchDups id (s.unequal.map fun (x, y) => (move x, move y))
+    expanded := eraseBranchDups Prod.fst (s.expanded.map fun (x, c) => (move x, c))
+    noms := eraseBranchDups id (s.noms.map fun (a, x) => (a, move x))
+    anons := eraseBranchDups id (s.anons.map fun (k, x) => (k, move x))
+    dataEdges := eraseBranchDups (fun (dp, x, _) => (dp, x)) (s.dataEdges.map fun (dp, x, v) => (dp, move x, v))
+    negDataEdges := eraseBranchDups (fun (dp, x, _) => (dp, x)) (s.negDataEdges.map fun (dp, x, v) => (dp, move x, v))
+    dataConstraints := eraseBranchDups (fun (x, dp, _) => (x, dp)) (s.dataConstraints.map fun (x, dp, d) => (move x, dp, d)) }
 
 theorem Branch.merge_realizes {s : Branch} {i : Interpretation datatypeMap} {env : Nat → i.Object}
     {keep drop : Nat} (h : s.Realizes i env) (he : env keep = env drop) :
@@ -655,6 +695,86 @@ theorem Branch.allocate_sound {s : Branch} {i : Interpretation datatypeMap} {env
           exact hinj values (hnd rfl) hk' hm' heq
         exact hne (congrArg (start + ·) hkm)
     · exact hold.unequal a b hprev
+
+def Branch.allocateManySome (s : Branch) (items : List (Nat × OrientedRole × Concept)) : Branch :=
+  let start := s.fresh
+  let indexed := items.zipIdx start
+  let newLabels := indexed.map fun ((_, _, body), y) => (y, body)
+  let newEdges := indexed.map fun ((x, r, _), y) => if r.2 then (r.1, y, x) else (r.1, x, y)
+  let newExpanded := items.map fun (x, r, body) => (x, .some r body)
+  { s with
+    labels := newLabels ++ s.labels
+    edges := newEdges ++ s.edges
+    expanded := newExpanded ++ s.expanded }
+
+private theorem exists_some_witnesses {s : Branch} {i : Interpretation datatypeMap}
+    {env : Nat → i.Object} (h : s.Realizes i env)
+    (items : List (Nat × OrientedRole × Concept))
+    (hsub : ∀ item ∈ items, (item.1, .some item.2.1 item.2.2) ∈ s.labels) :
+    ∃ values : List i.Object, values.length = items.length ∧
+      ∀ (k : Nat) (hk : k < items.length) (hkv : k < values.length),
+        holdsOriented i items[k].2.1 (env items[k].1) values[k] ∧ holds i values[k] items[k].2.2 := by
+  induction items with
+  | nil => exact ⟨[], rfl, fun _ hk _ => absurd hk (Nat.not_lt_zero _)⟩
+  | cons hd tl ih =>
+    obtain ⟨v, hv⟩ := h.labels hd.1 (.some hd.2.1 hd.2.2) (hsub hd (List.mem_cons_self ..))
+    obtain ⟨vs, hlen, hrest⟩ := ih (fun it hm => hsub it (List.mem_cons_of_mem _ hm))
+    refine ⟨v :: vs, by simp [hlen], fun k hk hkv => ?_⟩
+    cases k with
+    | zero => exact hv
+    | succ k' => exact hrest k' (Nat.lt_of_succ_lt_succ hk) (Nat.lt_of_succ_lt_succ hkv)
+
+theorem Branch.allocateManySome_sound {s : Branch} {i : Interpretation datatypeMap}
+    {env : Nat → i.Object} (h : s.Realizes i env)
+    (items : List (Nat × OrientedRole × Concept))
+    (hsub : ∀ item ∈ items, (item.1, .some item.2.1 item.2.2) ∈ s.labels) :
+    ∃ env', (s.allocateManySome items).Realizes i env' := by
+  obtain ⟨values, hlen, hvals⟩ := exists_some_witnesses h items hsub
+  let start := s.fresh
+  let env' := assignFresh env start values
+  have hkeep (n : Nat) (hn : n ∈ s.support) : env' n = env n :=
+    assignFresh_old (s.lt_fresh hn)
+  have hold := Branch.realizes_congr h hkeep
+  refine ⟨env', ⟨?_, ?_, hold.negEdges, hold.unequal, hold.noms, hold.anons,
+    hold.dataEdges, hold.negDataEdges, hold.dataConstraints⟩⟩
+  · intro n c hn
+    rcases List.mem_append.mp hn with hnew | hprev
+    · obtain ⟨⟨⟨x, r, body⟩, y⟩, hmem, heq⟩ := List.mem_map.mp hnew
+      cases heq
+      obtain ⟨k, hk, rfl, hget⟩ := zipIdx_index_eq items start hmem
+      have hget' : items[k] = (x, r, c) := Option.some.inj (by simpa [hk] using hget)
+      have hkv : k < values.length := hlen.symm ▸ hk
+      dsimp only [env', start]
+      rw [assignFresh_new hkv]
+      have hw := (hvals k hk hkv).2
+      rw [hget'] at hw
+      exact hw
+    · exact hold.labels n c hprev
+  · intro t a b hn
+    rcases List.mem_append.mp hn with hnew | hprev
+    · obtain ⟨⟨⟨x, r, body⟩, y⟩, hmem, heq⟩ := List.mem_map.mp hnew
+      obtain ⟨k, hk, rfl, hget⟩ := zipIdx_index_eq items start hmem
+      have hget' : items[k] = (x, r, body) := Option.some.inj (by simpa [hk] using hget)
+      have hkv : k < values.length := hlen.symm ▸ hk
+      have hx : x ∈ s.support := by
+        have hmemIt : (x, r, body) ∈ items := hget' ▸ List.getElem_mem hk
+        exact Branch.label_support (hsub _ hmemIt)
+      have hw := (hvals k hk hkv).1
+      rw [hget'] at hw
+      rcases r with ⟨rn, _ | _⟩
+      · simp only [Bool.false_eq_true, ↓reduceIte, Prod.mk.injEq] at heq
+        rcases heq with ⟨rfl, rfl, rfl⟩
+        rw [hkeep x hx]
+        dsimp only [env', start]
+        rw [assignFresh_new hkv]
+        exact hw
+      · simp only [↓reduceIte, Prod.mk.injEq] at heq
+        rcases heq with ⟨rfl, rfl, rfl⟩
+        rw [hkeep x hx]
+        dsimp only [env', start]
+        rw [assignFresh_new hkv]
+        exact hw
+    · exact hold.edges t a b hprev
 
 theorem exists_equal_witnesses {α : Type} {env : Nat → α} {p : α → Prop} {n : Nat}
     {nodes : List Nat} (hlen : nodes.length = n + 1) (hnd : nodes.Nodup)

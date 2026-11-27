@@ -1,3 +1,5 @@
+import Std.Data.HashMap
+import Std.Data.HashSet
 import Sabrina.OWL2.RDF.Graph
 import Sabrina.OWL2.RDF.XMLParser
 import Sabrina.OWL2.RDF.TurtleParser
@@ -17,11 +19,22 @@ open Sabrina.OWL2.RDF
 
 /-! ### 1. Indexed RDF Triple Consumption State -/
 
+private structure MapIndex where
+  bySubject : Std.HashMap RDFTerm (Array Nat)
+  classes : Std.HashSet IRI := {}
+  datatypes : Std.HashSet IRI := {}
+  objProps : Std.HashSet IRI := {}
+  dataProps : Std.HashSet IRI := {}
+  annotProps : Std.HashSet IRI := {}
+  namedInds : Std.HashSet IRI := {}
+  declKeys : Std.HashSet (Nat × IRI) := {}
+
 private structure MapState where
   docId : String
   triples : Array RDFTriple
   consumed : Array Bool
-  -- Typing sets collected in Pass 2 (Table 5)
+  index : Option MapIndex := none
+  -- Kernel-reducible fallback typing lists (used when `index = none` on small graphs)
   classes : List IRI := []
   datatypes : List IRI := []
   objProps : List IRI := []
@@ -61,13 +74,34 @@ private def activeIndices : MapM (List (Nat × RDFTriple)) := do
   return activeIndicesAux st.triples st.consumed st.triples.size 0 []
 
 private def findActiveBySP (s : RDFTerm) (p : IRI) : MapM (List (Nat × RDFTerm)) := do
-  let act ← activeIndices
-  return act.filterMap fun (i, t) =>
-    if t.subject == s && t.predicate == p then some (i, t.object) else none
+  let st ← get
+  match st.index with
+  | some ix =>
+    let idxs := ix.bySubject.getD s #[]
+    return idxs.foldr (fun i acc =>
+      if !st.consumed.getD i true then
+        if h : i < st.triples.size then
+          let t := st.triples[i]
+          if t.predicate == p then (i, t.object) :: acc else acc
+        else acc
+      else acc) []
+  | none =>
+    let act ← activeIndices
+    return act.filterMap fun (i, t) =>
+      if t.subject == s && t.predicate == p then some (i, t.object) else none
 
 private def findActiveByS (s : RDFTerm) : MapM (List (Nat × RDFTriple)) := do
-  let act ← activeIndices
-  return act.filter fun (_, t) => t.subject == s
+  let st ← get
+  match st.index with
+  | some ix =>
+    let idxs := ix.bySubject.getD s #[]
+    return idxs.foldr (fun i acc =>
+      if !st.consumed.getD i true then
+        if h : i < st.triples.size then (i, st.triples[i]) :: acc else acc
+      else acc) []
+  | none =>
+    let act ← activeIndices
+    return act.filter fun (_, t) => t.subject == s
 
 private def hasType (s : RDFTerm) (ty : IRI) : MapM (Option Nat) := do
   let hits ← findActiveBySP s rdfType
@@ -76,10 +110,16 @@ private def hasType (s : RDFTerm) (ty : IRI) : MapM (Option Nat) := do
   return none
 
 private def isObjPropIRI (st : MapState) (iri : IRI) : Bool :=
-  isBuiltInObjProp iri || st.objProps.contains iri
+  isBuiltInObjProp iri ||
+    match st.index with
+    | some ix => ix.objProps.contains iri
+    | none => st.objProps.contains iri
 
 private def isDataPropIRI (st : MapState) (iri : IRI) : Bool :=
-  isBuiltInDataProp iri || st.dataProps.contains iri
+  isBuiltInDataProp iri ||
+    match st.index with
+    | some ix => ix.dataProps.contains iri
+    | none => st.dataProps.contains iri
 
 private def isKnownMetadataVocab (iri : IRI) : Bool :=
   iri.startsWith "http://purl.org/dc/terms/" ||
@@ -90,13 +130,22 @@ private def isKnownMetadataVocab (iri : IRI) : Bool :=
   iri.startsWith "http://xmlns.com/foaf/0.1/"
 
 private def isAnnotPropIRI (st : MapState) (iri : IRI) : Bool :=
-  isBuiltInAnnotProp iri || st.annotProps.contains iri
+  isBuiltInAnnotProp iri ||
+    match st.index with
+    | some ix => ix.annotProps.contains iri
+    | none => st.annotProps.contains iri
 
 private def isDatatypeIRI (st : MapState) (iri : IRI) : Bool :=
-  isBuiltInDatatype iri || st.datatypes.contains iri
+  isBuiltInDatatype iri ||
+    match st.index with
+    | some ix => ix.datatypes.contains iri
+    | none => st.datatypes.contains iri
 
 private def isClassIRI (st : MapState) (iri : IRI) : Bool :=
-  isBuiltInClass iri || st.classes.contains iri
+  isBuiltInClass iri ||
+    match st.index with
+    | some ix => ix.classes.contains iri
+    | none => st.classes.contains iri
 
 private def termToIndividual (docId : String) : RDFTerm → Except String Individual
   | .iri i => .ok (.named i)
@@ -363,17 +412,40 @@ private def consumeClassExpr (fuel : Nat) (term : RDFTerm) : MapM ClassExpr := d
 private def addAxiom (ax : Axiom) : MapM Unit :=
   modify fun st => { st with axioms := ax :: st.axioms }
 
+private def entityKindTag : EntityKind → Nat
+  | .cls => 0
+  | .datatype => 1
+  | .objectProperty => 2
+  | .dataProperty => 3
+  | .annotationProperty => 4
+  | .namedIndividual => 5
+
 private def addDecl (kind : EntityKind) (iri : IRI) : MapM Unit :=
   modify fun st =>
-    let d : EntityDecl := ⟨kind, iri⟩
-    let decls := if st.declarations.contains d then st.declarations else d :: st.declarations
-    match kind with
-    | .cls => { st with declarations := decls, classes := iri :: st.classes }
-    | .datatype => { st with declarations := decls, datatypes := iri :: st.datatypes }
-    | .objectProperty => { st with declarations := decls, objProps := iri :: st.objProps }
-    | .dataProperty => { st with declarations := decls, dataProps := iri :: st.dataProps }
-    | .annotationProperty => { st with declarations := decls, annotProps := iri :: st.annotProps }
-    | .namedIndividual => { st with declarations := decls, namedInds := iri :: st.namedInds }
+    match st.index with
+    | some ix =>
+      let key := (entityKindTag kind, iri)
+      let (decls, declKeys) :=
+        if ix.declKeys.contains key then (st.declarations, ix.declKeys)
+        else (⟨kind, iri⟩ :: st.declarations, ix.declKeys.insert key)
+      let ix' := match kind with
+        | .cls => { ix with declKeys, classes := ix.classes.insert iri }
+        | .datatype => { ix with declKeys, datatypes := ix.datatypes.insert iri }
+        | .objectProperty => { ix with declKeys, objProps := ix.objProps.insert iri }
+        | .dataProperty => { ix with declKeys, dataProps := ix.dataProps.insert iri }
+        | .annotationProperty => { ix with declKeys, annotProps := ix.annotProps.insert iri }
+        | .namedIndividual => { ix with declKeys, namedInds := ix.namedInds.insert iri }
+      { st with declarations := decls, index := some ix' }
+    | none =>
+      let d : EntityDecl := ⟨kind, iri⟩
+      let decls := if st.declarations.contains d then st.declarations else d :: st.declarations
+      match kind with
+      | .cls => { st with declarations := decls, classes := iri :: st.classes }
+      | .datatype => { st with declarations := decls, datatypes := iri :: st.datatypes }
+      | .objectProperty => { st with declarations := decls, objProps := iri :: st.objProps }
+      | .dataProperty => { st with declarations := decls, dataProps := iri :: st.dataProps }
+      | .annotationProperty => { st with declarations := decls, annotProps := iri :: st.annotProps }
+      | .namedIndividual => { st with declarations := decls, namedInds := iri :: st.namedInds }
 
 private def addAnnot (a : AnnotationAxiom) : MapM Unit :=
   modify fun st => { st with annotationAxioms := a :: st.annotationAxioms }
@@ -871,14 +943,34 @@ private def passAssertions (fuel : Nat) : MapM Unit := do
         addAxiom (.objectAssertion (.named t.predicate) sInd oInd)
 
 private def seedImportedDecls (st : MapState) (decls : List EntityDecl) : MapState :=
-  decls.foldl (fun acc d =>
-    match d.kind with
-    | .cls => { acc with classes := d.iri :: acc.classes }
-    | .datatype => { acc with datatypes := d.iri :: acc.datatypes }
-    | .objectProperty => { acc with objProps := d.iri :: acc.objProps }
-    | .dataProperty => { acc with dataProps := d.iri :: acc.dataProps }
-    | .annotationProperty => { acc with annotProps := d.iri :: acc.annotProps }
-    | .namedIndividual => { acc with namedInds := d.iri :: acc.namedInds }) st
+  match st.index with
+  | some ix =>
+    let ix' := decls.foldl (fun acc d =>
+      match d.kind with
+      | .cls => { acc with classes := acc.classes.insert d.iri }
+      | .datatype => { acc with datatypes := acc.datatypes.insert d.iri }
+      | .objectProperty => { acc with objProps := acc.objProps.insert d.iri }
+      | .dataProperty => { acc with dataProps := acc.dataProps.insert d.iri }
+      | .annotationProperty => { acc with annotProps := acc.annotProps.insert d.iri }
+      | .namedIndividual => { acc with namedInds := acc.namedInds.insert d.iri }) ix
+    { st with index := some ix' }
+  | none =>
+    decls.foldl (fun acc d =>
+      match d.kind with
+      | .cls => { acc with classes := d.iri :: acc.classes }
+      | .datatype => { acc with datatypes := d.iri :: acc.datatypes }
+      | .objectProperty => { acc with objProps := d.iri :: acc.objProps }
+      | .dataProperty => { acc with dataProps := d.iri :: acc.dataProps }
+      | .annotationProperty => { acc with annotProps := d.iri :: acc.annotProps }
+      | .namedIndividual => { acc with namedInds := d.iri :: acc.namedInds }) st
+
+private def buildSubjectIndex (triples : Array RDFTriple) : Std.HashMap RDFTerm (Array Nat) := Id.run do
+  let mut m : Std.HashMap RDFTerm (Array Nat) := Std.HashMap.emptyWithCapacity (triples.size / 2 + 1)
+  for h : i in [0:triples.size] do
+    let s := triples[i].subject
+    let arr := m.getD s #[]
+    m := m.insert s (arr.push i)
+  return m
 
 /-- Map a parsed `RDFGraph` to a SABRINA `ParsedDocument` per W3C OWL 2 Mapping
     to RDF Graphs (Tables 3–18). When `strictUnconsumed` is `true`, rejects any
@@ -887,10 +979,13 @@ private def seedImportedDecls (st : MapState) (decls : List EntityDecl) : MapSta
 def mapRDFGraph (docId : String) (g : RDFGraph) (strictUnconsumed : Bool := true)
     (importedDecls : List EntityDecl := []) :
     Except String ParsedDocument := do
+  let tripleArr := g.triples.toArray
+  let useIndex := tripleArr.size > 64 || importedDecls.length > 64
   let baseSt : MapState := {
     docId := docId
-    triples := g.triples.toArray
-    consumed := Array.replicate g.triples.length false
+    triples := tripleArr
+    consumed := Array.replicate tripleArr.size false
+    index := if useIndex then some { bySubject := buildSubjectIndex tripleArr } else none
   }
   let initSt := if importedDecls.isEmpty then baseSt else seedImportedDecls baseSt importedDecls
   let fuel := g.triples.length + 32
@@ -1100,26 +1195,26 @@ def resolveImportClosureAuto (rootText : String) (library : List (IRI × String)
   -- Phase 2: Map each reachable RDF graph with full import-closure declarations
   let reachableOrd := reachable.reverse
   let mut rootDoc? : Option ParsedDocument := none
-  let mut allDecls : List EntityDecl := []
-  let mut allAnnots : List AnnotationAxiom := []
-  let mut allAxioms : Ontology := []
-  let mut allRules : List SWRL.SWRLRule := []
+  let mut allDecls : Array EntityDecl := #[]
+  let mut allAnnots : Array AnnotationAxiom := #[]
+  let mut allAxioms : Array Axiom := #[]
+  let mut allRules : Array SWRL.SWRLRule := #[]
   for raw in reachableOrd do
     let doc ← raw.finalize strictRDF closureDecls
     if rootDoc?.isNone then rootDoc? := some doc
-    allDecls := allDecls ++ doc.declarations
-    allAnnots := allAnnots ++ doc.annotationAxioms
-    allAxioms := allAxioms ++ doc.ontology
-    allRules := allRules ++ doc.rules
+    allDecls := allDecls ++ doc.declarations.toArray
+    allAnnots := allAnnots ++ doc.annotationAxioms.toArray
+    allAxioms := allAxioms ++ doc.ontology.toArray
+    allRules := allRules ++ doc.rules.toArray
   let rootDoc := rootDoc?.getD { prefixes := [], ontology := [] }
   return {
     prefixes := rootDoc.prefixes
-    declarations := allDecls
-    annotationAxioms := allAnnots
-    ontology := allAxioms
+    declarations := allDecls.toList
+    annotationAxioms := allAnnots.toList
+    ontology := allAxioms.toList
     ontologyIRI := rootDoc.ontologyIRI
     versionIRI := rootDoc.versionIRI
-    rules := allRules
+    rules := allRules.toList
   }
 
 /-! ### 5. Forward Structural-to-RDF Mapping (W3C Table 1) & Correspondence Proofs -/

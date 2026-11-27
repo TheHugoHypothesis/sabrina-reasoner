@@ -88,8 +88,13 @@ private theorem oneOf_holds_iff (i : Interpretation dm) (x : i.Object)
   induction inds with
   | nil => simp [Concept.oneOf, SROIQD.holds]
   | cons ind tail ih =>
-    simp only [Concept.oneOf, List.foldr_cons, SROIQD.holds, List.mem_cons, exists_eq_or_imp]
-    exact or_congr eq_comm ih
+    cases tail with
+    | nil =>
+      simp only [Concept.oneOf, SROIQD.holds, List.mem_singleton, exists_eq_left]
+      exact eq_comm
+    | cons ind2 tail2 =>
+      simp only [Concept.oneOf, SROIQD.holds, List.mem_cons, exists_eq_or_imp] at ih ⊢
+      exact or_congr eq_comm ih
 
 section Lowering
 
@@ -213,7 +218,10 @@ def addAxiom (p : Problem) : Axiom → Option Problem
     let disjs : List Inclusion := (allPairs ncs).map fun (a, b) => ⟨.conj a b, .bottom⟩
     some { p with tbox := cover :: subs ++ disjs ++ p.tbox }
   | .subObjectProperty r s =>
-    some { p with rules := (toOriented r, toOriented s) :: p.rules }
+    if objPropName s == topObjectProperty || objPropName r == bottomObjectProperty then
+      some p
+    else
+      some { p with rules := (toOriented r, toOriented s) :: p.rules }
   | .subObjectPropertyChain rs h =>
     if rs.length < 2 then none
     else some { p with chains := normalizeChain rs h :: p.chains }
@@ -248,7 +256,10 @@ def addAxiom (p : Problem) : Axiom → Option Problem
     let rn := objPropName r
     some { p with chains := RoleChains.Chain.named [rn, rn] rn :: p.chains }
   | .subDataProperty r s =>
-    some { p with subData := (r, s) :: p.subData }
+    if s == topDataProperty || r == bottomDataProperty then
+      some p
+    else
+      some { p with subData := (r, s) :: p.subData }
   | .equivalentDataProperties rs =>
     let pairs := (allPairs rs).flatMap fun (r, s) => [(r, s), (s, r)]
     some { p with subData := pairs ++ p.subData }
@@ -448,23 +459,39 @@ theorem addAxiom_models_iff_with (i : Interpretation dm) (p p' : Problem) (ax : 
       · exact hdisj.mpr hpair _ (List.mem_map_of_mem hpr) x hx
       · exact hmod.tbox q hq x hx
   | subObjectProperty r s =>
-    simp only [addAxiom, Option.some.injEq] at h; subst h
-    constructor
-    · intro hm
-      refine ⟨fun x y hxy => (oriented_iff i s x y).mpr (hm.rules _ (List.mem_cons_self ..) x y ((oriented_iff i r x y).mp hxy)),
-        ⟨hm.tbox, fun rs hrs => hm.rules rs (List.mem_cons_of_mem _ hrs), hm.chains, hm.reflexive,
-         hm.irreflexive, hm.asymmetric, hm.disjoint, hm.subData, hm.disjointData, hm.funcData,
-         hm.dataRanges, hm.keys, hm.classAssertions, hm.objAssertions, hm.negObjAssertions,
-         hm.sameInds, hm.diffInds, hm.dataAssertions, hm.negDataAssertions⟩⟩
-    · rintro ⟨hax, hm⟩
-      refine ⟨hm.tbox, ?_, hm.chains, hm.reflexive, hm.irreflexive, hm.asymmetric, hm.disjoint,
-        hm.subData, hm.disjointData, hm.funcData, hm.dataRanges, hm.keys, hm.classAssertions,
-        hm.objAssertions, hm.negObjAssertions, hm.sameInds, hm.diffInds, hm.dataAssertions,
-        hm.negDataAssertions⟩
-      intro rs hrs x y hxy
-      rcases List.mem_cons.mp hrs with rfl | hrs
-      · exact (oriented_iff i s x y).mp (hax x y ((oriented_iff i r x y).mpr hxy))
-      · exact hm.rules rs hrs x y hxy
+    simp only [addAxiom] at h
+    split at h
+    · rename_i htaut
+      simp only [Option.some.injEq] at h; subst h
+      have hax : axiomHolds i (.subObjectProperty r s) := by
+        intro x y hxy
+        rcases Bool.or_eq_true_iff.mp htaut with hs | hr
+        · have hs' := beq_iff_eq.mp hs
+          cases s with
+          | named sn => simp only [objPropName] at hs'; subst hs'; exact i.topObjectExt x y
+          | inverse sn => simp only [objPropName] at hs'; subst hs'; exact i.topObjectExt y x
+        · have hr' := beq_iff_eq.mp hr
+          cases r with
+          | named rn => simp only [objPropName] at hr'; subst hr'; exact (i.bottomObjectExt x y hxy).elim
+          | inverse rn => simp only [objPropName] at hr'; subst hr'; exact (i.bottomObjectExt y x hxy).elim
+      exact ⟨fun hm => ⟨hax, hm⟩, fun ⟨_, hm⟩ => hm⟩
+    · simp only [Option.some.injEq] at h; subst h
+      constructor
+      · intro hm
+        refine ⟨fun x y hxy => (oriented_iff i s x y).mpr (hm.rules _ (List.mem_cons_self ..) x y ((oriented_iff i r x y).mp hxy)),
+          ⟨hm.tbox, fun rs hrs => hm.rules rs (List.mem_cons_of_mem _ hrs), hm.chains, hm.reflexive,
+           hm.irreflexive, hm.asymmetric, hm.disjoint, hm.subData, hm.disjointData, hm.funcData,
+           hm.dataRanges, hm.keys, hm.classAssertions, hm.objAssertions, hm.negObjAssertions,
+           hm.sameInds, hm.diffInds, hm.dataAssertions, hm.negDataAssertions⟩⟩
+      · rintro ⟨hax, hm⟩
+        refine ⟨hm.tbox, ?_, hm.chains, hm.reflexive, hm.irreflexive, hm.asymmetric, hm.disjoint,
+          hm.subData, hm.disjointData, hm.funcData, hm.dataRanges, hm.keys, hm.classAssertions,
+          hm.objAssertions, hm.negObjAssertions, hm.sameInds, hm.diffInds, hm.dataAssertions,
+          hm.negDataAssertions⟩
+        intro rs hrs x y hxy
+        rcases List.mem_cons.mp hrs with rfl | hrs
+        · exact (oriented_iff i s x y).mp (hax x y ((oriented_iff i r x y).mpr hxy))
+        · exact hm.rules rs hrs x y hxy
   | subObjectPropertyChain rs s =>
     simp only [addAxiom] at h
     split at h
@@ -774,16 +801,26 @@ theorem addAxiom_models_iff_with (i : Interpretation dm) (p p' : Problem) (ax : 
         · obtain ⟨y, hxy, w, hyw, rfl⟩ := hp; exact hax w y x hyw hxy
         · exact hm.chains c hc x z hp
   | subDataProperty r s =>
-    simp only [addAxiom, Option.some.injEq] at h; subst h
-    exact ⟨fun hm => ⟨hm.subData _ (List.mem_cons_self ..),
-        ⟨hm.tbox, hm.rules, hm.chains, hm.reflexive, hm.irreflexive, hm.asymmetric, hm.disjoint,
-         fun pr hpr => hm.subData pr (List.mem_cons_of_mem _ hpr), hm.disjointData, hm.funcData,
-         hm.dataRanges, hm.keys, hm.classAssertions, hm.objAssertions, hm.negObjAssertions,
-         hm.sameInds, hm.diffInds, hm.dataAssertions, hm.negDataAssertions⟩⟩,
-      fun ⟨hax, hm⟩ => ⟨hm.tbox, hm.rules, hm.chains, hm.reflexive, hm.irreflexive, hm.asymmetric,
-        hm.disjoint, fun pr hpr => (List.mem_cons.mp hpr).elim (fun e => e ▸ hax) (hm.subData pr),
-        hm.disjointData, hm.funcData, hm.dataRanges, hm.keys, hm.classAssertions, hm.objAssertions,
-        hm.negObjAssertions, hm.sameInds, hm.diffInds, hm.dataAssertions, hm.negDataAssertions⟩⟩
+    simp only [addAxiom] at h
+    split at h
+    · rename_i htaut
+      simp only [Option.some.injEq] at h; subst h
+      have hax : axiomHolds i (.subDataProperty r s) := by
+        intro x y hxy
+        rcases Bool.or_eq_true_iff.mp htaut with hs | hr
+        · have hs' := beq_iff_eq.mp hs; subst hs'; exact i.topDataExt x y
+        · have hr' := beq_iff_eq.mp hr; subst hr'; exact (i.bottomDataExt x y hxy).elim
+      exact ⟨fun hm => ⟨hax, hm⟩, fun ⟨_, hm⟩ => hm⟩
+    · simp only [Option.some.injEq] at h; subst h
+      exact ⟨fun hm => ⟨hm.subData _ (List.mem_cons_self ..),
+          ⟨hm.tbox, hm.rules, hm.chains, hm.reflexive, hm.irreflexive, hm.asymmetric, hm.disjoint,
+           fun pr hpr => hm.subData pr (List.mem_cons_of_mem _ hpr), hm.disjointData, hm.funcData,
+           hm.dataRanges, hm.keys, hm.classAssertions, hm.objAssertions, hm.negObjAssertions,
+           hm.sameInds, hm.diffInds, hm.dataAssertions, hm.negDataAssertions⟩⟩,
+        fun ⟨hax, hm⟩ => ⟨hm.tbox, hm.rules, hm.chains, hm.reflexive, hm.irreflexive, hm.asymmetric,
+          hm.disjoint, fun pr hpr => (List.mem_cons.mp hpr).elim (fun e => e ▸ hax) (hm.subData pr),
+          hm.disjointData, hm.funcData, hm.dataRanges, hm.keys, hm.classAssertions, hm.objAssertions,
+          hm.negObjAssertions, hm.sameInds, hm.diffInds, hm.dataAssertions, hm.negDataAssertions⟩⟩
   | equivalentDataProperties rs =>
     simp only [addAxiom, Option.some.injEq] at h; subst h
     have heq_iff : (∀ e ∈ (allPairs rs).flatMap (fun (r, s) => [(r, s), (s, r)]),

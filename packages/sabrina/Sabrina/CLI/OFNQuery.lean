@@ -225,21 +225,27 @@ private def usesReal (p : Problem) : Bool :=
 private def declaredNamedInds (decls : List EntityDecl) : List IRI :=
   decls.filterMap fun d => if d.kind == .namedIndividual then some d.iri else none
 
-private def lowerClosureSWRL (closure : ResolvedOFNClosure) (extraInds : List IRI := []) :
-    Except String (Ontology × List (Axiom × SWRL.SWRLRule)) := do
+private def lowerClosureSWRL (closure : ResolvedOFNClosure) (extraInds : List IRI := [])
+    (extraForbidden : List IRI := []) :
+    Except String (Ontology × List (Axiom × SWRL.SWRLRule) × Option IRI) := do
   if closure.rules.isEmpty then
-    return (closure.ontology, [])
+    return (closure.ontology, [], none)
   let inds := SWRL.collectNamedIndividuals closure.ontology closure.rules
     (declaredNamedInds closure.declarations ++ extraInds)
-  let prov ← SWRL.lowerSWRLRulesWithProvenance closure.ontology inds closure.rules
-  return (closure.ontology ++ prov.map Prod.fst, prov)
+  let (guardCls?, guardAxs, prov) ←
+    SWRL.lowerSWRLRulesGuardedWithProvenance closure.ontology inds closure.rules extraForbidden
+  return (closure.ontology ++ guardAxs ++ prov.map Prod.fst, prov, guardCls?)
 
-private def renderJustificationWithRules (prov : List (Axiom × SWRL.SWRLRule)) (J : Ontology) :
-    List String :=
-  (J.map fun ax =>
-    match prov.lookup ax with
-    | some r => renderSWRLRule r
-    | none => renderAxiom ax).eraseDups
+private def renderJustificationWithRules (prov : List (Axiom × SWRL.SWRLRule))
+    (guardCls? : Option IRI) (J : Ontology) : List String :=
+  (J.filterMap fun ax =>
+    if let some g := guardCls? then
+      if SWRL.axiomHasClass g ax then
+        (prov.lookup ax).map renderSWRLRule
+      else
+        some (match prov.lookup ax with | some r => renderSWRLRule r | none => renderAxiom ax)
+    else
+      some (match prov.lookup ax with | some r => renderSWRLRule r | none => renderAxiom ax)).eraseDups
 
 private def runConsistency (id ofnText : String) (lib : List (IRI × String))
     (opts : QueryOptions) : UInt32 × Json := Id.run do
@@ -404,7 +410,7 @@ private def runQuery (id ofnText queryText : String) (lib : List (IRI × String)
       return (2, response "UNSUPPORTED" false
         (("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson false) :: ("reason", toJson err) :: baseContext))
   let hasRules := !closure.rules.isEmpty
-  let (ont, _) ← match lowerClosureSWRL closure (SWRL.axiomNamedInds qAx) with
+  let (ont, _, _) ← match lowerClosureSWRL closure (SWRL.axiomNamedInds qAx) (StrictTyping.axiomClasses qAx) with
     | .ok r => pure r
     | .error err => return (2, response "UNSUPPORTED" false (("reason", toJson err) :: baseContext))
   let strictCtx := if strictOwl2DL then
@@ -625,7 +631,7 @@ def runClassifyDocument (id docText : String) (lib : List (IRI × String))
       return (2, response "UNSUPPORTED" false [
         ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
         ("reason", toJson err), ("scope", scope)])
-  let (ont, _) ← match lowerClosureSWRL closure with
+  let (ont, _, guardCls?) ← match lowerClosureSWRL closure with
     | .ok r => pure r
     | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson err), ("scope", scope)])
   if summaryOnly && closure.rules.isEmpty then
@@ -645,8 +651,11 @@ def runClassifyDocument (id docText : String) (lib : List (IRI × String))
       let base := [("classification_summary", summary), ("scope", scope)]
       let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: base else base
       return (0, response verdict true fields)
-  match FastClassification.classifyOntologyFastRuntime ont closure.declarations numWorkers with
-  | some hier =>
+  match FastClassification.classifyOntologyFastRuntime ont closure.declarations numWorkers guardCls? with
+  | some h =>
+    let hier := if guardCls?.isSome then
+        { h with equivalences := h.equivalences.filter (fun group => group.length ≥ 2) }
+      else h
     let verdict := if hier.consistent then "CLASSIFIED" else "INCONSISTENT_ONTOLOGY"
     let base := if summaryOnly then
         let summary := Json.mkObj [
@@ -690,10 +699,10 @@ def runRealize (j : Json) (cliStrict : Bool := false)
       return (2, response "UNSUPPORTED" false [
         ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
         ("reason", toJson err), ("scope", scope)])
-  let (ont, _) ← match lowerClosureSWRL closure with
+  let (ont, _, guardCls?) ← match lowerClosureSWRL closure with
     | .ok r => pure r
     | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson err), ("scope", scope)])
-  match FastClassification.realizeOntologyFastRuntime ont closure.declarations with
+  match FastClassification.realizeOntologyFastRuntime ont closure.declarations (auxiliaryClass? := guardCls?) with
   | some real =>
     let verdict := if real.consistent then "REALIZED" else "INCONSISTENT_ONTOLOGY"
     let base := [("realization", encodeRealization real), ("scope", scope)]
@@ -718,10 +727,10 @@ def runMaterializeDocument (id docText : String) (lib : List (IRI × String))
       return (2, response "UNSUPPORTED" false [
         ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
         ("reason", toJson err), ("scope", scope)], none)
-  let (ont, _) ← match lowerClosureSWRL closure with
+  let (ont, _, guardCls?) ← match lowerClosureSWRL closure with
     | .ok r => pure r
     | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson err), ("scope", scope)], none)
-  match Materialize.materializeOntologyRuntime ont closure.declarations opts with
+  match Materialize.materializeOntologyRuntime ont closure.declarations opts (auxiliaryClass? := guardCls?) with
   | none =>
     return (2, response "UNSUPPORTED" false [
       ("reason", toJson "ontology outside exact materialization fragment"), ("scope", scope)], none)
@@ -730,7 +739,15 @@ def runMaterializeDocument (id docText : String) (lib : List (IRI × String))
       let base := [("consistent", toJson false), ("scope", scope)]
       let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: base else base
       return (1, response "INCONSISTENT_ONTOLOGY" true fields, none)
-    let freshInferred := res.inferredAxioms.filter fun ax => !closure.ontology.contains ax
+    let assertedByKey : Std.HashMap String (List Axiom) := Id.run do
+      let mut m : Std.HashMap String (List Axiom) := {}
+      for a in closure.ontology do
+        let k := FunctionalSyntax.renderAxiom a
+        m := m.insert k (a :: m.getD k [])
+      return m
+    let freshInferred := res.inferredAxioms.filter fun ax =>
+      !(assertedByKey.getD (FunctionalSyntax.renderAxiom ax) []).contains ax &&
+      (match guardCls? with | some g => !SWRL.axiomHasClass g ax | none => true)
     let finalOnt := if opts.includeAsserted then closure.ontology ++ freshInferred else freshInferred
     let finalRules := if opts.includeAsserted then closure.rules else []
     let rendered := Materialize.renderMaterialized fmt closure.declarations
@@ -822,11 +839,11 @@ def runMaterialize (j : Json) (cliStrict : Bool := false)
     | _, _ => return (code, metaJson)
 
 private def encodeJustifications (justs : List Ontology)
-    (prov : List (Axiom × SWRL.SWRLRule) := []) : Json :=
+    (prov : List (Axiom × SWRL.SWRLRule) := []) (guardCls? : Option IRI := none) : Json :=
   if prov.isEmpty then
     toJson (justs.map fun J => toJson (J.map renderAxiom))
   else
-    toJson (justs.map fun J => toJson (renderJustificationWithRules prov J))
+    toJson (justs.map fun J => toJson (renderJustificationWithRules prov guardCls? J))
 
 /-- Explain inconsistency (`queryText? = none`) or entailment (`queryText? = some q`)
     with kernel-verified minimal justifications (Horridge–Kalyanpur–Parsia + Reiter HST). -/
@@ -845,7 +862,7 @@ def runExplainDocument (id docText : String) (queryText? : Option String)
         return (2, response "UNSUPPORTED" false [
           ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
           ("reason", toJson err), ("scope", scope)])
-    let (ont, prov) ← match lowerClosureSWRL closure with
+    let (ont, prov, guardCls?) ← match lowerClosureSWRL closure with
       | .ok r => pure r
       | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson err), ("scope", scope)])
     match Justification.explainInconsistencyRuntime ont maxJusts with
@@ -857,7 +874,7 @@ def runExplainDocument (id docText : String) (queryText? : Option String)
         ("kind", toJson "inconsistency"),
         ("inconsistent", toJson res.inconsistent),
         ("justification_count", toJson res.justifications.length),
-        ("justifications", encodeJustifications res.justifications prov),
+        ("justifications", encodeJustifications res.justifications prov guardCls?),
         ("scope", scope)]
       let baseWithSWRL := if closure.rules.isEmpty then base else ("swrl_rules", toJson closure.rules.length) :: base
       let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: baseWithSWRL else baseWithSWRL
@@ -873,7 +890,7 @@ def runExplainDocument (id docText : String) (queryText? : Option String)
         return (2, response "UNSUPPORTED" false [
           ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
           ("reason", toJson err), ("query", toJson qText), ("scope", scope)])
-    let (ont, prov) ← match lowerClosureSWRL closure (SWRL.axiomNamedInds qAx) with
+    let (ont, prov, guardCls?) ← match lowerClosureSWRL closure (SWRL.axiomNamedInds qAx) (StrictTyping.axiomClasses qAx) with
       | .ok r => pure r
       | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson err), ("query", toJson qText), ("scope", scope)])
     match Justification.explainEntailmentRuntime ont qAx maxJusts with
@@ -886,7 +903,7 @@ def runExplainDocument (id docText : String) (queryText? : Option String)
         ("query", toJson qText),
         ("entailed", toJson res.entailed),
         ("justification_count", toJson res.justifications.length),
-        ("justifications", encodeJustifications res.justifications prov),
+        ("justifications", encodeJustifications res.justifications prov guardCls?),
         ("scope", scope)]
       let baseWithSWRL := if closure.rules.isEmpty then base else ("swrl_rules", toJson closure.rules.length) :: base
       let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: baseWithSWRL else baseWithSWRL

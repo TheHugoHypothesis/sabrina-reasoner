@@ -42,8 +42,10 @@ inductive Concept where
 
 abbrev Concept.atom (name : IRI) : Concept := .lit name true
 
-def Concept.oneOf (individuals : List Individual) : Concept :=
-  individuals.foldr (fun a acc => .disj (.nom a true) acc) .bottom
+def Concept.oneOf : List Individual → Concept
+  | [] => .bottom
+  | [a] => .nom a true
+  | a :: rest => .disj (.nom a true) (Concept.oneOf rest)
 
 def Concept.hasValue (role : OrientedRole) (individual : Individual) : Concept :=
   .some role (.nom individual true)

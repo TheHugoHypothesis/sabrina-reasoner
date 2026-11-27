@@ -989,6 +989,14 @@ def realBuiltinSem : BuiltinSemantics realDatatypeMap :=
     else
       ∃ vs : List Value, xs = vs.map (fun v => i.embedValue (.inl v)) ∧ evalBuiltinRel b vs = true
 
+theorem realBuiltinSem_classes_irrel (i : Interpretation realDatatypeMap)
+    (cls : IRI → i.Object → Prop) (hT : ∀ x, cls thing x) (hN : ∀ x, ¬ cls nothing x)
+    (b : IRI) (vs : List i.Data) :
+    realBuiltinSem { i with classes := cls, thingExt := hT, nothingExt := hN } b vs ↔
+      realBuiltinSem i b vs := by
+  unfold realBuiltinSem stringFacetRelation
+  rcases vs with _ | ⟨x, _ | ⟨y, _ | _⟩⟩ <;> simp
+
 private def comparisonArgs : List DArg → Option (IRI × Literal × Bool)
   | [.var v, .lit l] => some (v, l, false)
   | [.lit l, .var v] => some (v, l, true)

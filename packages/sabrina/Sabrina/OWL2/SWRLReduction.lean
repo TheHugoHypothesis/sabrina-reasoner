@@ -1390,6 +1390,1073 @@ theorem groundAllRules_entails_iff {dm : DatatypeMap} (bSem : BuiltinSemantics d
   · intro hent i hmodR; exact hent i ((hmod i).mpr hmodR)
   · intro hent i hmodO; exact hent i ((hmod i).mp hmodO)
 
+/-! ### 4b. Nominal-Anchored & Auxiliary-Guard DL-Safe Encoding (Motik–Sattler–Studer) -/
+
+/-- `guard` holds on every named individual in `namedInds` (sufficient for rule soundness). -/
+def GuardCovers {dm : DatatypeMap} (namedInds : List IRI) (i : Interpretation dm)
+    (guard : ClassExpr) : Prop :=
+  ∀ a ∈ namedInds, classHolds i (i.individuals (.named a)) guard
+
+/-- `guard` holds on an object iff it interprets some named individual in `namedInds`. -/
+def GuardExact {dm : DatatypeMap} (namedInds : List IRI) (i : Interpretation dm)
+    (guard : ClassExpr) : Prop :=
+  ∀ x, classHolds i x guard ↔ ∃ a ∈ namedInds, x = i.individuals (.named a)
+
+theorem GuardExact.covers {dm : DatatypeMap} {namedInds : List IRI} {i : Interpretation dm}
+    {guard : ClassExpr} (h : GuardExact namedInds i guard) :
+    GuardCovers namedInds i guard :=
+  fun a ha => (h (i.individuals (.named a))).mpr ⟨a, ha, rfl⟩
+
+/-- Encode a single-variable DL-safe rule `r` (`r.iVars = [v]`) using an explicit domain guard `guard`. -/
+def encodeUnaryRuleWithGuard (guard : ClassExpr) (r : SWRLRule) : Option (List Axiom) :=
+  match r.iVars with
+  | [v] => do
+    let bodyCEs ← r.body.mapM (encodeUnaryAtom v)
+    let headCEs ← r.head.mapM (encodeUnaryAtom v)
+    let lhs := ClassExpr.intersect (guard :: bodyCEs)
+    return headCEs.map fun hce => .subClassOf lhs hce
+  | _ => none
+
+theorem encodeUnaryRuleWithGuard_sound {dm : DatatypeMap} (bSem : BuiltinSemantics dm)
+    {namedInds : List IRI} {i : Interpretation dm} {guard : ClassExpr} {r : SWRLRule} {axs : List Axiom}
+    (hCov : GuardCovers namedInds i guard)
+    (h : encodeUnaryRuleWithGuard guard r = some axs)
+    (hsat : satisfies i axs) :
+    satisfiesDLSafeRule bSem namedInds i r := by
+  unfold encodeUnaryRuleWithGuard at h
+  cases hvars : r.iVars with
+  | nil => rw [hvars] at h; cases h
+  | cons v rest =>
+    cases rest with
+    | cons _ _ => rw [hvars] at h; cases h
+    | nil =>
+      rw [hvars] at h; simp only [bind, Option.bind, pure] at h
+      cases hbM : r.body.mapM (encodeUnaryAtom v) with
+      | none => rw [hbM] at h; cases h
+      | some bodyCEs =>
+        rw [hbM] at h
+        cases hhM : r.head.mapM (encodeUnaryAtom v) with
+        | none => rw [hhM] at h; cases h
+        | some headCEs =>
+          rw [hhM] at h; simp only [Option.some.injEq] at h; subst h
+          obtain ⟨_, hbBwd⟩ := mem_mapM_some hbM
+          obtain ⟨hhFwd, _⟩ := mem_mapM_some hhM
+          intro σI σD hBound hbody a ha
+          obtain ⟨hce, hhceMem, hEncA⟩ := hhFwd a ha
+          have hax := hsat (.subClassOf (ClassExpr.intersect (guard :: bodyCEs)) hce)
+            (List.mem_map_of_mem hhceMem)
+          have hLhs : classHolds i (σI v) (ClassExpr.intersect (guard :: bodyCEs)) := by
+            rw [classHolds_intersect]
+            intro c hc
+            rcases List.mem_cons.mp hc with rfl | hc'
+            · obtain ⟨ind, hindMem, hσv⟩ := hBound v (by rw [hvars]; exact List.mem_cons_self ..)
+              exact hσv.symm ▸ hCov ind hindMem
+            · obtain ⟨b, hbMem, hEncB⟩ := hbBwd c hc'
+              exact (encodeUnaryAtom_holds_iff bSem i v σI σD hEncB).mpr (hbody b hbMem)
+          exact (encodeUnaryAtom_holds_iff bSem i v σI σD hEncA).mp (hax (σI v) hLhs)
+
+theorem encodeUnaryRuleWithGuard_complete {dm : DatatypeMap} (bSem : BuiltinSemantics dm)
+    {namedInds : List IRI} {i : Interpretation dm} {guard : ClassExpr} {r : SWRLRule} {axs : List Axiom}
+    (hEx : GuardExact namedInds i guard)
+    (h : encodeUnaryRuleWithGuard guard r = some axs)
+    (hr : satisfiesDLSafeRule bSem namedInds i r) :
+    satisfies i axs := by
+  unfold encodeUnaryRuleWithGuard at h
+  cases hvars : r.iVars with
+  | nil => rw [hvars] at h; cases h
+  | cons v rest =>
+    cases rest with
+    | cons _ _ => rw [hvars] at h; cases h
+    | nil =>
+      rw [hvars] at h; simp only [bind, Option.bind, pure] at h
+      cases hbM : r.body.mapM (encodeUnaryAtom v) with
+      | none => rw [hbM] at h; cases h
+      | some bodyCEs =>
+        rw [hbM] at h
+        cases hhM : r.head.mapM (encodeUnaryAtom v) with
+        | none => rw [hhM] at h; cases h
+        | some headCEs =>
+          rw [hhM] at h; simp only [Option.some.injEq] at h; subst h
+          obtain ⟨hbFwd, _⟩ := mem_mapM_some hbM
+          obtain ⟨_, hhBwd⟩ := mem_mapM_some hhM
+          intro ax hax
+          obtain ⟨hce, hhceMem, rfl⟩ := List.mem_map.mp hax
+          intro x hx
+          rw [classHolds_intersect] at hx
+          obtain ⟨aName, haNameMem, hind'Eq⟩ := (hEx x).mp (hx guard (List.mem_cons_self ..))
+          let σI : IRI → i.Object := fun _ => x
+          let σD : IRI → i.Data := fun _ => i.literalValue ⟨"0", xsd "integer"⟩
+          obtain ⟨aHead, haHeadMem, hEncA⟩ := hhBwd hce hhceMem
+          have hHeadHolds := hr σI σD
+            (fun w hw => by
+              rw [hvars] at hw
+              have := List.mem_singleton.mp hw; subst this
+              exact ⟨aName, haNameMem, hind'Eq⟩)
+            (fun b hb => by
+              obtain ⟨bce, hbceMem, hEncB⟩ := hbFwd b hb
+              exact (encodeUnaryAtom_holds_iff bSem i v σI σD hEncB).mp
+                (hx bce (List.mem_cons_of_mem _ hbceMem)))
+            aHead haHeadMem
+          exact (encodeUnaryAtom_holds_iff bSem i v σI σD hEncA).mpr hHeadHolds
+
+/-- Nominal-anchored encoding for a single-variable rule `r` (`r.iVars = [v]`) whose body
+    links `v` to a concrete individual `a` via an object property `rel`. Ground body atoms
+    touching `a` are folded directly into the nominal anchor `{a} ⊓ anchorBody`, emitting
+    `SubClassOf({a} ⊓ anchorBody, ObjectAllValuesFrom(rel, ¬(guard ⊓ varBody) ⊔ hce))`
+    without `owl:topObjectProperty`. -/
+def encodeAnchoredUnaryRuleWithGuard (guard : ClassExpr) (r : SWRLRule) : Option (List Axiom) :=
+  match r.iVars with
+  | [v] =>
+    match extractFirstIndLink v r.body with
+    | some (rel, .ind a, rest) => do
+      let isAnchor := fun b : SWRLAtom => b.iVars.isEmpty && (encodeAtomAt a b).isSome
+      let anchorBody := rest.filter isAnchor
+      let varBody := rest.filter (fun b => !isAnchor b)
+      let anchorCEs ← anchorBody.mapM (encodeAtomAt a)
+      let varCEs ← varBody.mapM (encodeUnaryAtom v)
+      let headCEs ← r.head.mapM (encodeUnaryAtom v)
+      let lhs := ClassExpr.intersect (.oneOf [a] :: anchorCEs)
+      let varCond := ClassExpr.intersect (guard :: varCEs)
+      return headCEs.map fun hce =>
+        .subClassOf lhs (.objectAll rel (.union (.complement varCond) hce))
+    | _ => none
+  | _ => none
+
+theorem encodeAnchoredUnaryRuleWithGuard_sound {dm : DatatypeMap} (bSem : BuiltinSemantics dm)
+    {namedInds : List IRI} {i : Interpretation dm} {guard : ClassExpr} {r : SWRLRule} {axs : List Axiom}
+    (hCov : GuardCovers namedInds i guard)
+    (h : encodeAnchoredUnaryRuleWithGuard guard r = some axs)
+    (hsat : satisfies i axs) :
+    satisfiesDLSafeRule bSem namedInds i r := by
+  unfold encodeAnchoredUnaryRuleWithGuard at h
+  cases hvars : r.iVars with
+  | nil => rw [hvars] at h; cases h
+  | cons v restVars =>
+    cases restVars with
+    | cons _ _ => rw [hvars] at h; cases h
+    | nil =>
+      rw [hvars] at h; dsimp only at h
+      cases hlk : extractFirstIndLink v r.body with
+      | none => rw [hlk] at h; cases h
+      | some res =>
+        rcases res with ⟨rel, anchor, rest⟩
+        cases anchor with
+        | var _ => rw [hlk] at h; cases h
+        | ind a =>
+          rw [hlk] at h; simp only [bind, Option.bind, pure] at h
+          let isAnchor := fun b : SWRLAtom => b.iVars.isEmpty && (encodeAtomAt a b).isSome
+          cases haM : (rest.filter isAnchor).mapM (encodeAtomAt a) with
+          | none => rw [haM] at h; cases h
+          | some anchorCEs =>
+            rw [haM] at h; dsimp only at h
+            cases hvM : (rest.filter fun b => !isAnchor b).mapM (encodeUnaryAtom v) with
+            | none => rw [hvM] at h; cases h
+            | some varCEs =>
+              rw [hvM] at h; dsimp only at h
+              cases hhM : r.head.mapM (encodeUnaryAtom v) with
+              | none => rw [hhM] at h; cases h
+              | some headCEs =>
+                rw [hhM] at h; simp only [Option.some.injEq] at h; subst h
+                obtain ⟨_, linkAtom, hLinkBody, hLinkForm, hRestSub, _⟩ := extractFirstIndLink_spec hlk
+                obtain ⟨_, haBwd⟩ := mem_mapM_some haM
+                obtain ⟨_, hvBwd⟩ := mem_mapM_some hvM
+                obtain ⟨hhFwd, _⟩ := mem_mapM_some hhM
+                intro σI σD hBound hbody aHead haHead
+                obtain ⟨hce, hhceMem, hEncH⟩ := hhFwd aHead haHead
+                have hax := hsat
+                  (.subClassOf (ClassExpr.intersect (.oneOf [a] :: anchorCEs))
+                    (.objectAll rel (.union (.complement (ClassExpr.intersect (guard :: varCEs))) hce)))
+                  (List.mem_map_of_mem hhceMem)
+                have hLhs : classHolds i (i.individuals a) (ClassExpr.intersect (.oneOf [a] :: anchorCEs)) := by
+                  rw [classHolds_intersect]
+                  intro c hc
+                  rcases List.mem_cons.mp hc with rfl | hc'
+                  · exact ⟨a, List.mem_singleton_self _, rfl⟩
+                  · obtain ⟨b, hbMem, hEncB⟩ := haBwd c hc'
+                    have hbBody : b ∈ r.body := hRestSub b (List.mem_filter.mp hbMem).1
+                    exact (encodeAtomAt_holds_iff bSem i a σI σD hEncB).mpr (hbody b hbBody)
+                have hRel : objectHolds i rel (i.individuals a) (σI v) := by
+                  have hLk := hbody linkAtom hLinkBody
+                  rcases hLinkForm with rfl | ⟨rel0, rfl, rfl⟩
+                  · exact hLk
+                  · exact (objectHolds_converse i rel0 (i.individuals a) (σI v)).mpr hLk
+                have hVarCond : classHolds i (σI v) (ClassExpr.intersect (guard :: varCEs)) := by
+                  rw [classHolds_intersect]
+                  intro c hc
+                  rcases List.mem_cons.mp hc with rfl | hc'
+                  · obtain ⟨ind, hindMem, hσv⟩ := hBound v (by rw [hvars]; exact List.mem_cons_self ..)
+                    exact hσv.symm ▸ hCov ind hindMem
+                  · obtain ⟨b, hbMem, hEncB⟩ := hvBwd c hc'
+                    have hbBody : b ∈ r.body := hRestSub b (List.mem_filter.mp hbMem).1
+                    exact (encodeUnaryAtom_holds_iff bSem i v σI σD hEncB).mpr (hbody b hbBody)
+                have hDisj := hax (i.individuals a) hLhs (σI v) hRel
+                have hHce : classHolds i (σI v) hce := hDisj.resolve_left (fun hNot => hNot hVarCond)
+                exact (encodeUnaryAtom_holds_iff bSem i v σI σD hEncH).mp hHce
+
+theorem encodeAnchoredUnaryRuleWithGuard_complete {dm : DatatypeMap} (bSem : BuiltinSemantics dm)
+    {namedInds : List IRI} {i : Interpretation dm} {guard : ClassExpr} {r : SWRLRule} {axs : List Axiom}
+    (hEx : GuardExact namedInds i guard)
+    (h : encodeAnchoredUnaryRuleWithGuard guard r = some axs)
+    (hr : satisfiesDLSafeRule bSem namedInds i r) :
+    satisfies i axs := by
+  unfold encodeAnchoredUnaryRuleWithGuard at h
+  cases hvars : r.iVars with
+  | nil => rw [hvars] at h; cases h
+  | cons v restVars =>
+    cases restVars with
+    | cons _ _ => rw [hvars] at h; cases h
+    | nil =>
+      rw [hvars] at h; dsimp only at h
+      cases hlk : extractFirstIndLink v r.body with
+      | none => rw [hlk] at h; cases h
+      | some res =>
+        rcases res with ⟨rel, anchor, rest⟩
+        cases anchor with
+        | var _ => rw [hlk] at h; cases h
+        | ind a =>
+          rw [hlk] at h; simp only [bind, Option.bind, pure] at h
+          let isAnchor := fun b : SWRLAtom => b.iVars.isEmpty && (encodeAtomAt a b).isSome
+          cases haM : (rest.filter isAnchor).mapM (encodeAtomAt a) with
+          | none => rw [haM] at h; cases h
+          | some anchorCEs =>
+            rw [haM] at h; dsimp only at h
+            cases hvM : (rest.filter fun b => !isAnchor b).mapM (encodeUnaryAtom v) with
+            | none => rw [hvM] at h; cases h
+            | some varCEs =>
+              rw [hvM] at h; dsimp only at h
+              cases hhM : r.head.mapM (encodeUnaryAtom v) with
+              | none => rw [hhM] at h; cases h
+              | some headCEs =>
+                rw [hhM] at h; simp only [Option.some.injEq] at h; subst h
+                obtain ⟨_, linkAtom, _, hLinkForm, _, hBodyCov⟩ := extractFirstIndLink_spec hlk
+                obtain ⟨haFwd, _⟩ := mem_mapM_some haM
+                obtain ⟨hvFwd, _⟩ := mem_mapM_some hvM
+                obtain ⟨_, hhBwd⟩ := mem_mapM_some hhM
+                intro ax hax
+                obtain ⟨hce, hhceMem, rfl⟩ := List.mem_map.mp hax
+                intro y hy x hrel
+                rw [classHolds_intersect] at hy
+                obtain ⟨a', ha'Mem, hyEq⟩ := hy (.oneOf [a]) (List.mem_cons_self ..)
+                have ha'Eq : a' = a := List.mem_singleton.mp ha'Mem
+                subst a'
+                classical
+                by_cases hvc : classHolds i x (ClassExpr.intersect (guard :: varCEs))
+                · right
+                  rw [classHolds_intersect] at hvc
+                  obtain ⟨aName, haNameMem, hxEq⟩ := (hEx x).mp (hvc guard (List.mem_cons_self ..))
+                  let σI : IRI → i.Object := fun _ => x
+                  let σD : IRI → i.Data := fun _ => i.literalValue ⟨"0", xsd "integer"⟩
+                  obtain ⟨aHead, haHeadMem, hEncH⟩ := hhBwd hce hhceMem
+                  have hHeadHolds := hr σI σD
+                    (fun w hw => by
+                      rw [hvars] at hw
+                      have := List.mem_singleton.mp hw; subst this
+                      exact ⟨aName, haNameMem, hxEq⟩)
+                    (fun b hb => by
+                      rcases hBodyCov b hb with rfl | hbRest
+                      · rcases hLinkForm with rfl | ⟨rel0, rfl, rfl⟩
+                        · simp only [atomHolds, evalIArg]; exact hyEq ▸ hrel
+                        · simp only [atomHolds, evalIArg]
+                          exact (objectHolds_converse i rel0 (i.individuals a) x).mp (hyEq ▸ hrel)
+                      · cases hia : isAnchor b with
+                        | true =>
+                          obtain ⟨ace, haceMem, hEncA⟩ := haFwd b (List.mem_filter.mpr ⟨hbRest, hia⟩)
+                          exact (encodeAtomAt_holds_iff bSem i a σI σD hEncA).mp
+                            (hyEq ▸ hy ace (List.mem_cons_of_mem _ haceMem))
+                        | false =>
+                          have hnot : (!isAnchor b) = true := by simp [hia]
+                          obtain ⟨vce, hvceMem, hEncV⟩ := hvFwd b (List.mem_filter.mpr ⟨hbRest, hnot⟩)
+                          exact (encodeUnaryAtom_holds_iff bSem i v σI σD hEncV).mp
+                            (hvc vce (List.mem_cons_of_mem _ hvceMem)))
+                    aHead haHeadMem
+                  exact (encodeUnaryAtom_holds_iff bSem i v σI σD hEncH).mpr hHeadHolds
+                · exact Or.inl hvc
+
+/-- Roll up a body-only individual variable `iv` using an explicit domain guard `guard`. -/
+def rollupOneIndVarWithGuard (guard : ClassExpr) (r : SWRLRule) (iv : IRI) : Option SWRLRule :=
+  if r.headIVars.contains iv then none
+  else
+    let mentioning := r.body.filter fun a => a.iVars.contains iv
+    let others := r.body.filter fun a => !a.iVars.contains iv
+    match extractFirstIndLink iv mentioning with
+    | none => none
+    | some (rel, anchor, restMent) =>
+      match restMent.mapM (encodeUnaryAtom iv) with
+      | none => none
+      | some ces =>
+        let filler := ClassExpr.intersect (guard :: ces)
+        some { r with body := .classAtom (.objectSome rel filler) anchor :: others }
+
+theorem rollupOneIndVarWithGuard_sound {dm : DatatypeMap} (bSem : BuiltinSemantics dm)
+    {namedInds : List IRI} {i : Interpretation dm} {guard : ClassExpr} {r r' : SWRLRule} {iv : IRI}
+    (hCov : GuardCovers namedInds i guard)
+    (h : rollupOneIndVarWithGuard guard r iv = some r')
+    (hr' : satisfiesDLSafeRule bSem namedInds i r') :
+    satisfiesDLSafeRule bSem namedInds i r := by
+  unfold rollupOneIndVarWithGuard at h
+  split at h
+  · cases h
+  · dsimp only at h
+    let mentioning := r.body.filter (fun a => a.iVars.contains iv)
+    let others := r.body.filter (fun a => !a.iVars.contains iv)
+    cases hlk : extractFirstIndLink iv mentioning with
+    | none => rw [hlk] at h; cases h
+    | some res =>
+      rcases res with ⟨rel, anchor, restMent⟩
+      rw [hlk] at h; dsimp only at h
+      cases hces : restMent.mapM (encodeUnaryAtom iv) with
+      | none => rw [hces] at h; cases h
+      | some ces =>
+        rw [hces] at h; simp only [Option.some.injEq] at h; subst h
+        obtain ⟨_, linkAtom, hLinkMent, hLinkForm, hRestSub, _⟩ := extractFirstIndLink_spec hlk
+        have hLinkBody : linkAtom ∈ r.body := (List.mem_filter.mp hLinkMent).1
+        obtain ⟨_, hCeBwd⟩ := mem_mapM_some hces
+        have hIVarsSub : ∀ v, v ∈ ({ body := SWRLAtom.classAtom (.objectSome rel (ClassExpr.intersect (guard :: ces))) anchor :: others, head := r.head } : SWRLRule).iVars → v ∈ r.iVars := by
+          intro v hv
+          simp only [SWRLRule.iVars, SWRLRule.bodyIVars, SWRLRule.headIVars,
+            List.mem_eraseDups, List.mem_append, List.mem_flatMap, List.mem_cons] at hv ⊢
+          rcases hv with ⟨a, rfl | haOth, hva⟩ | hhd
+          · left; refine ⟨linkAtom, hLinkBody, ?_⟩
+            rcases hLinkForm with rfl | ⟨rel0, rfl, rfl⟩
+            · exact List.mem_eraseDups.mpr (List.mem_append_left _ hva)
+            · exact List.mem_eraseDups.mpr (List.mem_append_right _ hva)
+          · left; exact ⟨a, (List.mem_filter.mp haOth).1, hva⟩
+          · right; exact hhd
+        have hIvInR : iv ∈ r.iVars := by
+          refine iVars_mem_of_body hLinkBody ?_
+          rcases hLinkForm with rfl | ⟨rel0, rfl, rfl⟩
+          · exact List.mem_eraseDups.mpr (List.mem_append_right _ (List.mem_singleton_self _))
+          · exact List.mem_eraseDups.mpr (List.mem_append_left _ (List.mem_singleton_self _))
+        intro σI σD hBound hbody a ha
+        refine hr' σI σD (fun v hv => hBound v (hIVarsSub v hv)) ?_ a ha
+        intro b hb
+        rcases List.mem_cons.mp hb with rfl | hbOth
+        · simp only [atomHolds, classHolds]
+          refine ⟨σI iv, ?_, ?_⟩
+          · have hLkH := hbody linkAtom hLinkBody
+            rcases hLinkForm with rfl | ⟨rel0, rfl, rfl⟩
+            · exact hLkH
+            · exact (objectHolds_converse i rel0 (evalIArg i σI anchor) (σI iv)).mpr hLkH
+          · rw [classHolds_intersect]
+            intro c hc
+            rcases List.mem_cons.mp hc with rfl | hc'
+            · obtain ⟨ind, hindMem, hσiv⟩ := hBound iv hIvInR
+              exact hσiv.symm ▸ hCov ind hindMem
+            · obtain ⟨a0, ha0Rest, hEnc⟩ := hCeBwd c hc'
+              have ha0Body : a0 ∈ r.body := (List.mem_filter.mp (hRestSub a0 ha0Rest)).1
+              exact (encodeUnaryAtom_holds_iff bSem i iv σI σD hEnc).mpr (hbody a0 ha0Body)
+        · exact hbody b (List.mem_filter.mp hbOth).1
+
+theorem rollupOneIndVarWithGuard_complete {dm : DatatypeMap} (bSem : BuiltinSemantics dm)
+    {namedInds : List IRI} {i : Interpretation dm} {guard : ClassExpr} {r r' : SWRLRule} {iv : IRI}
+    (hEx : GuardExact namedInds i guard)
+    (h : rollupOneIndVarWithGuard guard r iv = some r')
+    (hr : satisfiesDLSafeRule bSem namedInds i r) :
+    satisfiesDLSafeRule bSem namedInds i r' := by
+  unfold rollupOneIndVarWithGuard at h
+  split at h
+  · cases h
+  · rename_i hNotHead
+    dsimp only at h
+    let mentioning := r.body.filter (fun a => a.iVars.contains iv)
+    let others := r.body.filter (fun a => !a.iVars.contains iv)
+    cases hlk : extractFirstIndLink iv mentioning with
+    | none => rw [hlk] at h; cases h
+    | some res =>
+      rcases res with ⟨rel, anchor, restMent⟩
+      rw [hlk] at h; dsimp only at h
+      cases hces : restMent.mapM (encodeUnaryAtom iv) with
+      | none => rw [hces] at h; cases h
+      | some ces =>
+        rw [hces] at h; simp only [Option.some.injEq] at h; subst h
+        obtain ⟨hAncNe, linkAtom, _, hLinkForm, _, hMentCov⟩ := extractFirstIndLink_spec hlk
+        obtain ⟨hCeFwd, _⟩ := mem_mapM_some hces
+        have hIVarsBack : ∀ v ∈ r.iVars, v = iv ∨ v ∈ ({ body := SWRLAtom.classAtom (.objectSome rel (ClassExpr.intersect (guard :: ces))) anchor :: others, head := r.head } : SWRLRule).iVars := by
+          intro v hv
+          by_cases hviv : v = iv
+          · exact Or.inl hviv
+          · right
+            simp only [SWRLRule.iVars, SWRLRule.bodyIVars, SWRLRule.headIVars,
+              List.mem_eraseDups, List.mem_append, List.mem_flatMap, List.mem_cons] at hv ⊢
+            rcases hv with ⟨a, haBody, hva⟩ | hhd
+            · by_cases hcont : a.iVars.contains iv
+              · have haMent : a ∈ mentioning := List.mem_filter.mpr ⟨haBody, hcont⟩
+                rcases hMentCov a haMent with rfl | haRest
+                · left; refine ⟨_, Or.inl rfl, ?_⟩
+                  rcases hLinkForm with rfl | ⟨rel0, rfl, rfl⟩
+                  · simp only [SWRLAtom.iVars, List.mem_eraseDups, List.mem_append, IArg.vars, List.mem_singleton] at hva
+                    exact hva.elim id (fun e => absurd e hviv)
+                  · simp only [SWRLAtom.iVars, List.mem_eraseDups, List.mem_append, IArg.vars, List.mem_singleton] at hva
+                    exact hva.elim (fun e => absurd e hviv) id
+                · obtain ⟨ce, _, hEnc⟩ := hCeFwd a haRest
+                  exact absurd (encodeUnaryAtom_iVars_sub hEnc v hva) hviv
+              · left
+                have hnotb : (!a.iVars.contains iv) = true := by
+                  cases hc : a.iVars.contains iv
+                  · rfl
+                  · exact absurd hc hcont
+                exact ⟨a, Or.inr (List.mem_filter.mpr ⟨haBody, hnotb⟩), hva⟩
+            · right; exact hhd
+        intro σI σD hBound' hbody' a ha
+        have hExAtom := hbody' _ (List.mem_cons_self ..)
+        simp only [atomHolds, classHolds] at hExAtom
+        obtain ⟨y, hrel, hyFill⟩ := hExAtom
+        rw [classHolds_intersect] at hyFill
+        obtain ⟨aName, haNameMem, hind'Eq⟩ := (hEx y).mp (hyFill guard (List.mem_cons_self ..))
+        let σI' : IRI → i.Object := fun w => if w == iv then y else σI w
+        have hσI'iv : σI' iv = y := by simp [σI']
+        have hAncEq : evalIArg i σI' anchor = evalIArg i σI anchor := by
+          cases anchor with
+          | ind _ => rfl
+          | var u =>
+            have hne : u ≠ iv := fun e => hAncNe (e ▸ rfl)
+            simp [evalIArg, σI', hne]
+        have hBound : ∀ v ∈ r.iVars, ∃ x ∈ namedInds, σI' v = i.individuals (.named x) := by
+          intro v hv
+          rcases hIVarsBack v hv with rfl | hv'
+          · exact ⟨aName, haNameMem, hσI'iv.trans hind'Eq⟩
+          · by_cases hviv : v = iv
+            · subst hviv; exact ⟨aName, haNameMem, hσI'iv.trans hind'Eq⟩
+            · obtain ⟨x, hxMem, hxEq⟩ := hBound' v hv'
+              exact ⟨x, hxMem, by simp [σI', hviv, hxEq]⟩
+        have hHeadAgree : ∀ v ∈ a.iVars, σI' v = σI v := fun v hv => by
+          have hne : v ≠ iv := by
+            intro heq; subst heq
+            have hmem : v ∈ r.headIVars :=
+              List.mem_eraseDups.mpr (List.mem_flatMap.mpr ⟨a, ha, hv⟩)
+            exact hNotHead (List.contains_iff_mem.mpr hmem)
+          simp [σI', hne]
+        have hBody' : ∀ b ∈ r.body, atomHolds bSem i σI' σD b := by
+          intro b hb
+          by_cases hcont : b.iVars.contains iv
+          · have hbMent : b ∈ mentioning := List.mem_filter.mpr ⟨hb, hcont⟩
+            rcases hMentCov b hbMent with rfl | hbRest
+            · rcases hLinkForm with rfl | ⟨rel0, rfl, rfl⟩
+              · simp only [atomHolds]; rw [hAncEq]; simp only [evalIArg, hσI'iv]; exact hrel
+              · simp only [atomHolds]; rw [hAncEq]; simp only [evalIArg, hσI'iv]
+                exact (objectHolds_converse i rel0 (evalIArg i σI anchor) y).mp hrel
+            · obtain ⟨ce, hceMem, hEnc⟩ := hCeFwd b hbRest
+              exact (encodeUnaryAtom_holds_iff bSem i iv σI' σD hEnc).mp
+                (hσI'iv.symm ▸ hyFill ce (List.mem_cons_of_mem _ hceMem))
+          · have hnotb : (!b.iVars.contains iv) = true := by
+              cases hc : b.iVars.contains iv
+              · rfl
+              · exact absurd hc hcont
+            have hbOth : b ∈ others := List.mem_filter.mpr ⟨hb, hnotb⟩
+            have hAgreeB : ∀ v ∈ b.iVars, σI' v = σI v := fun v hv => by
+              have hne : v ≠ iv := fun heq => hcont (List.contains_iff_mem.mpr (heq ▸ hv))
+              simp [σI', hne]
+            exact (atomHolds_iVars_congr bSem i hAgreeB).mpr (hbody' b (List.mem_cons_of_mem _ hbOth))
+        exact (atomHolds_iVars_congr bSem i hHeadAgree).mp (hr σI' σD hBound hBody' a ha)
+
+def rollupLocalIndVarsWithGuard (guard : ClassExpr) (r : SWRLRule) : SWRLRule :=
+  r.bodyIVars.foldl (fun cur iv => (rollupOneIndVarWithGuard guard cur iv).getD cur) r
+
+theorem rollupLocalIndVarsWithGuard_sound {dm : DatatypeMap} (bSem : BuiltinSemantics dm)
+    {namedInds : List IRI} {i : Interpretation dm} {guard : ClassExpr}
+    (hCov : GuardCovers namedInds i guard) (r : SWRLRule)
+    (hr' : satisfiesDLSafeRule bSem namedInds i (rollupLocalIndVarsWithGuard guard r)) :
+    satisfiesDLSafeRule bSem namedInds i r := by
+  unfold rollupLocalIndVarsWithGuard at hr'
+  have hfold : ∀ (vars : List IRI) (cur : SWRLRule),
+      satisfiesDLSafeRule bSem namedInds i
+        (vars.foldl (fun c iv => (rollupOneIndVarWithGuard guard c iv).getD c) cur) →
+      satisfiesDLSafeRule bSem namedInds i cur := by
+    intro vars
+    induction vars with
+    | nil => intro cur h; exact h
+    | cons v rest ih =>
+      intro cur h
+      rw [List.foldl_cons] at h
+      have h1 := ih _ h
+      cases hstep : rollupOneIndVarWithGuard guard cur v with
+      | none => simpa [hstep] using h1
+      | some next =>
+        simp only [hstep, Option.getD_some] at h1
+        exact rollupOneIndVarWithGuard_sound bSem hCov hstep h1
+  exact hfold r.bodyIVars r hr'
+
+theorem rollupLocalIndVarsWithGuard_complete {dm : DatatypeMap} (bSem : BuiltinSemantics dm)
+    {namedInds : List IRI} {i : Interpretation dm} {guard : ClassExpr}
+    (hEx : GuardExact namedInds i guard) (r : SWRLRule)
+    (hr : satisfiesDLSafeRule bSem namedInds i r) :
+    satisfiesDLSafeRule bSem namedInds i (rollupLocalIndVarsWithGuard guard r) := by
+  unfold rollupLocalIndVarsWithGuard
+  have hfold : ∀ (vars : List IRI) (cur : SWRLRule),
+      satisfiesDLSafeRule bSem namedInds i cur →
+      satisfiesDLSafeRule bSem namedInds i
+        (vars.foldl (fun c iv => (rollupOneIndVarWithGuard guard c iv).getD c) cur) := by
+    intro vars
+    induction vars with
+    | nil => intro cur h; exact h
+    | cons v rest ih =>
+      intro cur h
+      rw [List.foldl_cons]
+      apply ih
+      cases hstep : rollupOneIndVarWithGuard guard cur v with
+      | none => simpa [hstep] using h
+      | some next =>
+        simp only [hstep, Option.getD_some]
+        exact rollupOneIndVarWithGuard_complete bSem hEx hstep h
+  exact hfold r.bodyIVars r hr
+
+/-- Guard-parameterized smart encoder preferring nominal-anchored unary axioms
+    (`encodeAnchoredUnaryRuleWithGuard`, zero `owl:topObjectProperty`) before general
+    unary and recursive partial grounding. -/
+def encodeRuleSmartAuxWithGuard (namedInds : List IRI) (guard : ClassExpr) :
+    Nat → SWRLRule → Option (List Axiom)
+  | 0, r => groundRuleAll namedInds r
+  | fuel + 1, r =>
+    let r' := rollupLocalIndVarsWithGuard guard r
+    match r'.iVars with
+    | [] =>
+      match encodeSingleIndGroundRule r' with
+      | some axs => some axs
+      | none => encodeGroundRule r'
+    | [_] =>
+      match encodeAnchoredUnaryRuleWithGuard guard r' with
+      | some axs => some axs
+      | none =>
+        match encodeUnaryRuleWithGuard guard r' with
+        | some axs => some axs
+        | none => groundRuleAll namedInds r'
+    | vs =>
+      match vs.getLast? with
+      | none => groundRuleAll namedInds r'
+      | some v =>
+        (namedInds.mapM fun a =>
+          encodeRuleSmartAuxWithGuard namedInds guard fuel (r'.subst [(v, .named a)] [])).map List.flatten
+
+theorem encodeRuleSmartAuxWithGuard_sound {dm : DatatypeMap} (bSem : BuiltinSemantics dm)
+    {namedInds : List IRI} {i : Interpretation dm} {guard : ClassExpr}
+    (hCov : GuardCovers namedInds i guard) :
+    ∀ (fuel : Nat) {r : SWRLRule} {axs : List Axiom},
+      encodeRuleSmartAuxWithGuard namedInds guard fuel r = some axs →
+      satisfies i axs →
+      satisfiesDLSafeRule bSem namedInds i r
+  | 0, _, _, h, hsat => (groundRuleAll_holds_iff bSem h).mp hsat
+  | fuel + 1, r, axs, h, hsat => by
+    unfold encodeRuleSmartAuxWithGuard at h
+    dsimp only at h
+    let r' := rollupLocalIndVarsWithGuard guard r
+    suffices satisfiesDLSafeRule bSem namedInds i r' from
+      rollupLocalIndVarsWithGuard_sound bSem hCov r this
+    cases hvars : r'.iVars with
+    | nil =>
+      rw [hvars] at h
+      cases hs : encodeSingleIndGroundRule r' with
+      | some sAxs =>
+        rw [hs] at h; cases h
+        intro σI σD _ hbody a ha
+        exact (encodeSingleIndGroundRule_holds_iff bSem i σI σD hs).mp hsat hbody a ha
+      | none =>
+        rw [hs] at h
+        intro σI σD _ hbody a ha
+        exact (encodeGroundRule_holds_iff bSem i σI σD h).mp hsat hbody a ha
+    | cons v1 tl =>
+      cases tl with
+      | nil =>
+        rw [hvars] at h
+        cases ha : encodeAnchoredUnaryRuleWithGuard guard r' with
+        | some aAxs => rw [ha] at h; cases h; exact encodeAnchoredUnaryRuleWithGuard_sound bSem hCov ha hsat
+        | none =>
+          rw [ha] at h
+          cases hu : encodeUnaryRuleWithGuard guard r' with
+          | some uAxs => rw [hu] at h; cases h; exact encodeUnaryRuleWithGuard_sound bSem hCov hu hsat
+          | none => rw [hu] at h; exact (groundRuleAll_holds_iff bSem h).mp hsat
+      | cons v2 tl2 =>
+        rw [hvars] at h; dsimp only at h
+        cases hlast : (v1 :: v2 :: tl2).getLast? with
+        | none => rw [hlast] at h; dsimp only at h; exact (groundRuleAll_holds_iff bSem h).mp hsat
+        | some v =>
+          rw [hlast] at h; dsimp only at h
+          have hvMem : v ∈ r'.iVars := by rw [hvars]; exact getLast?_mem hlast
+          cases hM : namedInds.mapM (fun a => encodeRuleSmartAuxWithGuard namedInds guard fuel (r'.subst [(v, .named a)] [])) with
+          | none => rw [hM] at h; cases h
+          | some axLists =>
+            rw [hM] at h; simp only [Option.map_some, Option.some.injEq] at h; subst h
+            obtain ⟨hFwd, _⟩ := mem_mapM_some hM
+            rw [← satisfiesDLSafeRule_subst_one_iff bSem hvMem]
+            intro a ha
+            obtain ⟨rAxs, hrAxsMem, hRec⟩ := hFwd a ha
+            exact encodeRuleSmartAuxWithGuard_sound bSem hCov fuel hRec fun ax hax =>
+              hsat ax (List.mem_flatten.mpr ⟨rAxs, hrAxsMem, hax⟩)
+
+theorem encodeRuleSmartAuxWithGuard_complete {dm : DatatypeMap} (bSem : BuiltinSemantics dm)
+    {namedInds : List IRI} {i : Interpretation dm} {guard : ClassExpr}
+    (hEx : GuardExact namedInds i guard) :
+    ∀ (fuel : Nat) {r : SWRLRule} {axs : List Axiom},
+      encodeRuleSmartAuxWithGuard namedInds guard fuel r = some axs →
+      satisfiesDLSafeRule bSem namedInds i r →
+      satisfies i axs
+  | 0, _, _, h, hr => (groundRuleAll_holds_iff bSem h).mpr hr
+  | fuel + 1, r, axs, h, hr => by
+    unfold encodeRuleSmartAuxWithGuard at h
+    dsimp only at h
+    let r' := rollupLocalIndVarsWithGuard guard r
+    have hr' : satisfiesDLSafeRule bSem namedInds i r' :=
+      rollupLocalIndVarsWithGuard_complete bSem hEx r hr
+    cases hvars : r'.iVars with
+    | nil =>
+      rw [hvars] at h
+      obtain ⟨w0⟩ := i.objectNonempty
+      let y0 : i.Data := i.literalValue ⟨"0", xsd "integer"⟩
+      cases hs : encodeSingleIndGroundRule r' with
+      | some sAxs =>
+        rw [hs] at h; cases h
+        exact (encodeSingleIndGroundRule_holds_iff bSem i (fun _ => w0) (fun _ => y0) hs).mpr
+          (hr' (fun _ => w0) (fun _ => y0) (fun v hv => by rw [hvars] at hv; cases hv))
+      | none =>
+        rw [hs] at h
+        exact (encodeGroundRule_holds_iff bSem i (fun _ => w0) (fun _ => y0) h).mpr
+          (hr' (fun _ => w0) (fun _ => y0) (fun v hv => by rw [hvars] at hv; cases hv))
+    | cons v1 tl =>
+      cases tl with
+      | nil =>
+        rw [hvars] at h
+        cases ha : encodeAnchoredUnaryRuleWithGuard guard r' with
+        | some aAxs => rw [ha] at h; cases h; exact encodeAnchoredUnaryRuleWithGuard_complete bSem hEx ha hr'
+        | none =>
+          rw [ha] at h
+          cases hu : encodeUnaryRuleWithGuard guard r' with
+          | some uAxs => rw [hu] at h; cases h; exact encodeUnaryRuleWithGuard_complete bSem hEx hu hr'
+          | none => rw [hu] at h; exact (groundRuleAll_holds_iff bSem h).mpr hr'
+      | cons v2 tl2 =>
+        rw [hvars] at h; dsimp only at h
+        cases hlast : (v1 :: v2 :: tl2).getLast? with
+        | none => rw [hlast] at h; dsimp only at h; exact (groundRuleAll_holds_iff bSem h).mpr hr'
+        | some v =>
+          rw [hlast] at h; dsimp only at h
+          have hvMem : v ∈ r'.iVars := by rw [hvars]; exact getLast?_mem hlast
+          cases hM : namedInds.mapM (fun a => encodeRuleSmartAuxWithGuard namedInds guard fuel (r'.subst [(v, .named a)] [])) with
+          | none => rw [hM] at h; cases h
+          | some axLists =>
+            rw [hM] at h; simp only [Option.map_some, Option.some.injEq] at h; subst h
+            obtain ⟨_, hBwd⟩ := mem_mapM_some hM
+            have hall := (satisfiesDLSafeRule_subst_one_iff bSem hvMem).mpr hr'
+            intro ax hax
+            obtain ⟨rAxs, hrAxsMem, haxIn⟩ := List.mem_flatten.mp hax
+            obtain ⟨a, haMem, hRec⟩ := hBwd rAxs hrAxsMem
+            exact encodeRuleSmartAuxWithGuard_complete bSem hEx fuel hRec (hall a haMem) ax haxIn
+
+def encodeDLSafeRuleWithGuard (namedInds : List IRI) (guard : ClassExpr) (r : SWRLRule) :
+    Option (List Axiom) :=
+  encodeRuleSmartAuxWithGuard namedInds guard (r.iVars.length + 1) r
+
+def groundAllRulesWithGuard (namedInds : List IRI) (guard : ClassExpr) (rules : List SWRLRule) :
+    Option (List Axiom) :=
+  (rules.mapM (encodeDLSafeRuleWithGuard namedInds guard)).map List.flatten
+
+/-- ABox guard assertions `ClassAssertion(guardCls, a)` for each named individual `a ∈ namedInds`. -/
+def dlSafeGuardAssertions (guardCls : IRI) (namedInds : List IRI) : List Axiom :=
+  namedInds.map fun a => .classAssertion (.named guardCls) (.named a)
+
+/-- Check whether class IRI `g` occurs anywhere inside a `ClassExpr`. -/
+def classExprHasClass (g : IRI) : ClassExpr → Bool
+  | .named c => c == g
+  | .complement c => classExprHasClass g c
+  | .intersection a b | .union a b => classExprHasClass g a || classExprHasClass g b
+  | .oneOf _ => false
+  | .objectSome _ c | .objectAll _ c
+  | .objectMin _ _ c | .objectMax _ _ c | .objectExact _ _ c => classExprHasClass g c
+  | .objectValue _ _ | .objectSelf _ => false
+  | .dataSome _ _ | .dataAll _ _ | .dataValue _ _
+  | .dataMin _ _ _ | .dataMax _ _ _ | .dataExact _ _ _ => false
+
+def axiomHasClass (g : IRI) : Axiom → Bool
+  | .subClassOf a b => classExprHasClass g a || classExprHasClass g b
+  | .equivalentClasses cs | .disjointClasses cs => cs.any (classExprHasClass g)
+  | .disjointUnion c cs => (c == g) || cs.any (classExprHasClass g)
+  | .objectPropertyDomain _ c | .objectPropertyRange _ c | .dataPropertyDomain _ c =>
+    classExprHasClass g c
+  | .hasKey c _ _ | .classAssertion c _ => classExprHasClass g c
+  | _ => false
+
+def ontologyHasClass (g : IRI) (o : Ontology) : Bool :=
+  o.any (axiomHasClass g)
+
+def atomHasClass (g : IRI) : SWRLAtom → Bool
+  | .classAtom c _ => classExprHasClass g c
+  | _ => false
+
+def ruleHasClass (g : IRI) (r : SWRLRule) : Bool :=
+  r.body.any (atomHasClass g) || r.head.any (atomHasClass g)
+
+def rulesHaveClass (g : IRI) (rules : List SWRLRule) : Bool :=
+  rules.any (ruleHasClass g)
+
+/-- Pick a fresh auxiliary class IRI not occurring in `o`, `rules`, or `extra`. -/
+def freshGuardClass (o : Ontology) (rules : List SWRLRule) (extra : List IRI := []) : IRI :=
+  let base := "urn:sabrina:swrl:O"
+  let rec go : Nat → Nat → IRI
+    | 0, k => s!"{base}_{k}"
+    | fuel + 1, k =>
+      let cand := if k == 0 then base else s!"{base}_{k}"
+      if cand != thing && cand != nothing &&
+          !ontologyHasClass cand o && !rulesHaveClass cand rules && !extra.contains cand then
+        cand
+      else go fuel (k + 1)
+  go (o.length + rules.length + extra.length + 4) 0
+
+private def withClassExt {dm : DatatypeMap} (i : Interpretation dm) (g : IRI)
+    (hNeThing : g ≠ thing) (hNeNothing : g ≠ nothing) (ext : i.Object → Prop) : Interpretation dm :=
+  { i with
+    classes := fun c x => if c == g then ext x else i.classes c x
+    thingExt := fun x => by simp [beq_false_of_ne hNeThing.symm, i.thingExt x]
+    nothingExt := fun x => by simp [beq_false_of_ne hNeNothing.symm, i.nothingExt x] }
+
+private theorem objectHolds_withClassExt {dm : DatatypeMap} (i : Interpretation dm)
+    {g : IRI} (hT : g ≠ thing) (hN : g ≠ nothing) (ext : i.Object → Prop)
+    (r : ObjectProperty) (x y : i.Object) :
+    objectHolds (withClassExt i g hT hN ext) r x y = objectHolds i r x y := by
+  cases r <;> rfl
+
+private theorem rolePath_withClassExt {dm : DatatypeMap} (i : Interpretation dm)
+    {g : IRI} (hT : g ≠ thing) (hN : g ≠ nothing) (ext : i.Object → Prop) :
+    ∀ (rs : List ObjectProperty) (x y : i.Object),
+      rolePath (withClassExt i g hT hN ext) rs x y ↔ rolePath i rs x y
+  | [], _, _ => Iff.rfl
+  | [r], x, y => by simp only [rolePath, objectHolds_withClassExt]; exact Iff.rfl
+  | r :: r2 :: rs, x, y => by
+    simp only [rolePath, objectHolds_withClassExt]
+    exact exists_congr fun z => and_congr_right fun _ => rolePath_withClassExt i hT hN ext (r2 :: rs) z y
+
+private theorem dataHolds_withClassExt {dm : DatatypeMap} (i : Interpretation dm)
+    {g : IRI} (hT : g ≠ thing) (hN : g ≠ nothing) (ext : i.Object → Prop)
+    (dr : DataRange) :
+    ∀ y, dataHolds (withClassExt i g hT hN ext) y dr ↔ dataHolds i y dr := by
+  induction dr with
+  | datatype _ => intro _; exact Iff.rfl
+  | complement d ih => intro y; simp [dataHolds, ih y]
+  | intersection a b iha ihb => intro y; simp [dataHolds, iha y, ihb y]
+  | union a b iha ihb => intro y; simp [dataHolds, iha y, ihb y]
+  | oneOf _ => intro _; exact Iff.rfl
+  | restriction _ _ => intro _; exact Iff.rfl
+
+private theorem classHolds_withClassExt_of_unused {dm : DatatypeMap} (i : Interpretation dm)
+    {g : IRI} (hT : g ≠ thing) (hN : g ≠ nothing) (ext : i.Object → Prop)
+    (c : ClassExpr) (hUnused : classExprHasClass g c = false) :
+    ∀ x, classHolds (withClassExt i g hT hN ext) x c ↔ classHolds i x c := by
+  induction c with
+  | named a =>
+    intro x
+    simp only [classExprHasClass, beq_eq_false_iff_ne] at hUnused
+    simp [classHolds, withClassExt, beq_false_of_ne hUnused]
+  | complement a ih =>
+    intro x; simp only [classExprHasClass] at hUnused
+    simp [classHolds, ih hUnused x]
+  | intersection a b iha ihb =>
+    intro x
+    simp only [classExprHasClass, Bool.or_eq_false_iff] at hUnused
+    simp [classHolds, iha hUnused.1 x, ihb hUnused.2 x]
+  | union a b iha ihb =>
+    intro x
+    simp only [classExprHasClass, Bool.or_eq_false_iff] at hUnused
+    simp [classHolds, iha hUnused.1 x, ihb hUnused.2 x]
+  | oneOf _ => intro _; rfl
+  | objectSome _ a ih | objectAll _ a ih =>
+    intro x; simp only [classExprHasClass] at hUnused
+    simp only [classHolds, withClassExt, objectHolds]
+    constructor
+    · intro h; first | (obtain ⟨y, hr, hy⟩ := h; exact ⟨y, hr, (ih hUnused y).mp hy⟩) | (intro y hr; exact (ih hUnused y).mp (h y hr))
+    · intro h; first | (obtain ⟨y, hr, hy⟩ := h; exact ⟨y, hr, (ih hUnused y).mpr hy⟩) | (intro y hr; exact (ih hUnused y).mpr (h y hr))
+  | objectMin _ r a ih | objectMax _ r a ih | objectExact _ r a ih =>
+    intro x; simp only [classExprHasClass] at hUnused
+    have hPred : (fun y => objectHolds (withClassExt i g hT hN ext) r x y ∧
+        classHolds (withClassExt i g hT hN ext) y a) =
+        (fun y => objectHolds i r x y ∧ classHolds i y a) := by
+      funext y
+      exact propext ⟨fun ⟨h1, h2⟩ => ⟨objectHolds_withClassExt i hT hN ext r x y ▸ h1, (ih hUnused y).mp h2⟩,
+        fun ⟨h1, h2⟩ => ⟨(objectHolds_withClassExt i hT hN ext r x y).symm ▸ h1, (ih hUnused y).mpr h2⟩⟩
+    simp only [classHolds, hPred]
+    exact Iff.rfl
+  | dataSome p dr | dataAll p dr =>
+    intro x
+    simp only [classHolds, withClassExt]
+    first
+    | exact exists_congr fun y => and_congr_right fun _ => dataHolds_withClassExt i hT hN ext dr y
+    | exact forall_congr' fun y => imp_congr_right fun _ => dataHolds_withClassExt i hT hN ext dr y
+  | dataMin _ p dr | dataMax _ p dr | dataExact _ p dr =>
+    intro x
+    have hPred : (fun y => (withClassExt i g hT hN ext).dataProperties p x y ∧
+        dataHolds (withClassExt i g hT hN ext) y dr) =
+        (fun y => i.dataProperties p x y ∧ dataHolds i y dr) := by
+      funext y
+      exact propext (and_congr_right fun _ => dataHolds_withClassExt i hT hN ext dr y)
+    simp only [classHolds, hPred]
+    exact Iff.rfl
+  | objectValue _ _ | objectSelf _ | dataValue _ _ => intro _; rfl
+
+private theorem axiomHolds_withClassExt_of_unused {dm : DatatypeMap} (i : Interpretation dm)
+    {g : IRI} (hT : g ≠ thing) (hN : g ≠ nothing) (ext : i.Object → Prop)
+    (ax : Axiom) (hUnused : axiomHasClass g ax = false) :
+    axiomHolds (withClassExt i g hT hN ext) ax ↔ axiomHolds i ax := by
+  cases ax with
+  | subClassOf a b =>
+    simp only [axiomHasClass, Bool.or_eq_false_iff] at hUnused
+    simp only [axiomHolds]
+    constructor <;> intro h x hx
+    · exact (classHolds_withClassExt_of_unused i hT hN ext b hUnused.2 x).mp
+        (h x ((classHolds_withClassExt_of_unused i hT hN ext a hUnused.1 x).mpr hx))
+    · exact (classHolds_withClassExt_of_unused i hT hN ext b hUnused.2 x).mpr
+        (h x ((classHolds_withClassExt_of_unused i hT hN ext a hUnused.1 x).mp hx))
+  | equivalentClasses cs =>
+    simp only [axiomHasClass, List.any_eq_false] at hUnused
+    simp only [axiomHolds]
+    constructor <;> intro h c1 hc1 c2 hc2 x
+    · have h1 := classHolds_withClassExt_of_unused i hT hN ext c1 (Bool.eq_false_iff.mpr (hUnused c1 hc1)) x
+      have h2 := classHolds_withClassExt_of_unused i hT hN ext c2 (Bool.eq_false_iff.mpr (hUnused c2 hc2)) x
+      exact h1.symm.trans ((h c1 hc1 c2 hc2 x).trans h2)
+    · have h1 := classHolds_withClassExt_of_unused i hT hN ext c1 (Bool.eq_false_iff.mpr (hUnused c1 hc1)) x
+      have h2 := classHolds_withClassExt_of_unused i hT hN ext c2 (Bool.eq_false_iff.mpr (hUnused c2 hc2)) x
+      exact h1.trans ((h c1 hc1 c2 hc2 x).trans h2.symm)
+  | disjointClasses cs =>
+    simp only [axiomHasClass, List.any_eq_false] at hUnused
+    simp only [axiomHolds]
+    constructor <;> intro h
+    · exact List.Pairwise.imp_of_mem (fun {p q} hp hq hpq x ⟨h1, h2⟩ => hpq x
+        ⟨(classHolds_withClassExt_of_unused i hT hN ext p (Bool.eq_false_iff.mpr (hUnused p hp)) x).mpr h1,
+         (classHolds_withClassExt_of_unused i hT hN ext q (Bool.eq_false_iff.mpr (hUnused q hq)) x).mpr h2⟩) h
+    · exact List.Pairwise.imp_of_mem (fun {p q} hp hq hpq x ⟨h1, h2⟩ => hpq x
+        ⟨(classHolds_withClassExt_of_unused i hT hN ext p (Bool.eq_false_iff.mpr (hUnused p hp)) x).mp h1,
+         (classHolds_withClassExt_of_unused i hT hN ext q (Bool.eq_false_iff.mpr (hUnused q hq)) x).mp h2⟩) h
+  | disjointUnion c cs =>
+    simp only [axiomHasClass, Bool.or_eq_false_iff, beq_eq_false_iff_ne, List.any_eq_false] at hUnused
+    simp only [axiomHolds, withClassExt, beq_false_of_ne hUnused.1]
+    constructor <;> rintro ⟨hcov, hdisj⟩
+    · refine ⟨fun x => ?_, List.Pairwise.imp_of_mem (fun {p q} hp hq hpq x ⟨h1, h2⟩ => hpq x
+        ⟨(classHolds_withClassExt_of_unused i hT hN ext p (Bool.eq_false_iff.mpr (hUnused.2 p hp)) x).mpr h1,
+         (classHolds_withClassExt_of_unused i hT hN ext q (Bool.eq_false_iff.mpr (hUnused.2 q hq)) x).mpr h2⟩) hdisj⟩
+      constructor
+      · intro hx; obtain ⟨d, hd, hdx⟩ := (hcov x).mp hx
+        exact ⟨d, hd, (classHolds_withClassExt_of_unused i hT hN ext d (Bool.eq_false_iff.mpr (hUnused.2 d hd)) x).mp hdx⟩
+      · rintro ⟨d, hd, hdx⟩
+        exact (hcov x).mpr ⟨d, hd, (classHolds_withClassExt_of_unused i hT hN ext d (Bool.eq_false_iff.mpr (hUnused.2 d hd)) x).mpr hdx⟩
+    · refine ⟨fun x => ?_, List.Pairwise.imp_of_mem (fun {p q} hp hq hpq x ⟨h1, h2⟩ => hpq x
+        ⟨(classHolds_withClassExt_of_unused i hT hN ext p (Bool.eq_false_iff.mpr (hUnused.2 p hp)) x).mp h1,
+         (classHolds_withClassExt_of_unused i hT hN ext q (Bool.eq_false_iff.mpr (hUnused.2 q hq)) x).mp h2⟩) hdisj⟩
+      constructor
+      · intro hx; obtain ⟨d, hd, hdx⟩ := (hcov x).mp hx
+        exact ⟨d, hd, (classHolds_withClassExt_of_unused i hT hN ext d (Bool.eq_false_iff.mpr (hUnused.2 d hd)) x).mpr hdx⟩
+      · rintro ⟨d, hd, hdx⟩
+        exact (hcov x).mpr ⟨d, hd, (classHolds_withClassExt_of_unused i hT hN ext d (Bool.eq_false_iff.mpr (hUnused.2 d hd)) x).mp hdx⟩
+  | objectPropertyDomain _ c | objectPropertyRange _ c | dataPropertyDomain _ c =>
+    simp only [axiomHasClass] at hUnused
+    simp only [axiomHolds, withClassExt, objectHolds]
+    constructor <;> intro h x y hr
+    · exact (classHolds_withClassExt_of_unused i hT hN ext c hUnused _).mp (h x y hr)
+    · exact (classHolds_withClassExt_of_unused i hT hN ext c hUnused _).mpr (h x y hr)
+  | hasKey c _ _ =>
+    simp only [axiomHasClass] at hUnused
+    simp only [axiomHolds, withClassExt, objectHolds]
+    constructor <;> intro h x y hx hy hnx hny hobj hdata
+    · exact h x y ((classHolds_withClassExt_of_unused i hT hN ext c hUnused x).mpr hx)
+        ((classHolds_withClassExt_of_unused i hT hN ext c hUnused y).mpr hy) hnx hny hobj hdata
+    · exact h x y ((classHolds_withClassExt_of_unused i hT hN ext c hUnused x).mp hx)
+        ((classHolds_withClassExt_of_unused i hT hN ext c hUnused y).mp hy) hnx hny hobj hdata
+  | classAssertion c a =>
+    simp only [axiomHasClass] at hUnused
+    exact classHolds_withClassExt_of_unused i hT hN ext c hUnused (i.individuals a)
+  | subObjectPropertyChain body sup =>
+    simp only [axiomHolds, objectHolds_withClassExt]
+    exact forall_congr' fun x => forall_congr' fun y =>
+      imp_congr_left (rolePath_withClassExt i hT hN ext body x y)
+  | dataPropertyRange p dr =>
+    simp only [axiomHolds, withClassExt]
+    exact forall_congr' fun x => forall_congr' fun y =>
+      imp_congr_right fun _ => dataHolds_withClassExt i hT hN ext dr y
+  | datatypeDefinition dt dr =>
+    simp only [axiomHolds, withClassExt]
+    exact forall_congr' fun y => iff_congr Iff.rfl (dataHolds_withClassExt i hT hN ext dr y)
+  | subObjectProperty _ _ | equivalentObjectProperties _
+  | disjointObjectProperties _ | inverseObjectProperties _ _ | functionalObjectProperty _
+  | inverseFunctionalObjectProperty _ | reflexiveObjectProperty _ | irreflexiveObjectProperty _
+  | symmetricObjectProperty _ | asymmetricObjectProperty _ | transitiveObjectProperty _
+  | subDataProperty _ _ | equivalentDataProperties _ | disjointDataProperties _
+  | functionalDataProperty _
+  | sameIndividuals _ | differentIndividuals _ | objectAssertion _ _ _
+  | negativeObjectAssertion _ _ _ | dataAssertion _ _ _ | negativeDataAssertion _ _ _ =>
+    exact Iff.rfl
+
+private theorem atomHolds_withClassExt_of_unused {dm : DatatypeMap} (bSem : BuiltinSemantics dm)
+    (i : Interpretation dm) {g : IRI} (hT : g ≠ thing) (hN : g ≠ nothing) (ext : i.Object → Prop)
+    (hBSem : ∀ b vs, bSem (withClassExt i g hT hN ext) b vs ↔ bSem i b vs)
+    (σI : IRI → i.Object) (σD : IRI → i.Data)
+    (a : SWRLAtom) (hUnused : atomHasClass g a = false) :
+    atomHolds bSem (withClassExt i g hT hN ext) σI σD a ↔ atomHolds bSem i σI σD a := by
+  cases a with
+  | classAtom c x =>
+    simp only [atomHasClass] at hUnused
+    exact classHolds_withClassExt_of_unused i hT hN ext c hUnused (evalIArg i σI x)
+  | dataRangeAtom dr x =>
+    exact dataHolds_withClassExt i hT hN ext dr (evalDArg i σD x)
+  | builtinAtom b args => exact hBSem b _
+  | objectPropertyAtom _ _ _ | dataPropertyAtom _ _ _
+  | sameIndividualAtom _ _ | differentIndividualsAtom _ _ => exact Iff.rfl
+
+/-- Headline equisatisfiability theorem for Motik–Sattler–Studer auxiliary-guard DL-Safe SWRL
+    reduction (eliminates `ObjectOneOf(namedInds)` copies and `owl:topObjectProperty`). -/
+theorem groundAllRulesWithGuard_sat_iff {dm : DatatypeMap} (bSem : BuiltinSemantics dm)
+    (hBSemExt : ∀ (i : Interpretation dm) (g : IRI) (hT : g ≠ thing) (hN : g ≠ nothing)
+      (ext : i.Object → Prop) (b : IRI) (vs : List i.Data),
+      bSem (withClassExt i g hT hN ext) b vs ↔ bSem i b vs)
+    {namedInds : List IRI} {o : Ontology} {rules : List SWRLRule} {guardCls : IRI}
+    {ruleAxs : List Axiom}
+    (hT : guardCls ≠ thing) (hN : guardCls ≠ nothing)
+    (hUnusedO : ontologyHasClass guardCls o = false)
+    (hUnusedR : rulesHaveClass guardCls rules = false)
+    (hG : groundAllRulesWithGuard namedInds (.named guardCls) rules = some ruleAxs) :
+    Satisfiable dm (o ++ dlSafeGuardAssertions guardCls namedInds ++ ruleAxs) ↔
+      SatisfiableWithRules dm bSem namedInds o rules := by
+  unfold groundAllRulesWithGuard at hG
+  cases hM : rules.mapM (encodeDLSafeRuleWithGuard namedInds (.named guardCls)) with
+  | none => rw [hM] at hG; cases hG
+  | some axLists =>
+    rw [hM] at hG; simp only [Option.map_some, Option.some.injEq] at hG; subst hG
+    obtain ⟨hFwd, hBwd⟩ := mem_mapM_some hM
+    constructor
+    · rintro ⟨i, assign, hsat⟩
+      let j := i.withAnonymous assign
+      have hCov : GuardCovers namedInds j (.named guardCls) := fun a ha =>
+        hsat (.classAssertion (.named guardCls) (.named a))
+          (List.mem_append_left _ (List.mem_append_right _ (List.mem_map_of_mem ha)))
+      refine ⟨i, assign, fun ax hax => hsat ax (List.mem_append_left _ (List.mem_append_left _ hax)), fun r hr => ?_⟩
+      obtain ⟨rAxs, hrAxsMem, hEnc⟩ := hFwd r hr
+      exact encodeRuleSmartAuxWithGuard_sound bSem hCov (r.iVars.length + 1) hEnc fun ax hax =>
+        hsat ax (List.mem_append_right _ (List.mem_flatten.mpr ⟨rAxs, hrAxsMem, hax⟩))
+    · rintro ⟨i, assign, hsatO, hsatR⟩
+      let ext : i.Object → Prop := fun x => ∃ a ∈ namedInds, x = i.individuals (.named a)
+      let i' := withClassExt i guardCls hT hN ext
+      have hEx : GuardExact namedInds (i'.withAnonymous assign) (.named guardCls) := by
+        intro x
+        simp [classHolds, Interpretation.withAnonymous, withClassExt, ext, i']
+      refine ⟨i', assign, fun ax hax => ?_⟩
+      rcases List.mem_append.mp hax with h12 | h3
+      · rcases List.mem_append.mp h12 with h1 | h2
+        · have hUnAx : axiomHasClass guardCls ax = false := by
+            simp only [ontologyHasClass, List.any_eq_false] at hUnusedO
+            exact Bool.eq_false_iff.mpr (hUnusedO ax h1)
+          exact (axiomHolds_withClassExt_of_unused (i.withAnonymous assign) hT hN ext ax hUnAx).mpr (hsatO ax h1)
+        · obtain ⟨a, haMem, rfl⟩ := List.mem_map.mp h2
+          exact hEx.covers a haMem
+      · obtain ⟨rAxs, hrAxsMem, haxIn⟩ := List.mem_flatten.mp h3
+        obtain ⟨r, hrMem, hEnc⟩ := hBwd rAxs hrAxsMem
+        have hUnR : ruleHasClass guardCls r = false := by
+          simp only [rulesHaveClass, List.any_eq_false] at hUnusedR
+          exact Bool.eq_false_iff.mpr (hUnusedR r hrMem)
+        simp only [ruleHasClass, Bool.or_eq_false_iff, List.any_eq_false] at hUnR
+        have hsatR' : satisfiesDLSafeRule bSem namedInds (i'.withAnonymous assign) r := by
+          intro σI σD hBound hbody a ha
+          have hUnA : atomHasClass guardCls a = false := Bool.eq_false_iff.mpr (hUnR.2 a ha)
+          refine (atomHolds_withClassExt_of_unused bSem (i.withAnonymous assign) hT hN ext
+            (hBSemExt (i.withAnonymous assign) guardCls hT hN ext) σI σD a hUnA).mpr ?_
+          exact hsatR r hrMem σI σD hBound (fun b hb =>
+            have hUnB : atomHasClass guardCls b = false := Bool.eq_false_iff.mpr (hUnR.1 b hb)
+            (atomHolds_withClassExt_of_unused bSem (i.withAnonymous assign) hT hN ext
+              (hBSemExt (i.withAnonymous assign) guardCls hT hN ext) σI σD b hUnB).mp (hbody b hb)) a ha
+        exact encodeRuleSmartAuxWithGuard_complete bSem hEx (r.iVars.length + 1) hEnc hsatR' ax haxIn
+
+/-- Headline entailment-preservation theorem for Motik–Sattler–Studer auxiliary-guard DL-Safe SWRL
+    reduction for any query `q` not mentioning `guardCls`. -/
+theorem groundAllRulesWithGuard_entails_iff {dm : DatatypeMap} (bSem : BuiltinSemantics dm)
+    (hBSemExt : ∀ (i : Interpretation dm) (g : IRI) (hT : g ≠ thing) (hN : g ≠ nothing)
+      (ext : i.Object → Prop) (b : IRI) (vs : List i.Data),
+      bSem (withClassExt i g hT hN ext) b vs ↔ bSem i b vs)
+    {namedInds : List IRI} {o q : Ontology} {rules : List SWRLRule} {guardCls : IRI}
+    {ruleAxs : List Axiom}
+    (hT : guardCls ≠ thing) (hN : guardCls ≠ nothing)
+    (hUnusedO : ontologyHasClass guardCls o = false)
+    (hUnusedR : rulesHaveClass guardCls rules = false)
+    (hUnusedQ : ontologyHasClass guardCls q = false)
+    (hG : groundAllRulesWithGuard namedInds (.named guardCls) rules = some ruleAxs) :
+    Entails dm (o ++ dlSafeGuardAssertions guardCls namedInds ++ ruleAxs) q ↔
+      EntailsWithRules dm bSem namedInds o rules q := by
+  unfold groundAllRulesWithGuard at hG
+  cases hM : rules.mapM (encodeDLSafeRuleWithGuard namedInds (.named guardCls)) with
+  | none => rw [hM] at hG; cases hG
+  | some axLists =>
+    rw [hM] at hG; simp only [Option.map_some, Option.some.injEq] at hG; subst hG
+    obtain ⟨hFwd, hBwd⟩ := mem_mapM_some hM
+    constructor
+    · intro hent i ⟨assign, hsatO, hsatR⟩
+      let ext : i.Object → Prop := fun x => ∃ a ∈ namedInds, x = i.individuals (.named a)
+      let i' := withClassExt i guardCls hT hN ext
+      have hEx : GuardExact namedInds (i'.withAnonymous assign) (.named guardCls) := by
+        intro x
+        simp [classHolds, Interpretation.withAnonymous, withClassExt, ext, i']
+      have hMod' : models i' (o ++ dlSafeGuardAssertions guardCls namedInds ++ axLists.flatten) := by
+        refine ⟨assign, fun ax hax => ?_⟩
+        rcases List.mem_append.mp hax with h12 | h3
+        · rcases List.mem_append.mp h12 with h1 | h2
+          · have hUnAx : axiomHasClass guardCls ax = false := by
+              simp only [ontologyHasClass, List.any_eq_false] at hUnusedO
+              exact Bool.eq_false_iff.mpr (hUnusedO ax h1)
+            exact (axiomHolds_withClassExt_of_unused (i.withAnonymous assign) hT hN ext ax hUnAx).mpr (hsatO ax h1)
+          · obtain ⟨a, haMem, rfl⟩ := List.mem_map.mp h2
+            exact hEx.covers a haMem
+        · obtain ⟨rAxs, hrAxsMem, haxIn⟩ := List.mem_flatten.mp h3
+          obtain ⟨r, hrMem, hEnc⟩ := hBwd rAxs hrAxsMem
+          have hUnR : ruleHasClass guardCls r = false := by
+            simp only [rulesHaveClass, List.any_eq_false] at hUnusedR
+            exact Bool.eq_false_iff.mpr (hUnusedR r hrMem)
+          simp only [ruleHasClass, Bool.or_eq_false_iff, List.any_eq_false] at hUnR
+          have hsatR' : satisfiesDLSafeRule bSem namedInds (i'.withAnonymous assign) r := by
+            intro σI σD hBound hbody a ha
+            have hUnA : atomHasClass guardCls a = false := Bool.eq_false_iff.mpr (hUnR.2 a ha)
+            refine (atomHolds_withClassExt_of_unused bSem (i.withAnonymous assign) hT hN ext
+              (hBSemExt (i.withAnonymous assign) guardCls hT hN ext) σI σD a hUnA).mpr ?_
+            exact hsatR r hrMem σI σD hBound (fun b hb =>
+              have hUnB : atomHasClass guardCls b = false := Bool.eq_false_iff.mpr (hUnR.1 b hb)
+              (atomHolds_withClassExt_of_unused bSem (i.withAnonymous assign) hT hN ext
+                (hBSemExt (i.withAnonymous assign) guardCls hT hN ext) σI σD b hUnB).mp (hbody b hb)) a ha
+          exact encodeRuleSmartAuxWithGuard_complete bSem hEx (r.iVars.length + 1) hEnc hsatR' ax haxIn
+      obtain ⟨assignQ, hsatQ'⟩ := hent i' hMod'
+      refine ⟨assignQ, fun ax hax => ?_⟩
+      have hUnQ : axiomHasClass guardCls ax = false := by
+        simp only [ontologyHasClass, List.any_eq_false] at hUnusedQ
+        exact Bool.eq_false_iff.mpr (hUnusedQ ax hax)
+      exact (axiomHolds_withClassExt_of_unused (i.withAnonymous assignQ) hT hN ext ax hUnQ).mp (hsatQ' ax hax)
+    · intro hent i ⟨assign, hsat⟩
+      let j := i.withAnonymous assign
+      have hCov : GuardCovers namedInds j (.named guardCls) := fun a ha =>
+        hsat (.classAssertion (.named guardCls) (.named a))
+          (List.mem_append_left _ (List.mem_append_right _ (List.mem_map_of_mem ha)))
+      refine hent i ⟨assign, fun ax hax => hsat ax (List.mem_append_left _ (List.mem_append_left _ hax)), fun r hr => ?_⟩
+      obtain ⟨rAxs, hrAxsMem, hEnc⟩ := hFwd r hr
+      exact encodeRuleSmartAuxWithGuard_sound bSem hCov (r.iVars.length + 1) hEnc fun ax hax =>
+        hsat ax (List.mem_append_right _ (List.mem_flatten.mpr ⟨rAxs, hrAxsMem, hax⟩))
+
+private theorem realBuiltinSem_withClassExt (i : Interpretation realDatatypeMap)
+    (g : IRI) (hT : g ≠ thing) (hN : g ≠ nothing) (ext : i.Object → Prop)
+    (b : IRI) (vs : List i.Data) :
+    realBuiltinSem (withClassExt i g hT hN ext) b vs ↔ realBuiltinSem i b vs :=
+  realBuiltinSem_classes_irrel i _ _ _ b vs
+
+/-- Real-map specialization of `groundAllRulesWithGuard_sat_iff`. -/
+theorem groundAllRulesWithGuard_real_sat_iff
+    {namedInds : List IRI} {o : Ontology} {rules : List SWRLRule} {guardCls : IRI}
+    {ruleAxs : List Axiom}
+    (hT : guardCls ≠ thing) (hN : guardCls ≠ nothing)
+    (hUnusedO : ontologyHasClass guardCls o = false)
+    (hUnusedR : rulesHaveClass guardCls rules = false)
+    (hG : groundAllRulesWithGuard namedInds (.named guardCls) rules = some ruleAxs) :
+    Satisfiable realDatatypeMap (o ++ dlSafeGuardAssertions guardCls namedInds ++ ruleAxs) ↔
+      SatisfiableWithRules realDatatypeMap realBuiltinSem namedInds o rules :=
+  groundAllRulesWithGuard_sat_iff realBuiltinSem realBuiltinSem_withClassExt hT hN hUnusedO hUnusedR hG
+
+/-- Real-map specialization of `groundAllRulesWithGuard_entails_iff`. -/
+theorem groundAllRulesWithGuard_real_entails_iff
+    {namedInds : List IRI} {o q : Ontology} {rules : List SWRLRule} {guardCls : IRI}
+    {ruleAxs : List Axiom}
+    (hT : guardCls ≠ thing) (hN : guardCls ≠ nothing)
+    (hUnusedO : ontologyHasClass guardCls o = false)
+    (hUnusedR : rulesHaveClass guardCls rules = false)
+    (hUnusedQ : ontologyHasClass guardCls q = false)
+    (hG : groundAllRulesWithGuard namedInds (.named guardCls) rules = some ruleAxs) :
+    Entails realDatatypeMap (o ++ dlSafeGuardAssertions guardCls namedInds ++ ruleAxs) q ↔
+      EntailsWithRules realDatatypeMap realBuiltinSem namedInds o rules q :=
+  groundAllRulesWithGuard_entails_iff realBuiltinSem realBuiltinSem_withClassExt hT hN hUnusedO hUnusedR hUnusedQ hG
+
 /-! ### 5. Local Data-Variable Roll-Up (`rollupLocalDataVars`) -/
 
 /-- Extract a data-range constraint on data variable `dv` from a body atom, if it constrains
@@ -1914,14 +2981,45 @@ private def groundConcreteRules (o : Ontology) (namedInds : List IRI)
   throw "SWRL concrete-value grounding did not reach a finite fixpoint within the configured round bound"
 
 /-- Lower the rule set together so functional outputs can become candidate
+    inputs of later rules. Uses Motik–Sattler–Studer auxiliary-guard encoding
+    (`groundAllRulesWithGuard`) when `namedInds.length > 8` to avoid repeated
+    `ObjectOneOf(namedInds)` AST blowups and `owl:topObjectProperty`.
+    Returns `(guardCls?, guardAssertions, loweredRuleProvenance)`. -/
+def lowerSWRLRulesGuardedWithProvenance (o : Ontology) (namedInds : List IRI)
+    (rules : List SWRLRule) (extraForbidden : List IRI := []) :
+    Except String (Option IRI × List Axiom × List (Axiom × SWRLRule)) := do
+  if let some err := diagnoseDLSafeRules rules then throw err
+  let rolled := rules.map fun r => (r, rollupLocalDataVars r)
+  let (concrete, static) := rolled.partition (fun (_, r) => needsConcreteGrounding r)
+  let useAuxGuard := namedInds.length > 8 && static.any (fun (_, r) => !r.iVars.isEmpty)
+  let guardCls? : Option IRI :=
+    if useAuxGuard then some (freshGuardClass o rules extraForbidden) else none
+  let guardExpr : ClassExpr :=
+    match guardCls? with
+    | some g => .named g
+    | none => .oneOf (namedInds.map Individual.named)
+  let guardAxs : List Axiom :=
+    match guardCls? with
+    | some g => dlSafeGuardAssertions g namedInds
+    | none => []
+  let staticAxs ← static.flatMapM fun (original, r) => do
+    let some axs := encodeDLSafeRuleWithGuard namedInds guardExpr r
+      | throw "failed to encode DL-safe SWRL rule into OWL 2 DL"
+    return axs.map (·, original)
+  let more ← groundConcreteRules o namedInds concrete (static.flatMap fun (_, r) => headDataCandidates r)
+  return (guardCls?, guardAxs, staticAxs ++ more)
+
+/-- Lower the rule set together so functional outputs can become candidate
     inputs of later rules. Retain the source rule for explanation rendering. -/
 def lowerSWRLRulesWithProvenance (o : Ontology) (namedInds : List IRI)
     (rules : List SWRLRule) : Except String (List (Axiom × SWRLRule)) := do
   if let some err := diagnoseDLSafeRules rules then throw err
   let rolled := rules.map fun r => (r, rollupLocalDataVars r)
   let (concrete, static) := rolled.partition (fun (_, r) => needsConcreteGrounding r)
+  let guardExpr := ClassExpr.oneOf (namedInds.map Individual.named)
   let staticAxs ← static.flatMapM fun (original, r) => do
-    let some axs := encodeDLSafeRule namedInds r | throw "failed to encode DL-safe SWRL rule into OWL 2 DL"
+    let some axs := encodeDLSafeRuleWithGuard namedInds guardExpr r
+      | throw "failed to encode DL-safe SWRL rule into OWL 2 DL"
     return axs.map (·, original)
   let more ← groundConcreteRules o namedInds concrete (static.flatMap fun (_, r) => headDataCandidates r)
   return staticAxs ++ more
@@ -2003,13 +3101,63 @@ private def evalGroundAtomInModel (m : SROIQDModel) : SWRLAtom → Option Bool
     some (m.indVal x != m.indVal y)
   | _ => none
 
-/-- Find a violated ground instance of a multi-variable SWRL rule in a verified finite model `m`.
-    Returns `some (some gr)` if a violated ground instance `gr` is found,
-    `some none` if all groundings are verified satisfied in `m`, or `none` if uncertain. -/
-private def findViolatedGroundRule (m : SROIQDModel) (namedInds : List IRI)
-    (rules : List SWRLRule) : Option (Option SWRLRule) := Id.run do
+/-- Narrow candidate individuals for variable `v` using unary `ClassAtom` and
+    `ObjectPropertyAtom` edge incidence in `m`, avoiding $O(|I|^k)$ Cartesian enumeration. -/
+private def candidateIndsForVar (m : SROIQDModel) (namedInds : List IRI)
+    (body : List SWRLAtom) (v : IRI) : List IRI :=
+  let hasOut (p : IRI) (w : m.graph.World) : Bool :=
+    p == topObjectProperty || (p != bottomObjectProperty &&
+      m.graph.edges.any fun (ep, src, _) => ep == p && src == w)
+  let hasIn (p : IRI) (w : m.graph.World) : Bool :=
+    p == topObjectProperty || (p != bottomObjectProperty &&
+      m.graph.edges.any fun (ep, _, dst) => ep == p && dst == w)
+  namedInds.filter fun a =>
+    let w := m.indVal (.named a)
+    body.all fun atom =>
+      match atom with
+      | .classAtom c (.var u) =>
+        if u == v then evalClassExprInModel m w c != some false else true
+      | .objectPropertyAtom (.named p) (.var u1) (.var u2) =>
+        (if u1 == v then hasOut p w else true) && (if u2 == v then hasIn p w else true)
+      | .objectPropertyAtom (.inverse p) (.var u1) (.var u2) =>
+        (if u1 == v then hasIn p w else true) && (if u2 == v then hasOut p w else true)
+      | .objectPropertyAtom (.named p) (.var u) (.ind b) =>
+        if u == v then
+          p == topObjectProperty || (p != bottomObjectProperty && m.graph.edge p w (m.indVal b))
+        else true
+      | .objectPropertyAtom (.named p) (.ind b) (.var u) =>
+        if u == v then
+          p == topObjectProperty || (p != bottomObjectProperty && m.graph.edge p (m.indVal b) w)
+        else true
+      | .objectPropertyAtom (.inverse p) (.var u) (.ind b) =>
+        if u == v then
+          p == topObjectProperty || (p != bottomObjectProperty && m.graph.edge p (m.indVal b) w)
+        else true
+      | .objectPropertyAtom (.inverse p) (.ind b) (.var u) =>
+        if u == v then
+          p == topObjectProperty || (p != bottomObjectProperty && m.graph.edge p w (m.indVal b))
+        else true
+      | _ => true
+
+private def filteredVarAssignments (m : SROIQDModel) (namedInds : List IRI)
+    (body : List SWRLAtom) : List IRI → List (List (IRI × IRI))
+  | [] => [[]]
+  | v :: vs =>
+    let cands := candidateIndsForVar m namedInds body v
+    if cands.isEmpty then []
+    else
+      let rest := filteredVarAssignments m namedInds body vs
+      cands.flatMap fun a => rest.map fun env => (v, a) :: env
+
+/-- Find violated ground instances of multi-variable SWRL rules in a verified finite model `m`
+    (batched up to `maxBatch` per CEGAR round).
+    Returns `some []` if all groundings are verified satisfied in `m`,
+    `some grs` (non-empty) if violated ground instances are found, or `none` if uncertain. -/
+private def findViolatedGroundRules (m : SROIQDModel) (namedInds : List IRI)
+    (rules : List SWRLRule) (maxBatch : Nat := 64) : Option (List SWRLRule) := Id.run do
+  let mut violated : List SWRLRule := []
   for r in rules do
-    let envs := allVarAssignments namedInds r.iVars
+    let envs := filteredVarAssignments m namedInds r.body r.iVars
     for env in envs do
       let gr := r.subst (env.map fun (v, a) => (v, Individual.named a)) []
       let mut bodyAllTrue := true
@@ -2024,9 +3172,12 @@ private def findViolatedGroundRule (m : SROIQDModel) (namedInds : List IRI)
       for h in gr.head do
         match evalGroundAtomInModel m h with
         | some true => pure ()
-        | some false => return some (some gr)
+        | some false =>
+          violated := gr :: violated
+          if violated.length ≥ maxBatch then return some violated.reverse
+          break
         | none => return none
-  return some none
+  return some violated.reverse
 
 /-- Replace occurrences of a specific named individual `ind` with a fresh variable `v` in an `IArg`. -/
 private def abstractIndIArg (ind v : IRI) : IArg → IArg
@@ -2120,21 +3271,34 @@ def decideWithSWRLFast? (o : Ontology) (namedInds : List IRI) (rules : List SWRL
           else
             match ev with
             | .model m =>
-              match findViolatedGroundRule m namedInds lazyRules with
-              | some none => return some true -- Verified model satisfies all SWRL rules!
-              | some (some gr) =>
-                match encodeGroundRuleSmart gr with
-                | some gAxs => activeAxs := activeAxs ++ gAxs
-                | none => break
+              match findViolatedGroundRules m namedInds lazyRules with
+              | some [] => return some true -- Verified model satisfies all SWRL rules!
+              | some grs =>
+                let mut addedAny := false
+                for gr in grs do
+                  match encodeGroundRuleSmart gr with
+                  | some gAxs =>
+                    activeAxs := activeAxs ++ gAxs
+                    addedAny := true
+                  | none => pure ()
+                if !addedAny then break
               | none => break
             | .refutation _ => return some false
         else break
       | none => break
     | none => break
-  -- Fallback: smart exact encoding + fast/exact decision (guarantees completeness & termination)
-  let mut fullAxs : List Axiom := []
+  -- Fallback: guarded nominal-anchored exact encoding + fast/exact decision
+  -- (guarantees completeness & termination without `ObjectOneOf(namedInds)` blowup)
+  let useAuxGuard := namedInds.length > 8
+  let guardCls? := if useAuxGuard then some (freshGuardClass baseOnt lazyRules) else none
+  let guardExpr : ClassExpr := match guardCls? with
+    | some g => .named g
+    | none => .oneOf (namedInds.map Individual.named)
+  let mut fullAxs : List Axiom := match guardCls? with
+    | some g => dlSafeGuardAssertions g namedInds
+    | none => []
   for r in lazyRules do
-    match encodeDLSafeRule namedInds r with
+    match encodeDLSafeRuleWithGuard namedInds guardExpr r with
     | some axs => fullAxs := fullAxs ++ axs
     | none => throw "failed to encode DL-safe SWRL rule"
   return Classification.fastConsistencyCheck (baseOnt ++ fullAxs)
@@ -2143,6 +3307,8 @@ def decideWithSWRLFast? (o : Ontology) (namedInds : List IRI) (rules : List SWRL
 #print axioms encodeGroundRule_holds_iff
 #print axioms encodeSingleIndGroundRule_holds_iff
 #print axioms encodeUnaryRule_holds_iff
+#print axioms encodeAnchoredUnaryRuleWithGuard_sound
+#print axioms encodeAnchoredUnaryRuleWithGuard_complete
 #print axioms rollupOneIndVar_holds_iff
 #print axioms rollupLocalIndVars_holds_iff
 #print axioms groundRuleAll_holds_iff
@@ -2150,6 +3316,8 @@ def decideWithSWRLFast? (o : Ontology) (namedInds : List IRI) (rules : List SWRL
 #print axioms groundAllRules_holds_iff
 #print axioms groundAllRules_sat_iff
 #print axioms groundAllRules_entails_iff
+#print axioms groundAllRulesWithGuard_real_sat_iff
+#print axioms groundAllRulesWithGuard_real_entails_iff
 #print axioms rollupOneDataVar_holds_iff
 #print axioms rollupLocalDataVars_real_holds_iff
 #print axioms decideRealWithSWRL_iff

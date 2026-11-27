@@ -587,4 +587,36 @@ Ontology(<http://example.org/swrl/undecl>
     (StrictTyping.diagnoseStrictTypedOWL2DLWithRules doc.declarations doc.annotationAxioms doc.ontology doc.rules).isSome
   | .error _ => false
 
+/-! ### 10. Nominal-Anchored Auxiliary-Guard Encoding on Larger ABoxes (O(|I|), Zero `topObjectProperty`) -/
+
+private def binaryHeadRule : SWRLRule := {
+  body := [
+    .objectPropertyAtom (.named (ex "relA")) (.var (vIRI "e")) (.var (vIRI "d")),
+    .classAtom (.named (ex "Marker")) (.var (vIRI "d"))
+  ],
+  head := [
+    .objectPropertyAtom (.named (ex "relB")) (.var (vIRI "e")) (.var (vIRI "d"))
+  ]
+}
+
+#guard
+  let inds := (List.range 12).map fun k => ex s!"u{k}"
+  let ont : Ontology := [
+    .objectAssertion (.named (ex "relA")) (.named (ex "u0")) (.named (ex "u1")),
+    .classAssertion (.named (ex "Marker")) (.named (ex "u1"))
+  ]
+  match lowerSWRLRulesGuardedWithProvenance ont inds [binaryHeadRule] with
+  | .ok (some g, gAxs, prov) =>
+    let ruleAxs := prov.map Prod.fst
+    -- Linear in |I| (12 axioms, NOT 12² = 144), zero `owl:topObjectProperty`
+    gAxs.length == 12 && ruleAxs.length == 12 &&
+    !ruleAxs.any (fun ax => StrictTyping.axiomObjProps ax |>.contains topObjectProperty) &&
+    -- Entails relB(u0, u1)
+    let fullOnt := ont ++ gAxs ++ ruleAxs
+    let negQuery := Axiom.negativeObjectAssertion (.named (ex "relB")) (.named (ex "u0")) (.named (ex "u1"))
+    Classification.fastConsistencyCheck fullOnt == some true &&
+    Classification.fastConsistencyCheck (negQuery :: fullOnt) == some false &&
+    !SWRL.ontologyHasClass g ont
+  | _ => false
+
 end SabrinaTests.SWRLTests

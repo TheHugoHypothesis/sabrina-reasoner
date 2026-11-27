@@ -14,7 +14,7 @@ inductive RDFTerm where
   | iri (val : IRI)
   | bnode (id : String)
   | literal (lexical : String) (datatype : IRI) (lang : Option String := none)
-  deriving DecidableEq, Repr, Inhabited
+  deriving DecidableEq, Repr, Inhabited, Hashable
 
 /-- An RDF 1.1 triple `(subject, predicate, object)`. -/
 structure RDFTriple where
