@@ -229,18 +229,10 @@ private def lowerClosureSWRL (closure : ResolvedOFNClosure) (extraInds : List IR
     Except String (Ontology × List (Axiom × SWRL.SWRLRule)) := do
   if closure.rules.isEmpty then
     return (closure.ontology, [])
-  if let some err := SWRL.diagnoseDLSafeRules closure.rules then
-    throw err
   let inds := SWRL.collectNamedIndividuals closure.ontology closure.rules
     (declaredNamedInds closure.declarations ++ extraInds)
-  let mut ruleAxs : List Axiom := []
-  let mut prov : List (Axiom × SWRL.SWRLRule) := []
-  for r in closure.rules do
-    let axs ← SWRL.lowerSWRLRules closure.ontology inds [r]
-    ruleAxs := ruleAxs ++ axs
-    for ax in axs do
-      prov := (ax, r) :: prov
-  return (closure.ontology ++ ruleAxs, prov.reverse)
+  let prov ← SWRL.lowerSWRLRulesWithProvenance closure.ontology inds closure.rules
+  return (closure.ontology ++ prov.map Prod.fst, prov)
 
 private def renderJustificationWithRules (prov : List (Axiom × SWRL.SWRLRule)) (J : Ontology) :
     List String :=
@@ -261,7 +253,7 @@ private def runConsistency (id ofnText : String) (lib : List (IRI × String))
     | .error err => return (2, response "UNSUPPORTED" false (("reason", toJson s!"parse/import error: {err}") :: baseContext))
   let ont := closure.ontology
   if strictOwl2DL then
-    if let some err := StrictTyping.diagnoseStrictTypedOWL2DL closure.declarations closure.annotationAxioms ont then
+    if let some err := StrictTyping.diagnoseStrictTypedOWL2DLWithRules closure.declarations closure.annotationAxioms ont closure.rules then
       return (2, response "UNSUPPORTED" false
         (("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson false) :: ("reason", toJson err) :: baseContext))
   let context := if strictOwl2DL then
@@ -407,7 +399,8 @@ private def runQuery (id ofnText queryText : String) (lib : List (IRI × String)
     | .ok a => pure a
     | .error err => return (2, response "UNSUPPORTED" false (("reason", toJson s!"OFN query parse error: {err}") :: baseContext))
   if strictOwl2DL then
-    if let some err := StrictTyping.diagnoseStrictTypedOWL2DLQuery closure.declarations closure.annotationAxioms rawOnt qAx then
+    if let some err := StrictTyping.diagnoseStrictTypedOWL2DLQuery closure.declarations closure.annotationAxioms rawOnt qAx <|>
+          StrictTyping.diagnoseRuleTyping closure.declarations closure.annotationAxioms rawOnt closure.rules then
       return (2, response "UNSUPPORTED" false
         (("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson false) :: ("reason", toJson err) :: baseContext))
   let hasRules := !closure.rules.isEmpty
@@ -628,7 +621,7 @@ def runClassifyDocument (id docText : String) (lib : List (IRI × String))
     | .ok r => pure r
     | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson s!"parse/import error: {err}"), ("scope", scope)])
   if strict then
-    if let some err := StrictTyping.diagnoseStrictTypedOWL2DL closure.declarations closure.annotationAxioms closure.ontology then
+    if let some err := StrictTyping.diagnoseStrictTypedOWL2DLWithRules closure.declarations closure.annotationAxioms closure.ontology closure.rules then
       return (2, response "UNSUPPORTED" false [
         ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
         ("reason", toJson err), ("scope", scope)])
@@ -693,7 +686,7 @@ def runRealize (j : Json) (cliStrict : Bool := false)
     | .ok r => pure r
     | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson s!"parse/import error: {err}"), ("scope", scope)])
   if strict then
-    if let some err := StrictTyping.diagnoseStrictTypedOWL2DL closure.declarations closure.annotationAxioms closure.ontology then
+    if let some err := StrictTyping.diagnoseStrictTypedOWL2DLWithRules closure.declarations closure.annotationAxioms closure.ontology closure.rules then
       return (2, response "UNSUPPORTED" false [
         ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
         ("reason", toJson err), ("scope", scope)])
@@ -721,7 +714,7 @@ def runMaterializeDocument (id docText : String) (lib : List (IRI × String))
     | .error err =>
       return (2, response "UNSUPPORTED" false [("reason", toJson s!"parse/import error: {err}"), ("scope", scope)], none)
   if strict then
-    if let some err := StrictTyping.diagnoseStrictTypedOWL2DL closure.declarations closure.annotationAxioms closure.ontology then
+    if let some err := StrictTyping.diagnoseStrictTypedOWL2DLWithRules closure.declarations closure.annotationAxioms closure.ontology closure.rules then
       return (2, response "UNSUPPORTED" false [
         ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
         ("reason", toJson err), ("scope", scope)], none)
@@ -761,7 +754,7 @@ private def isMaterializeOptionsObj (j : Json) : Bool :=
     obj.contains "all_subclasses" || obj.contains "all_types" || obj.contains "all_inferred" ||
     obj.contains "include_sub_object_properties" ||
     obj.contains "include_object_property_assertions" ||
-    obj.contains "include_same_individuals"
+    obj.contains "include_data_property_assertions" || obj.contains "include_same_individuals"
   | .error _ => false
 
 private def parseMaterializeOptsObj (j : Json) (cliStrict : Bool) :
@@ -790,6 +783,8 @@ private def parseMaterializeOptsObj (j : Json) (cliStrict : Bool) :
     opts := { opts with includeSubObjectProperties := ← v.getBool? }
   if let some v := obj.get? "include_object_property_assertions" then
     opts := { opts with includeObjectPropertyAssertions := ← v.getBool? }
+  if let some v := obj.get? "include_data_property_assertions" then
+    opts := { opts with includeDataPropertyAssertions := ← v.getBool? }
   if let some v := obj.get? "include_same_individuals" then
     opts := { opts with includeSameIndividuals := ← v.getBool? }
   return (fmt, opts, strict)
@@ -846,7 +841,7 @@ def runExplainDocument (id docText : String) (queryText? : Option String)
   match queryText? with
   | none =>
     if strict then
-      if let some err := StrictTyping.diagnoseStrictTypedOWL2DL closure.declarations closure.annotationAxioms closure.ontology then
+      if let some err := StrictTyping.diagnoseStrictTypedOWL2DLWithRules closure.declarations closure.annotationAxioms closure.ontology closure.rules then
         return (2, response "UNSUPPORTED" false [
           ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
           ("reason", toJson err), ("scope", scope)])
@@ -873,7 +868,8 @@ def runExplainDocument (id docText : String) (queryText? : Option String)
       | .error err =>
         return (2, response "UNSUPPORTED" false [("reason", toJson s!"OFN query parse error: {err}"), ("query", toJson qText), ("scope", scope)])
     if strict then
-      if let some err := StrictTyping.diagnoseStrictTypedOWL2DLQuery closure.declarations closure.annotationAxioms closure.ontology qAx then
+      if let some err := StrictTyping.diagnoseStrictTypedOWL2DLQuery closure.declarations closure.annotationAxioms closure.ontology qAx <|>
+          StrictTyping.diagnoseRuleTyping closure.declarations closure.annotationAxioms closure.ontology closure.rules then
         return (2, response "UNSUPPORTED" false [
           ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
           ("reason", toJson err), ("query", toJson qText), ("scope", scope)])

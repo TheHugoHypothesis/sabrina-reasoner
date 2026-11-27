@@ -1,4 +1,5 @@
 import Sabrina.OWL2.StrictOWL2DL
+import Sabrina.OWL2.SWRLBuiltins
 
 /-! W3C OWL 2 DL §5.8.1–§5.8.2 Entity Declaration Typing, Reserved-Vocabulary,
     and Punning Validator.
@@ -305,6 +306,37 @@ def diagnoseStrictTypedOWL2DL (decls : List EntityDecl) (annots : List Annotatio
   match diagnoseTyping decls annots ont with
   | some err => some err
   | none => diagnoseStrictOWL2DL ont
+
+private def ruleLiteralTypingAxioms (arg : SWRL.DArg) : List Axiom :=
+  match arg with
+  | .var _ => []
+  | .lit l => [.dataAssertion topDataProperty (.named "") l]
+
+private def ruleAtomTypingAxioms : SWRL.SWRLAtom → List Axiom
+  | .classAtom c _ => [.subClassOf c c]
+  | .objectPropertyAtom r _ _ => [.subObjectProperty r r]
+  | .dataPropertyAtom p _ d => .subDataProperty p p :: ruleLiteralTypingAxioms d
+  | .dataRangeAtom d a => .dataPropertyRange topDataProperty d :: ruleLiteralTypingAxioms a
+  | .builtinAtom _ args => args.flatMap fun
+    | .lit l => if SWRL.isBuiltinTemporalDatatype l.datatype then [] else ruleLiteralTypingAxioms (.lit l)
+    | .var _ => []
+  | .sameIndividualAtom .. | .differentIndividualsAtom .. => []
+
+/-- Check the kinds and declarations of IRIs used by rules against the full
+    import closure. Rule variables are local and named-individual declarations
+    are optional under the same typing rules as OWL 2 axioms. -/
+def diagnoseRuleTyping (decls : List EntityDecl) (annots : List AnnotationAxiom)
+    (o : Ontology) (rules : List SWRL.SWRLRule) : Option String :=
+  if rules.isEmpty then none
+  else if rules.any (fun r => r.namedIndividuals.any isReservedPrefix) then
+    some "SWRL typing violation: named individual uses reserved vocabulary"
+  else
+    let uses := rules.flatMap fun r => (r.body ++ r.head).flatMap ruleAtomTypingAxioms
+    (diagnoseTyping decls annots (o ++ uses)).map fun err => s!"SWRL rule typing: {err}"
+
+def diagnoseStrictTypedOWL2DLWithRules (decls : List EntityDecl) (annots : List AnnotationAxiom)
+    (o : Ontology) (rules : List SWRL.SWRLRule) : Option String :=
+  diagnoseStrictTypedOWL2DL decls annots o <|> diagnoseRuleTyping decls annots o rules
 
 theorem diagnoseStrictTypedOWL2DL_isNone_iff (decls : List EntityDecl)
     (annots : List AnnotationAxiom) (ont : Ontology) :

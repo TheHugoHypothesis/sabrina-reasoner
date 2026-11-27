@@ -2,6 +2,7 @@ import Sabrina.OWL2.Classification
 import Sabrina.OWL2.FastClassification
 import Sabrina.OWL2.RDF.OWLMapping
 import Sabrina.OWL2.RDF.Serialize
+import Sabrina.OWL2.StrictTyping
 
 /-! Kernel-verified OWL 2 DL ontology materialization: computes entailed
     class hierarchies (`SubClassOf`, `EquivalentClasses`, unsatisfiable
@@ -201,6 +202,7 @@ structure MaterializeOptions where
   includeDirectTypes : Bool := true
   includeAllTypes : Bool := false
   includeObjectPropertyAssertions : Bool := true
+  includeDataPropertyAssertions : Bool := true
   includeSameIndividuals : Bool := true
   deriving Repr
 
@@ -284,6 +286,27 @@ private def materializedTypeAxioms (real : RealizationResult) (opts : Materializ
       e.directTypes.map fun c => .classAssertion (.named c) (.named e.individual)
   else []
 
+private def dataCandidateLiterals (o : Ontology) : List Literal :=
+  (SWRL.collectKnownLiterals o).filter fun l => (Datatypes.decodeLiteral l).isSome
+
+private def dataCandidateProperties (o : Ontology) (decls : List EntityDecl) : List IRI :=
+  (StrictTyping.allDataProps decls o).eraseDups
+
+private def dataAssertionCandidates (o : Ontology) (decls : List EntityDecl)
+    (inds : List IRI) : List Axiom :=
+  let lits := dataCandidateLiterals o
+  (dataCandidateProperties o decls).flatMap fun p =>
+    inds.flatMap fun ind => lits.map fun lit => .dataAssertion p (.named ind) lit
+
+private theorem dataAssertionCandidates_noAnon {o : Ontology} {decls : List EntityDecl}
+    {inds : List IRI} {a : Axiom} (h : a ∈ dataAssertionCandidates o decls inds) :
+    axiomAnonDocs a = [] := by
+  unfold dataAssertionCandidates at h
+  obtain ⟨_, _, hs⟩ := List.mem_flatMap.mp h
+  obtain ⟨_, _, hl⟩ := List.mem_flatMap.mp hs
+  obtain ⟨_, _, rfl⟩ := List.mem_map.mp hl
+  rfl
+
 /-- Materialize entailed axioms for `o` using any sound & complete consistency solver `solve`. -/
 def materializeWith (solve : Ontology → Option Bool) (o : Ontology)
     (decls : List EntityDecl := []) (opts : MaterializeOptions := {}) :
@@ -322,7 +345,8 @@ def materializeWith (solve : Ontology → Option Bool) (o : Ontology)
             (if opts.includeSameIndividuals then
               (unorderedPairs namedInds).map fun (a, b) =>
                 .sameIndividuals [.named a, .named b]
-            else [])
+            else []) ++
+            (if opts.includeDataPropertyAssertions then dataAssertionCandidates o decls namedInds else [])
           (filterEntailedAxioms solve o extraCands).map fun extraInferred =>
             let rawInferred :=
               materializedClassAxioms hier opts ++
@@ -449,7 +473,7 @@ theorem materializeWith_entailed {dm : DatatypeMap} {solve : Ontology → Option
         intro a ha
         have hcand := (hExtraSound a ha).1
         simp only [List.mem_append] at hcand
-        rcases hcand with (h1 | h2) | h3
+        rcases hcand with ((h1 | h2) | h3) | h4
         · split at h1
           · obtain ⟨⟨r, s⟩, _, rfl⟩ := List.mem_map.mp h1; rfl
           · cases h1
@@ -462,6 +486,9 @@ theorem materializeWith_entailed {dm : DatatypeMap} {solve : Ontology → Option
         · split at h3
           · obtain ⟨⟨x, y⟩, _, rfl⟩ := List.mem_map.mp h3; rfl
           · cases h3
+        · split at h4
+          · exact dataAssertionCandidates_noAnon h4
+          · cases h4
       have hClsSound := materializedClassAxioms_sound opts hUnsat hSub
       have hTypSound := materializedTypeAxioms_sound opts (fun e he =>
         let h := hEntReal e he; ⟨h.2.1, h.2.2⟩)
@@ -504,7 +531,7 @@ theorem materializeReal_entailed {o : Ontology} {decls : List EntityDecl}
   materializeWith_entailed decideRealOntology_iff hm
 
 /-- Check extra entailments in export order without allocating the candidate cross products. -/
-private def materializeExtraRuntime (o : Ontology) (props inds : List IRI)
+private def materializeExtraRuntime (o : Ontology) (decls : List EntityDecl) (props inds : List IRI)
     (opts : MaterializeOptions) : Option (List Axiom) := do
   let idx := FastLocality.LocalityIndex.build o
   let emit (inferred : Array Axiom) (ax : Axiom) : Option (Array Axiom) := do
@@ -527,6 +554,15 @@ private def materializeExtraRuntime (o : Ontology) (props inds : List IRI)
     for h : i in [:individuals.size] do
       for h' : j in [i + 1:individuals.size] do
         inferred ← emit inferred (.sameIndividuals [.named individuals[i], .named individuals[j]])
+  if opts.includeDataPropertyAssertions then
+    let lits := dataCandidateLiterals o
+    if !lits.isEmpty then
+      for p in dataCandidateProperties o decls do
+        for ind in inds do
+          for lit in lits do
+            let ax := Axiom.dataAssertion p (.named ind) lit
+            if !o.contains ax then
+              inferred ← emit inferred ax
   return inferred.toList
 
 /-- Fast hybrid runtime materializer that reuses its hierarchy during ABox realization. -/
@@ -543,10 +579,10 @@ def materializeOntologyRuntime (o : Ontology) (decls : List EntityDecl := [])
   let real ← FastClassification.realizeFromHierarchyRuntime o decls hier
   let extraInferred ←
     if opts.includeSubObjectProperties || opts.includeObjectPropertyAssertions ||
-        opts.includeSameIndividuals then do
+        opts.includeSameIndividuals || opts.includeDataPropertyAssertions then do
       let props := if opts.includeSubObjectProperties || opts.includeObjectPropertyAssertions then
         collectNamedObjectProperties o decls else []
-      materializeExtraRuntime o props real.individuals opts
+      materializeExtraRuntime o decls props real.individuals opts
     else pure []
   let rawInferred :=
     materializedClassAxioms hier opts ++ materializedTypeAxioms real opts ++ extraInferred

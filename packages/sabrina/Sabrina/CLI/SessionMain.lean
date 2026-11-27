@@ -101,18 +101,11 @@ private def activeOntWithRules (st : SessionState) (extraInds : List IRI := []) 
     Except String (Ontology × List (Axiom × SWRL.SWRLRule)) := do
   let ont := activeOnt st
   if st.rules.isEmpty then return (ont, [])
-  if let some err := SWRL.diagnoseDLSafeRules st.rules then throw err
   let declInds := st.declarations.filterMap fun d =>
     if d.kind == .namedIndividual then some d.iri else none
   let inds := SWRL.collectNamedIndividuals ont st.rules (declInds ++ extraInds)
-  let mut ruleAxs : List Axiom := []
-  let mut prov : List (Axiom × SWRL.SWRLRule) := []
-  for r in st.rules do
-    let axs ← SWRL.lowerSWRLRules ont inds [r]
-    ruleAxs := ruleAxs ++ axs
-    for ax in axs do
-      prov := (ax, r) :: prov
-  return (ont ++ ruleAxs, prov.reverse)
+  let prov ← SWRL.lowerSWRLRulesWithProvenance ont inds st.rules
+  return (ont ++ prov.map Prod.fst, prov)
 
 private def renderSessionJust (prov : List (Axiom × SWRL.SWRLRule)) (J : Ontology) : List String :=
   if prov.isEmpty then J.map renderAxiom

@@ -1700,6 +1700,28 @@ theorem rollupOneDataVar_holds_iff {dm : DatatypeMap} (bSem : BuiltinSemantics d
 
 /-! ### 6. Safe Concrete-Value Grounding for Functional `swrlb:*` Built-ins -/
 
+/-- Real-map specialization of the local roll-up theorem. -/
+theorem rollupOneDataVar_real_holds_iff {namedInds : List IRI} {i : Interpretation realDatatypeMap}
+    {r r' : SWRLRule} {dv : IRI} (h : rollupOneDataVar r dv = some r') :
+    satisfiesDLSafeRule realBuiltinSem namedInds i r' ↔
+      satisfiesDLSafeRule realBuiltinSem namedInds i r :=
+  rollupOneDataVar_holds_iff realBuiltinSem
+    (fun σI σD _ _ _ _ hr => builtinToDataRange_real_iff i σI σD hr) h
+
+theorem rollupLocalDataVars_real_holds_iff (namedInds : List IRI)
+    (i : Interpretation realDatatypeMap) (r : SWRLRule) :
+    satisfiesDLSafeRule realBuiltinSem namedInds i (rollupLocalDataVars r) ↔
+      satisfiesDLSafeRule realBuiltinSem namedInds i r := by
+  unfold rollupLocalDataVars
+  generalize r.bodyDVars = variables
+  induction variables generalizing r with
+  | nil => rfl
+  | cons v rest ih =>
+    rw [List.foldl_cons, ih]
+    cases h : rollupOneDataVar r v with
+    | none => rfl
+    | some _ => exact rollupOneDataVar_real_holds_iff h
+
 private def evalDataRangeOnLit (dr : DataRange) (l : Literal) : Option Bool :=
   match decodeLiteral l with
   | none => none
@@ -1720,30 +1742,33 @@ where
       | some bv => checkFacet t f.name bv v
       | none => false
 
-private def evalDArgWithEnv (envD : List (IRI × Literal)) : DArg → Option Value
-  | .lit l => decodeLiteral l
-  | .var v => (envD.lookup v).bind decodeLiteral
+private def evalDArgWithEnv (envD : List (IRI × Literal)) : DArg → Option BuiltinValue
+  | .lit l => decodeBuiltinLiteral? l
+  | .var v => (envD.lookup v).bind decodeBuiltinLiteral?
 
 /-- Propagate functional `swrlb:*` built-ins and check ground predicate built-ins
     under a partial data-variable binding `envD`.
     Returns `some (envD', remainingBody)` if consistent, or `none` if a built-in is refuted. -/
 private def propagateBuiltinsAux :
-    Nat → List (IRI × Literal) → List SWRLAtom → Option (List (IRI × Literal) × List SWRLAtom)
-  | 0, envD, body => some (envD, body)
-  | fuel + 1, envD, body => Id.run do
+    Nat → List (IRI × Literal) → List SWRLAtom →
+      Except String (Option (List (IRI × Literal) × List SWRLAtom))
+  | 0, envD, body => .ok (some (envD, body))
+  | fuel + 1, envD, body => do
     let mut curEnv := envD
     let mut changed := false
     let mut kept : List SWRLAtom := []
     for a in body do
       match a with
       | .builtinAtom b args =>
-        if !isSupportedBuiltin b then
+        if !isSupportedConcreteBuiltin b then
           kept := a :: kept
         else
           match args.mapM (evalDArgWithEnv curEnv) with
           | some vals =>
             -- All arguments are bound: evaluate the built-in predicate directly
-            if evalBuiltinRel b vals then
+            if requireConcreteBuiltinOutput b && (evalConcreteBuiltinOutput? b vals.tail).isNone then
+              throw s!"SWRL built-in '{b}' is outside the supported exact concrete-value fragment"
+            if evalConcreteBuiltinRel b vals then
               changed := true
             else
               return none
@@ -1751,20 +1776,23 @@ private def propagateBuiltinsAux :
             -- Check if functional built-in with unbound output `args[0]` and all inputs bound
             match args with
             | .var outVar :: inArgs =>
-              if isFunctionalBuiltin b && (curEnv.lookup outVar).isNone then
+              if isConcreteFunctionalBuiltin b && (curEnv.lookup outVar).isNone then
                 match inArgs.mapM (evalDArgWithEnv curEnv) with
                 | some inVals =>
-                  match evalBuiltinOutput? b inVals with
+                  match evalConcreteBuiltinOutput? b inVals with
                   | some outVal =>
-                    match valueToLiteral? outVal with
+                    match builtinValueToLiteral? outVal with
                     | some outLit =>
-                      if decodeLiteral outLit == some outVal then
+                      if decodeBuiltinLiteral? outLit == some outVal then
                         curEnv := (outVar, outLit) :: curEnv
                         changed := true
                       else
                         kept := a :: kept
                     | none => kept := a :: kept
-                  | none => return none
+                  | none =>
+                    if requireConcreteBuiltinOutput b then
+                      throw s!"SWRL built-in '{b}' is outside the supported exact concrete-value fragment"
+                    return none
                 | none => kept := a :: kept
               else
                 kept := a :: kept
@@ -1783,81 +1811,124 @@ private def propagateBuiltinsAux :
     else
       return some (curEnv, kept.reverse)
 
-/-- Extract concrete `(subject, prop, literal)` facts asserted in an ontology. -/
-private def extractABoxDataFacts (o : Ontology) : List (IRI × IRI × Literal) :=
-  o.filterMap fun
-    | .dataAssertion p (.named a) l => some (a, p, l)
+/-- Literal candidates are tracked by property. Ground rule bodies still test
+    each concrete assertion, so an alias or a potential rule head only adds
+    candidates and never asserts a new fact on its own. -/
+private abbrev DataCandidates := List (IRI × Literal)
+
+private def dataCandidateSeed (o : Ontology) : DataCandidates :=
+  o.flatMap fun a =>
+    (Profile.axiomSig a).data.flatMap fun p => (axiomLiterals a).map (p, ·)
+
+private def dataPropertyClosure (o : Ontology) : List (IRI × IRI) :=
+  Sabrina.ALCH.closeIndexed (o.flatMap fun
+    | .subDataProperty p q => [(p, q)]
+    | .equivalentDataProperties ps => ps.flatMap fun p => ps.map (p, ·)
+    | _ => [])
+
+private def sourceProperties (r : SWRLRule) (dv : IRI) : List IRI :=
+  (r.body.filterMap fun
+    | .dataPropertyAtom p _ (.var v) =>
+      if v == dv && p != topDataProperty then some p else none
+    | _ => none).eraseDups
+
+private def headDataCandidates (r : SWRLRule) : DataCandidates :=
+  r.head.filterMap fun
+    | .dataPropertyAtom p _ (.lit l) => some (p, l)
     | _ => none
 
-/-- Ground a rule containing concrete-value-safe `swrlb:*` built-ins or shared data variables
-    against the named individuals and known ABox data assertions/literals. -/
-def groundRuleWithDataBuiltins (o : Ontology) (namedInds : List IRI) (r : SWRLRule) :
-    Except String (List Axiom) := do
-  -- Reject unsupported built-ins immediately
+private def expandDataCandidates (sub : List (IRI × IRI)) (facts : DataCandidates) :
+    DataCandidates :=
+  (facts.flatMap fun (p, l) => (p, l) ::
+    (sub.filterMap fun (q, r) => if q == p then some (r, l) else none)).eraseDups
+
+/-- Ground only body-variable bindings with a finite concrete data-property
+    source. The source signatures are tested before enumerating individuals. -/
+private def groundConcreteRule (facts : DataCandidates) (namedInds : List IRI)
+    (r : SWRLRule) : Except String (List Axiom × DataCandidates) := do
   for a in r.body do
     if let .builtinAtom b _ := a then
-      if !isSupportedBuiltin b then
-        throw s!"unsupported SWRL built-in '{b}'"
-  let dataFacts := extractABoxDataFacts o
-  let allLits := collectKnownLiterals o [r]
-  let envsI := allVarAssignments namedInds r.iVars
-  let mut outAxs : List Axiom := []
-  for envI in envsI do
-    let envI' := envI.map fun (v, x) => (v, Individual.named x)
-    let rI := r.subst envI' []
-    -- Collect candidate literal bindings for each non-builtin body data variable
-    let srcDVars := rI.bodyNonBuiltinDVars
-    let candLists : List (IRI × List Literal) := srcDVars.map fun dv =>
-      let dpHits := rI.body.filterMap fun
-        | .dataPropertyAtom p (.ind (.named subj)) (.var w) =>
-          if w == dv then some (subj, p) else none
-        | _ => none
-      let matchedLits :=
-        if dpHits.isEmpty then allLits
-        else
-          (dpHits.flatMap fun (subj, p) =>
-            dataFacts.filterMap fun (s, p', l) =>
-              if s == subj && p' == p then some l else none).eraseDups
-      (dv, matchedLits)
-    -- Cartesian product over candidate literal bindings for source data variables
-    let mut dEnvs : List (List (IRI × Literal)) := [[]]
-    for (dv, lits) in candLists do
-      dEnvs := lits.flatMap fun l => dEnvs.map fun e => (dv, l) :: e
-    for envD in dEnvs do
-      match propagateBuiltinsAux (rI.body.length + 2) envD rI.body with
-      | none => pure () -- built-in refuted for this binding; rule holds vacuously
-      | some (envD', remBody) =>
-        let gr : SWRLRule := {
-          body := remBody.map (SWRLAtom.subst [] envD'),
-          head := rI.head.map (SWRLAtom.subst [] envD')
-        }
+      if !isSupportedConcreteBuiltin b then throw s!"unsupported SWRL built-in '{b}'"
+  let mut envsD : List (List (IRI × Literal)) := [[]]
+  for dv in r.bodyNonBuiltinDVars do
+    let p :: ps := sourceProperties r dv | throw s!"SWRL data variable '{dv}' needs a finite concrete data-property source"
+    let lits := (facts.filterMap fun (q, l) =>
+      if p == q && ps.all (fun prop => facts.any fun (target, other) =>
+        prop == target && decodeLiteral l == decodeLiteral other) then some l else none).eraseDups
+    if lits.isEmpty then return ([], [])
+    envsD := lits.flatMap fun l => envsD.map fun env => (dv, l) :: env
+  let mut outAxs := []
+  let mut outFacts := []
+  for envI in allVarAssignments namedInds r.iVars do
+    let rI := r.subst (envI.map fun (v, x) => (v, Individual.named x)) []
+    for envD in envsD do
+      match ← propagateBuiltinsAux (rI.body.length + 2) envD rI.body with
+      | none => pure ()
+      | some (env, remBody) =>
+        let gr : SWRLRule := ⟨remBody.map (SWRLAtom.subst [] env), rI.head.map (SWRLAtom.subst [] env)⟩
         if !gr.dVars.isEmpty || gr.hasBuiltins then
-          throw "SWRL rule contains data variables or functional built-ins not bound by ground ABox data values"
+          throw "SWRL rule contains data variables or functional built-ins not bound by concrete data values"
+        if (gr.body ++ gr.head).any (fun
+          | .dataPropertyAtom _ _ (.lit l) => (decodeLiteral l).isNone
+          | _ => false) then
+          throw "SWRL data property uses a value outside the supported OWL 2 datatype map"
         match encodeSingleIndGroundRule gr <|> encodeGroundRule gr with
-        | some axs => outAxs := outAxs ++ axs
+        | some axs =>
+          outAxs := outAxs ++ axs
+          outFacts := outFacts ++ headDataCandidates gr
         | none => throw "failed to encode grounded SWRL rule into OWL 2 DL"
-  return outAxs
+  return (outAxs.eraseDups, outFacts.eraseDups)
 
-/-- Lower a list of DL-safe SWRL rules into OWL 2 DL axioms:
-    1. Validate DL-safety (`diagnoseDLSafeRules`).
-    2. Roll up local data variables and facet-reducible `swrlb:*` built-ins (`rollupLocalDataVars`).
-    3. Encode data-variable-free rules via `encodeDLSafeRule` (nominal-guarded unary or exact grounding).
-    4. Ground remaining built-in/shared-data-variable rules safely via `groundRuleWithDataBuiltins`. -/
-def lowerSWRLRules (o : Ontology) (namedInds : List IRI) (rules : List SWRLRule) :
+def groundRuleWithDataBuiltins (o : Ontology) (namedInds : List IRI) (r : SWRLRule) :
     Except String (List Axiom) := do
-  if let some err := diagnoseDLSafeRules rules then
-    throw err
-  let mut out : List Axiom := []
-  for r in rules do
-    let r' := rollupLocalDataVars r
-    if !r'.hasDVars && !r'.hasBuiltins then
-      match encodeDLSafeRule namedInds r' with
-      | some axs => out := out ++ axs
-      | none => throw "failed to encode DL-safe SWRL rule into OWL 2 DL"
-    else
-      let axs ← groundRuleWithDataBuiltins o namedInds r'
-      out := out ++ axs
-  return out
+  let facts := expandDataCandidates (dataPropertyClosure o) (dataCandidateSeed o)
+  return (← groundConcreteRule facts namedInds r).1
+
+private def needsConcreteGrounding (r : SWRLRule) : Bool := r.hasDVars || r.hasBuiltins
+
+private def groundConcreteRules (o : Ontology) (namedInds : List IRI)
+    (rules : List (SWRLRule × SWRLRule)) (seedHeads : DataCandidates) :
+    Except String (List (Axiom × SWRLRule)) := do
+  if rules.isEmpty then return []
+  let sub := dataPropertyClosure o
+  let inputs := rules.map fun (original, r) =>
+    (original, r, (r.bodyNonBuiltinDVars.flatMap (sourceProperties r)).eraseDups)
+  let needed := (inputs.flatMap fun (_, _, props) => props).eraseDups
+  let keep := fun (p, _) => needed.contains p
+  let mut facts := (expandDataCandidates sub (dataCandidateSeed o ++ seedHeads)).filter keep
+  let mut pending := inputs
+  let mut lowered := []
+  -- Reject an unbounded or excessively long value-generating chain explicitly.
+  for _ in [:rules.length + 64] do
+    let mut newFacts := []
+    for (original, r, _) in pending do
+      let (axs, outputs) ← groundConcreteRule facts namedInds r
+      lowered := lowered ++ axs.map (·, original)
+      newFacts := newFacts ++ outputs
+    let delta := (expandDataCandidates sub newFacts).filter fun fact =>
+      keep fact && !facts.contains fact
+    if delta.isEmpty then return lowered.eraseDups
+    facts := facts ++ delta
+    let changed := (delta.map Prod.fst).eraseDups
+    pending := inputs.filter fun (_, _, props) => props.any changed.contains
+  throw "SWRL concrete-value grounding did not reach a finite fixpoint within the configured round bound"
+
+/-- Lower the rule set together so functional outputs can become candidate
+    inputs of later rules. Retain the source rule for explanation rendering. -/
+def lowerSWRLRulesWithProvenance (o : Ontology) (namedInds : List IRI)
+    (rules : List SWRLRule) : Except String (List (Axiom × SWRLRule)) := do
+  if let some err := diagnoseDLSafeRules rules then throw err
+  let rolled := rules.map fun r => (r, rollupLocalDataVars r)
+  let (concrete, static) := rolled.partition (fun (_, r) => needsConcreteGrounding r)
+  let staticAxs ← static.flatMapM fun (original, r) => do
+    let some axs := encodeDLSafeRule namedInds r | throw "failed to encode DL-safe SWRL rule into OWL 2 DL"
+    return axs.map (·, original)
+  let more ← groundConcreteRules o namedInds concrete (static.flatMap fun (_, r) => headDataCandidates r)
+  return staticAxs ++ more
+
+def lowerSWRLRules (o : Ontology) (namedInds : List IRI) (rules : List SWRLRule) :
+    Except String (List Axiom) :=
+  (lowerSWRLRulesWithProvenance o namedInds rules).map (List.map Prod.fst)
 
 /-! ### 7. Verified Exact Decision & Lazy CEGAR Loop -/
 
@@ -2003,29 +2074,27 @@ def decideWithSWRLFast? (o : Ontology) (namedInds : List IRI) (rules : List SWRL
     return Classification.fastConsistencyCheck o
   if let some err := diagnoseDLSafeRules rules then
     throw err
-  let rolled := rules.map rollupLocalDataVars
-  let mut staticAxs : List Axiom := []
+  let rolled := rules.map fun r => (r, rollupLocalDataVars r)
+  let (concrete, static) := rolled.partition (fun (_, r) => needsConcreteGrounding r)
+  let grounded ← groundConcreteRules o namedInds concrete (static.flatMap fun (_, r) => headDataCandidates r)
+  let mut staticAxs := grounded.map Prod.fst
   let mut lazyRules : List SWRLRule := []
-  for r in rolled do
-    if !r.hasDVars && !r.hasBuiltins then
-      if namedInds.length > 8 && !r.iVars.isEmpty then
-        -- Use verified lazy CEGAR on larger ABoxes to avoid large `oneOf(N)` GCI branching
-        lazyRules := lazyRules ++ [r]
-      else
-        let rInd := rollupLocalIndVars namedInds r
-        match encodeUnaryRule namedInds rInd with
-        | some axs => staticAxs := staticAxs ++ axs
-        | none =>
-          let estSize := namedInds.length ^ rInd.iVars.length
-          if rInd.iVars.isEmpty || estSize ≤ 64 then
-            match encodeDLSafeRule namedInds rInd with
-            | some axs => staticAxs := staticAxs ++ axs
-            | none => throw "failed to encode DL-safe SWRL rule"
-          else
-            lazyRules := lazyRules ++ [rInd]
+  for (_, r) in static do
+    if namedInds.length > 8 && !r.iVars.isEmpty then
+      -- Use verified lazy CEGAR on larger ABoxes to avoid large `oneOf(N)` GCI branching
+      lazyRules := lazyRules ++ [r]
     else
-      let axs ← groundRuleWithDataBuiltins o namedInds r
-      staticAxs := staticAxs ++ axs
+      let rInd := rollupLocalIndVars namedInds r
+      match encodeUnaryRule namedInds rInd with
+      | some axs => staticAxs := staticAxs ++ axs
+      | none =>
+        let estSize := namedInds.length ^ rInd.iVars.length
+        if rInd.iVars.isEmpty || estSize ≤ 64 then
+          match encodeDLSafeRule namedInds rInd with
+          | some axs => staticAxs := staticAxs ++ axs
+          | none => throw "failed to encode DL-safe SWRL rule"
+        else
+          lazyRules := lazyRules ++ [rInd]
   let baseOnt := o ++ staticAxs
   if lazyRules.isEmpty then
     return Classification.fastConsistencyCheck baseOnt
@@ -2082,6 +2151,7 @@ def decideWithSWRLFast? (o : Ontology) (namedInds : List IRI) (rules : List SWRL
 #print axioms groundAllRules_sat_iff
 #print axioms groundAllRules_entails_iff
 #print axioms rollupOneDataVar_holds_iff
+#print axioms rollupLocalDataVars_real_holds_iff
 #print axioms decideRealWithSWRL_iff
 
 end Sabrina.OWL2.SWRL
