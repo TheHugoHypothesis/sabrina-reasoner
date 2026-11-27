@@ -886,12 +886,17 @@ def main() -> int:
         rc, res = run_query(case["payload"], strict=strict)
         verdict = res.get("verdict")
         verified = bool(res.get("lean_verified", False))
-        ok = verdict == case["expect_verdict"] and verified == case["expect_verified"]
+        ok = (
+            res.get("format") == "sabrina-result-v1"
+            and verdict == case["expect_verdict"]
+            and verified == case["expect_verified"]
+        )
         if ok:
             passed += 1
             print(f"  PASS  {case['id']} -> {verdict} (lean_verified={verified})")
         else:
-            msg = f"  FAIL  {case['id']}: got verdict={verdict}, verified={verified}, reason={res.get('reason')}"
+            msg = (f"  FAIL  {case['id']}: got format={res.get('format')}, "
+                   f"verdict={verdict}, verified={verified}, reason={res.get('reason')}")
             print(msg)
             failed.append(msg)
 

@@ -7,7 +7,7 @@ import Sabrina.OWL2.FastLocality
 import Sabrina.OWL2.EL
 import Sabrina.OWL2.IncrementalABox
 import Sabrina.OWL2.Classification
-import Sabrina.OWL2.FastClassification
+import Sabrina.OWL2.FastClassification.Runtime
 import Sabrina.OWL2.Justification
 import Sabrina.OWL2.SWRLReduction
 import Sabrina.OWL2.SROIQD.Termination.ExtendedQueryDecision

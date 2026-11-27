@@ -967,19 +967,6 @@ private theorem hasSub_iff_exists_getSub {cert : ELCertState} {x b : Nat} :
     · rintro ⟨p, hp⟩
       exact (Std.HashMap.getElem?_eq_some_iff.mp hp).1
 
-private theorem hasRel_iff_exists_getRel {cert : ELCertState} {r x y : Nat} :
-    cert.hasRel r x y = true ↔ ∃ p, cert.getRel? r x y = some p := by
-  unfold ELCertState.hasRel ELCertState.getRel?
-  cases h : cert.relCert[x]? with
-  | none => simp
-  | some rm =>
-    simp only [Option.map_some, Option.getD_some, Option.bind_some, Std.HashMap.contains_iff_mem]
-    constructor
-    · intro hmem
-      exact ⟨rm[(r, y)]'hmem, Std.HashMap.getElem?_eq_some_iff.mpr ⟨hmem, rfl⟩⟩
-    · rintro ⟨p, hp⟩
-      exact (Std.HashMap.getElem?_eq_some_iff.mp hp).1
-
 theorem checkCertSound_entails_sub {dm : DatatypeMap}
     {t : InternTable} {origAxs : Array ELAxiom} {intAxs : Array IntELAxiom}
     {cert : ELCertState} {nw x b : Nat}

@@ -1,7 +1,9 @@
-import Lean.Data.Json
+import Sabrina.CLI.Response
 import Sabrina.OWL2.DataCertificates
 
 namespace Sabrina.CLI.DataQuery
+
+open Sabrina.CLI (response)
 
 open Lean Sabrina.OWL2 Sabrina.OWL2.DataCertificates Sabrina.OWL2.Datatypes
 
@@ -214,10 +216,6 @@ private def parseRequest (j : Json) : Except String Request := do
     | [cert] => some <$> parseCertificate cert
     | _ => throw "expected at most one certificate"
   return ⟨← name id, axioms, ← (← axioms.getArr?).toList.mapM parseAxiom, cert⟩
-
-private def response (verdict : String) (checked : Bool) (fields : List (String × Json)) : Json :=
-  Json.mkObj ([("format", toJson "sabrina-alc-result-v1"), ("verdict", toJson verdict),
-    ("lean_verified", toJson checked)] ++ fields)
 
 private def report (req : Request) (cert : Certificate) : UInt32 × Json :=
   let verdict := match cert with

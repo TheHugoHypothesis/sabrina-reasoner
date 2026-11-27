@@ -1,5 +1,5 @@
 import Sabrina.OWL2.Classification
-import Sabrina.OWL2.FastClassification
+import Sabrina.OWL2.FastClassification.Runtime
 import Sabrina.OWL2.RDF.OWLMapping
 import Sabrina.OWL2.RDF.Serialize
 import Sabrina.OWL2.StrictTyping

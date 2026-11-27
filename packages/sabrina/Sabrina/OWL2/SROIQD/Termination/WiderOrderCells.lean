@@ -134,10 +134,6 @@ private def unpackFloat : FloatFormat → Value → Option FloatVal
   | .binary32, .float v | .binary64, .double v => some v
   | _, _ => none
 
-private theorem unpackFloat_iff (format : FloatFormat) (v : Value) (f : FloatVal) :
-    unpackFloat format v = some f ↔ v = packFloat format f := by
-  cases format <;> cases v <;> simp [unpackFloat, packFloat]
-
 private theorem packFloat_inj (f : FloatFormat) {v w : FloatVal}
     (h : packFloat f v = packFloat f w) : v = w := by
   cases f

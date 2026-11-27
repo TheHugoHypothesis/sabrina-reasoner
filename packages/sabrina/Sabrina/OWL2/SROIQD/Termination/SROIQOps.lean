@@ -27,12 +27,6 @@ private theorem orientation_flip (i : Interpretation datatypeMap) (r : OrientedR
     (x y : i.Object) : holdsOriented i (converse r) y x ↔ holdsOriented i r x y := by
   rcases r with ⟨r, _ | _⟩ <;> rfl
 
-private theorem ite_some_eq_some {α : Type} {P : Prop} [Decidable P] {a b : α}
-    (h : (if P then some a else none) = some b) : P ∧ a = b := by
-  by_cases hp : P
-  · simp only [hp, ↓reduceIte, Option.some.injEq] at h; exact ⟨hp, h⟩
-  · simp only [hp, ↓reduceIte] at h; cases h
-
 private theorem ite_none_some_eq_some {α : Type} {P : Prop} {inst : Decidable P} {a b : α}
     (h : (@ite _ P inst none (some a)) = some b) : ¬ P ∧ a = b := by
   cases inst with

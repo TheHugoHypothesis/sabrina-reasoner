@@ -37,10 +37,6 @@ private structure XmlState where
 
 private abbrev XmlP (α : Type) := StateT XmlState (Except String) α
 
-private def eof : XmlP Bool := do
-  let st ← get
-  return st.pos ≥ st.chars.size
-
 private def peekChar : XmlP (Option Char) := do
   let st ← get
   return st.chars[st.pos]?

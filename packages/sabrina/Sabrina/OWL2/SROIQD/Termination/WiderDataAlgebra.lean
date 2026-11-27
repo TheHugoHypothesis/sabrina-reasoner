@@ -525,13 +525,6 @@ private theorem filteredCandidates_bound {pos neg : List DataRange}
     let ⟨hx, he⟩ := List.mem_filter.mp hv
     List.mem_filter.mpr ⟨List.mem_eraseDups.mpr (hsub v (List.mem_eraseDups.mp hx)), he⟩
 
-private theorem mem_legacyCandidate_of_oneOf {K : Nat} {pos neg : List DataRange} {v : Value}
-    (hv : v ∈ allOneOfValues pos) : v ∈ legacy_widerCandidates K pos neg := by
-  simp only [legacy_widerCandidates, List.mem_append]
-  right
-  left; left; left; left; left; left; left; left; left; left; left; left; right; left
-  exact hv
-
 private theorem eval_legacyPartition_iff {pos neg : List DataRange}
     (hnadm : ∀ a ∈ neg, isWiderExactAtom a = true)
     {v : Value} (hv : isOrderedValue v = false)

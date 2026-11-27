@@ -2196,10 +2196,6 @@ private theorem evalWiderAtom_oneOf_not_mem {ls : List Literal} {v : Value}
   · rfl
   · exact (h (evalWiderAtom_oneOf_mem he)).elim
 
-private theorem allOneOfValues_append (a b : List DataRange) :
-    allOneOfValues (a ++ b) = allOneOfValues a ++ allOneOfValues b := by
-  simp [allOneOfValues, List.flatMap_append]
-
 private theorem checkValue_numericBase_false {t : IRI} {k : NumericKind} {b : RatBounds}
     (hb : numericBase t = some (k, b)) {v : Value} (h : ∀ q, v ≠ .number q)
     (hnot : ∀ q, v ≠ .irrational q := by intro q he; cases he) :

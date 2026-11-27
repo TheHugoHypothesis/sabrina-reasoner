@@ -1,4 +1,4 @@
-import Lean.Data.Json
+import Sabrina.CLI.Response
 import Sabrina.OWL2.SROIQD.Search
 import Sabrina.RoleChains.Regularity
 import Sabrina.ALCHI.Query
@@ -9,6 +9,8 @@ import Sabrina.ALCHI.Query
     ontologies. -/
 
 namespace Sabrina.CLI.SROIQDQuery
+
+open Sabrina.CLI (response)
 
 open Lean Sabrina.OWL2 Sabrina.OWL2.SROIQD Sabrina.OWL2.Datatypes
 open Sabrina.ALC (OrientedRole RoleTheory InclusionVerdict roleClosure)
@@ -195,10 +197,6 @@ private def encodeEvidence (limits : Limits) : Evidence → Json
   | .refutation depth =>
     Json.mkObj [("kind", toJson "refutation"), ("basis", toJson "sroiqd-tableau-v1"),
       ("depth", toJson depth), ("world_limit", toJson limits.worlds)]
-
-private def response (verdict : String) (verified : Bool) (fields : List (String × Json)) : Json :=
-  Json.mkObj ([("format", toJson "sabrina-alc-result-v1"), ("verdict", toJson verdict),
-    ("lean_verified", toJson verified)] ++ fields)
 
 private def verdictName : InclusionVerdict → String
   | .entailed => "ENTAILED"

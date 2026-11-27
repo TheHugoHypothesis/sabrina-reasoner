@@ -1,4 +1,4 @@
-import Lean.Data.Json
+import Sabrina.CLI.Response
 import Sabrina.OWL2.FunctionalSyntax
 import Sabrina.OWL2.RDF.OWLMapping
 import Sabrina.OWL2.Normalize
@@ -8,7 +8,7 @@ import Sabrina.OWL2.Profile
 import Sabrina.OWL2.FastLocality
 import Sabrina.OWL2.EL
 import Sabrina.OWL2.Classification
-import Sabrina.OWL2.FastClassification
+import Sabrina.OWL2.FastClassification.Runtime
 import Sabrina.OWL2.Materialize
 import Sabrina.OWL2.Justification
 import Sabrina.OWL2.SWRLReduction
@@ -28,6 +28,8 @@ import Sabrina.OWL2.SROIQD.Termination.ExtendedQueryDecision
     also use verified grounding or ranked bounds on unranked object hierarchies. -/
 
 namespace Sabrina.CLI.OFNQuery
+
+open Sabrina.CLI (response)
 
 open Lean Sabrina.OWL2 Sabrina.OWL2.FunctionalSyntax Sabrina.OWL2.Normalize
 open Sabrina.OWL2.SROIQD Sabrina.OWL2.Datatypes Sabrina.OWL2.Profile Sabrina.OWL2.EL
@@ -78,10 +80,6 @@ private def encodeEvidence (limits : Limits) : Evidence → Json
   | .refutation depth =>
     Json.mkObj [("kind", toJson "refutation"), ("basis", toJson "sroiqd-tableau-v1"),
       ("depth", toJson depth), ("world_limit", toJson limits.worlds)]
-
-private def response (verdict : String) (verified : Bool) (fields : List (String × Json)) : Json :=
-  Json.mkObj ([("format", toJson "sabrina-alc-result-v1"), ("verdict", toJson verdict),
-    ("lean_verified", toJson verified)] ++ fields)
 
 private def verdictName : InclusionVerdict → String
   | .entailed => "ENTAILED"

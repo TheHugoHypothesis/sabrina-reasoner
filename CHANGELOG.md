@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Removed the fragment-specific JSON query formats. Use the OWL 2 document or unified SROIQ(D) query interface. JSON query results use `sabrina-result-v1`.
+- Split fast classification into EL, certified reference, and optimized runtime modules and removed unused private declarations.
+
 ## 1.2.1 (2026-11-27)
 
 ### Changed
@@ -66,7 +71,7 @@
 - 42-test W3C OWL 2 DL conformance script (`benchmarks/w3c-owl2-conformance/run_w3c_conformance.py`).
 
 ### Changed
-- Renamed `sabrina-alc-query` / `Sabrina.CLI.ALCQuery` to `sabrina-query` / `Sabrina.CLI.Query`.
+- Standardized the command-line entry point as `sabrina-query`.
 - Updated Lake package versions to `1.0.0`.
 
 ## release (initial artifact)

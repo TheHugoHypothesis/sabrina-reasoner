@@ -2355,10 +2355,6 @@ def resolveLoop (queue : List IRI) (loaded : List (Option IRI × SourceDocument)
         resolveLoop (rest ++ entry.doc.imports) (loaded ++ [(some entry.key, entry.doc)]) rem'
 termination_by (rem.length, queue.length)
 
-private theorem nodup_move_mid {α : Type} {xs ys : List α} {a : α}
-    (h1 : (xs ++ a :: ys).Nodup) : ((xs ++ [a]) ++ ys).Nodup := by
-  simpa [List.append_assoc] using h1
-
 private theorem resolveLoop_inv
     (queue : List IRI) (loaded : List (Option IRI × SourceDocument)) (rem : List LibraryEntry)
     (loadedFinal : List (Option IRI × SourceDocument))

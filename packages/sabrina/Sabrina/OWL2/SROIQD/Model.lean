@@ -921,20 +921,6 @@ theorem eval?_sound (m : SROIQDModel) (x : m.graph.World) (c : Concept) {b : Boo
             (comp.holds_iff m.toInterpretation v).mpr hdata⟩
     · cases h
 
-private theorem objPath_iff {m : SROIQDModel} {rs : List OrientedRole} {x y : m.graph.World}
-    (h : ∀ r ∈ rs, isOrdinaryObjProp r.1 = true) :
-    RoleChains.TransitivePaths.WordPath m.graph.interpretation rs x y ↔
-      objPath m.toInterpretation rs x y := by
-  induction rs generalizing x with
-  | nil => rfl
-  | cons r tail ih =>
-    change (∃ z, ALC.holdsRole m.graph.interpretation r x z ∧
-      RoleChains.TransitivePaths.WordPath m.graph.interpretation tail z y) ↔
-      ∃ z, holdsOriented m.toInterpretation r x z ∧ objPath m.toInterpretation tail z y
-    refine exists_congr fun z => and_congr ?_ (ih fun s hs => h s (List.mem_cons_of_mem _ hs))
-    exact (m.graph.oriented_iff r x z).symm.trans
-      (evalOriented_iff (h r (List.mem_cons_self ..)))
-
 private def setOfList {α : Type} [BEq α] [Hashable α] (xs : List α) : Std.HashSet α :=
   xs.foldl (fun s a => s.insert a) {}
 

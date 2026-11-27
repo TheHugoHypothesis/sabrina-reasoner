@@ -588,11 +588,6 @@ theorem reblock_sat_iff (p : Problem) : b.reblock.Sat p ↔ b.Sat p :=
 theorem reblock_within {p : Problem} {rank : Rank} (h : b.Within rank p) :
     b.reblock.Within rank p := ⟨h.labels,h.guards,h.roles⟩
 
-private theorem reblock_direct_raw {x : b.Node} (h : b.reblock.DirectlyBlocked x) :
-    b.hasCandidate x = true := by
-  change (if b.hasEarlier x then none else b.candidate x).isSome = true at h
-  cases he : b.hasEarlier x <;> simp_all [hasCandidate]
-
 private theorem anc_from_reblock {x a : b.Node} (h : b.reblock.Anc a x) : b.Anc a x :=
   match h with
   | .parent hc => .parent hc
