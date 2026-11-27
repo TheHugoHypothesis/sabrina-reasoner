@@ -530,12 +530,16 @@ private def localLabels (p : Problem) (s : Branch) (nodes : List Nat) : Option (
         else none
     | _ => none
 
-private def deterministicGCI (p : Problem) (s : Branch) (nodes : List Nat) :
+private def deterministicGCI (p : Problem) (s : Branch) (nodes : List Nat)
+    (absorb : Bool := false) :
     Option (Transition p s) :=
   nodes.findSome? fun x => p.tbox.attach.findSome? fun ⟨q, hq⟩ =>
     if s.known x q.sup then none
-    else if hh : s.known x q.sub then
-      some (add x q.sup fun _ env hm hs => hm.tbox q hq (env x) (Branch.known_sound hs hh))
+    else if hp : (q.sub.triggeringPremises (s.known x) absorb).isSome then
+      let support := (q.sub.triggeringPremises (s.known x) absorb).get hp
+      some (add x q.sup
+        (fun i env hm hs => hm.tbox q hq (env x) (support.property.2 i (env x)
+          (fun c hc => Branch.known_sound hs (support.property.1 c hc)))))
     else none
 
 private def disjunctions (p : Problem) (s : Branch) : Option (Transition p s) :=
@@ -559,15 +563,17 @@ private def splitClass {p : Problem} {s : Branch} (x : Nat) (a : Concept) : Tran
     · exact Or.inl h
     · exact Or.inr ((holds_dual i (env x) a).mpr h)
 
-private def undecidedGCI (p : Problem) (s : Branch) (nodes : List Nat) :
+private def undecidedGCI (p : Problem) (s : Branch) (nodes : List Nat)
+    (deferAbsorbed : Bool := false) :
     Option (Transition p s) :=
   nodes.findSome? fun x => p.tbox.attach.findSome? fun ⟨q, hq⟩ =>
-    if s.known x q.sup || s.known x q.sub.dual then none
-    else some (select x q.sub.dual q.sup fun i env hm _ => by
+    if s.known x q.sup || s.known x q.sub.dual ||
+        (deferAbsorbed && q.sub.absorptionPremises.isSome) then none
+    else some (select x q.sub.dual q.sup (fun i env hm _ => by
       classical
       rcases Classical.em (holds i (env x) q.sub) with ha | ha
       · exact Or.inr (hm.tbox q hq (env x) ha)
-      · exact Or.inl ((holds_dual i (env x) q.sub).mpr ha))
+      · exact Or.inl ((holds_dual i (env x) q.sub).mpr ha)))
 
 private def qualifiers (p : Problem) (s : Branch) (nodes : List Nat) : Option (Transition p s) :=
   s.labels.findSome? fun (x, c) =>
@@ -636,14 +642,15 @@ private def witnesses (p : Problem) (s : Branch) (nodes : List Nat) (maxNodes : 
           exact ⟨i, hm, env', hh⟩)
     | _ => none
 
-def next (p : Problem) (s : Branch) (maxNodes : Nat) : Option (Transition p s) :=
+def next (p : Problem) (s : Branch) (maxNodes : Nat) (deferAbsorbed : Bool := false) :
+    Option (Transition p s) :=
   let nodes := s.nodes
   inequalityClash p s <|> labelClash p s <|> negEdgeClash p s <|> dataClash p s <|>
     nominalMerge p s <|> keyMerge p s <|> selfSteps p s <|>
     roleCharSteps p s nodes <|> dataSteps p s nodes <|> localLabels p s nodes <|>
-    hierarchy p s nodes <|> chains p s nodes <|> deterministicGCI p s nodes <|>
+    hierarchy p s nodes <|> chains p s nodes <|> deterministicGCI p s nodes deferAbsorbed <|>
     disjunctions p s <|> upperBounds p s <|> witnesses p s nodes maxNodes <|>
-    qualifiers p s nodes <|> undecidedGCI p s nodes
+    qualifiers p s nodes <|> undecidedGCI p s nodes deferAbsorbed
 
 /-- Untrusted witness generator for data existential/cardinality labels during
     finite model proposal. All proposed models are verified by `checkModel`. -/
@@ -953,11 +960,159 @@ theorem checkClosed_sound {p : Problem} {maxNodes depth : Nat} {s : Branch}
       obtain ⟨u, hu, hmodel⟩ := t.preserves hs
       exact ih (List.all_eq_true.mp h u hu) hmodel
 
+private def provedClash {p : Problem} (s : Branch) (clash : NodeClash p) :
+    Option { _c : NodeClash p // ¬ s.Sat p } :=
+  if h : clash.premises.all (s.known clash.node) then
+    some ⟨clash, fun ⟨i, hm, env, hs⟩ =>
+      clash.sound i hm (env clash.node) fun c hc =>
+        Branch.known_sound hs (List.all_eq_true.mp h c hc)⟩
+  else none
+
+private def explainLocalLabel (p : Problem) (s : Branch) (x : Nat) (c : Concept) :
+    Option (LocalLabelRule p) :=
+  (s.labels.findSome? fun (y, label) =>
+    if x != y then none
+    else match label with
+    | .conj a b =>
+      if h : c = a then
+        some (.unary x [.conj a b] c fun _ _ _ hp => h.symm ▸ (hp (.conj a b) (by simp)).1)
+      else if h : c = b then
+        some (.unary x [.conj a b] c fun _ _ _ hp => h.symm ▸ (hp (.conj a b) (by simp)).2)
+      else none
+    | .disj a b =>
+      if h : c = b ∧ s.known x a.dual = true then
+        some (.unary x [.disj a b, a.dual] c fun i _ z hp => h.1.symm ▸
+          (hp (.disj a b) (by simp)).resolve_left ((holds_dual i z a).mp (hp a.dual (by simp))))
+      else if h : c = a ∧ s.known x b.dual = true then
+        some (.unary x [.disj a b, b.dual] c fun i _ z hp => h.1.symm ▸
+          (hp (.disj a b) (by simp)).resolve_right ((holds_dual i z b).mp (hp b.dual (by simp))))
+      else none
+    | _ => none) <|>
+  (p.tbox.attach.findSome? fun ⟨q, hq⟩ => do
+    if h : c = q.sup then
+      let support ← q.sub.triggeringPremises (s.known x)
+      return .unary x support.val c fun i hm z hp => h.symm ▸ hm.tbox q hq z (support.property.2 i z hp)
+    else none)
+
+private def explainLocalChoice (p : Problem) (s : Branch) (x : Nat) (a b : Concept) :
+    Option (LocalLabelRule p) :=
+  if b == a.dual then some (.split p x a)
+  else if s.known x (.disj a b) then
+    some (.binary x [.disj a b] a b fun _ _ _ hp => hp (.disj a b) (by simp))
+  else p.tbox.attach.findSome? fun ⟨q, hq⟩ =>
+    if q.sub.dual == a && q.sup == b then some (.gci x q hq) else none
+
+/-- Explain closures only when the conflict contains a label newly introduced
+    at the head of the child branch. More involved transitions keep their
+    ordinary refutation without a reusable dependency set. -/
+private def probeClash {p : Problem} (s : Branch) (children : List Branch)
+    (clashes : List (Option (NodeClash p))) : Option (NodeClash p) := do
+  let newLabel := fun (child : Branch) (clash : NodeClash p) => do
+    let (x, c) ← child.labels.head?
+    if x == clash.node && !s.known x c && clash.premises.contains c then some c else none
+  match children, clashes with
+  | [], [] =>
+    s.labels.findSome? fun (x, c) =>
+      if c == .bottom then some (.bottom p x)
+      else if s.known x c.dual then some (.dual p x c)
+      else none
+  | [child], [some clash] =>
+    let c ← newLabel child clash
+    let rule ← explainLocalLabel p s clash.node c
+    rule.resolve clashes
+  | [left, right], [some a, some b] =>
+    if a.node != b.node then none else
+      let first ← newLabel left a
+      let second ← newLabel right b
+      let rule ← explainLocalChoice p s a.node first second
+      rule.resolve clashes
+  | _, _ => none
+
+private inductive ProbeVerdict (p : Problem) (s : Branch) where
+  | model (witness : SROIQDModel)
+  | closed (depth : Nat) (clash : Option (NodeClash p)) (refutes : ¬ s.Sat p)
+  | unknown
+
+private inductive ProbeBranches (p : Problem) (s : Branch) (xs : List Branch) where
+  | model (witness : SROIQDModel)
+  | jump (depth : Nat) (clash : { _c : NodeClash p // ¬ s.Sat p })
+  | closed (depth : Nat) (clashes : List (Option (NodeClash p)))
+      (refutes : ∀ b ∈ xs, ¬ b.Sat p)
+  | unknown
+
+private def probeBranches {p : Problem} (s : Branch)
+    (visit : (b : Branch) → Option Nat → ProbeVerdict p b × Option Nat) :
+    (xs : List Branch) → Option Nat → ProbeBranches p s xs × Option Nat
+  | [], fuel => (.closed 0 [] (fun _ h => nomatch h), fuel)
+  | b :: bs, fuel =>
+    let (answer, fuel) := visit b fuel
+    match answer with
+    | .model m => (.model m, fuel)
+    | .closed depth clue refutes =>
+      if let some jump := clue.bind (provedClash s) then
+        (.jump depth jump, fuel)
+      else
+        let (tail, fuel) := probeBranches s visit bs fuel
+        match tail with
+        | .model m => (.model m, fuel)
+        | .jump d jump => (.jump d jump, fuel)
+        | .closed d clues refutesTail =>
+          (.closed (max depth d) (clue :: clues) (fun branch h => by
+            rcases List.mem_cons.mp h with rfl | h
+            · exact refutes
+            · exact refutesTail branch h), fuel)
+        | .unknown => (.unknown, fuel)
+    | .unknown =>
+      if fuel == some 0 then (.unknown, fuel)
+      else
+        let (tail, fuel) := probeBranches s visit bs fuel
+        match tail with
+        | .model m => (.model m, fuel)
+        | .jump d jump => (.jump d jump, fuel)
+        | .closed .. | .unknown => (.unknown, fuel)
+
+private def tryBranchModel (p : Problem) (s : Branch) : Option SROIQDModel :=
+  let m := toModel p s
+  if checkModel p m then some m else (toBlockedModels p s).find? (checkModel p)
+
+private def probe (p : Problem) (maxNodes : Nat) (searchModels : Bool) :
+    Nat → (s : Branch) → Option Nat → ProbeVerdict p s × Option Nat
+  | 0, _, fuel => (.unknown, fuel)
+  | _ + 1, _, some 0 => (.unknown, some 0)
+  | depth + 1, s, fuel => Id.run do
+    let fuel := fuel.map (· - 1)
+    if searchModels && s.nodes.length > maxNodes then return (.unknown, fuel)
+    let step := next p s maxNodes (deferAbsorbed := true)
+    -- The model checker tests every original GCI. An inactive antecedent
+    -- needs a split only if the candidate model cannot discharge it.
+    if step.isNone && searchModels then
+      if let some m := tryBranchModel p s then return (.model m, fuel)
+    let some t := step <|> undecidedGCI p s s.nodes | return (.unknown, fuel)
+    let tryEarlyModel := match t.branches with
+      | [] => false
+      | [u] => u.nodes.length > s.nodes.length
+      | _ => true
+    if searchModels && step.isSome && tryEarlyModel then
+      if let some m := tryBranchModel p s then return (.model m, fuel)
+    let (result, remaining) := probeBranches s (probe p maxNodes searchModels depth) t.branches fuel
+    match result with
+    | .model m => return (.model m, remaining)
+    | .unknown => return (.unknown, remaining)
+    | .jump d clash => return (.closed (d + 1) (some clash.val) clash.property, remaining)
+    | .closed d clashes refutes =>
+      let learned := probeClash s t.branches clashes
+      return (.closed (d + 1) learned (fun hs => by
+        obtain ⟨b, hb, hsat⟩ := t.preserves hs
+        exact refutes b hb hsat), remaining)
+
 def checkEvidence (p : Problem) (maxNodes : Nat) : Evidence → Bool
   | .model m => checkModel p m
   | .refutation d =>
     match initial p with
-    | some s => checkClosed p maxNodes d s
+    | some s =>
+      match (probe p maxNodes false d s none).1 with
+      | .closed .. => true
+      | _ => checkClosed p maxNodes d s
     | none => false
 
 def evidenceClaim (p : Problem) (e : Evidence) : Prop :=
@@ -973,52 +1128,18 @@ theorem checkEvidence_sound {p : Problem} {maxNodes : Nat} {e : Evidence}
     | none => simp [hi] at h
     | some s =>
       simp only [hi] at h
-      exact fun hp => checkClosed_sound h (initial_sat hi hp)
-
-private def combine (a b : Option Evidence) : Option Evidence :=
-  match a, b with
-  | some (.model g), _ | _, some (.model g) => some (.model g)
-  | some (.refutation d), some (.refutation e) => some (.refutation (max d e))
-  | _, _ => none
-
-private def probe (p : Problem) (maxNodes : Nat) :
-    Nat → Nat → Branch → Option Evidence × Nat
-  | 0, fuel, _ => (none, fuel)
-  | _ + 1, 0, _ => (none, 0)
-  | depth + 1, fuel + 1, s => Id.run do
-    if s.nodes.length > maxNodes then return (none, fuel)
-    let some t := next p s maxNodes | do
-      let m := toModel p s
-      if checkModel p m then return (some (.model m), fuel)
-      for bm in toBlockedModels p s do
-        if checkModel p bm then return (some (.model bm), fuel)
-      return (none, fuel)
-    -- Skip expensive model construction during purely deterministic same-node
-    -- expansion (`t.branches = [u]` with no new worlds); check early only before
-    -- branching or world-creating steps (which also enables early blocking).
-    let tryEarlyModel : Bool := match t.branches with
-      | [u] => u.nodes.length > s.nodes.length
-      | _ => true
-    if tryEarlyModel then
-      let m := toModel p s
-      if checkModel p m then return (some (.model m), fuel)
-      for bm in toBlockedModels p s do
-        if checkModel p bm then return (some (.model bm), fuel)
-    let mut rest := fuel
-    let mut result : Option Evidence := some (.refutation 0)
-    for branch in t.branches do
-      let (sub, remaining) := probe p maxNodes depth rest branch
-      if let some (.model m) := sub then return (some (.model m), remaining)
-      rest := remaining
-      result := combine result sub
-    return (result.map fun
-      | .refutation d => .refutation (d + 1)
-      | .model m => .model m, rest)
+      split at h
+      · exact fun hp => ‹¬ s.Sat p› (initial_sat hi hp)
+      · exact fun hp => checkClosed_sound h (initial_sat hi hp)
 
 def propose (p : Problem) (limits : Limits) : Option Evidence :=
   match initial p with
-  | some s => (probe p limits.worlds limits.depth limits.visits s).1
   | none => none
+  | some s =>
+    match (probe p limits.worlds true limits.depth s (some limits.visits)).1 with
+    | .model m => some (.model m)
+    | .closed depth .. => some (.refutation depth)
+    | .unknown => none
 
 /-- Certified ontology consistency over OWL 2 Direct Semantics (`datatypeMap`). -/
 def checkConsistency (p : Problem) (maxNodes : Nat) (e : Evidence) : Bool :=

@@ -11,6 +11,125 @@ open Sabrina.RoleChains (Graph checkRoleAxioms checkRoleAxioms_iff)
 open Sabrina.OWL2.Datatypes (Value datatypeMap decodeLiteral)
 open Sabrina.OWL2.DataRanges (compile Compiled)
 
+/-- Positive atomic antecedents can be tested directly against the node labels. -/
+def Concept.absorptionPremises : Concept → Option (List Concept)
+  | .lit a true => Option.some [.atom a]
+  | .conj (.lit a true) (.lit b true) => Option.some [.atom a, .atom b]
+  | _ => none
+
+theorem Concept.absorptionPremises_sound {c : Concept} {ps : List Concept}
+    (h : c.absorptionPremises = Option.some ps) (i : Interpretation datatypeMap) (x : i.Object)
+    (hp : ∀ d ∈ ps, holds i x d) : holds i x c := by
+  cases c with
+  | lit a b =>
+    cases b <;> simp [Concept.absorptionPremises] at h
+    subst ps
+    exact hp _ (by simp)
+  | conj a b =>
+    cases a <;> cases b <;> simp [Concept.absorptionPremises] at h
+    rename_i a sa b sb
+    cases sa <;> cases sb <;> simp at h
+    subst ps
+    exact ⟨hp _ (by simp), hp _ (by simp)⟩
+  | _ => simp [Concept.absorptionPremises] at h
+
+/-- Prefer the whole antecedent if it is already labelled, otherwise try
+    unfolding the positive atomic premises of an absorbable conjunction. -/
+def Concept.triggeringPremises (c : Concept) (known : Concept → Bool)
+    (absorb : Bool := true) :
+    Option { ps : List Concept // (∀ d ∈ ps, known d = true) ∧
+      ∀ (i : Interpretation datatypeMap) (x : i.Object), (∀ d ∈ ps, holds i x d) → holds i x c } :=
+  if hc : known c then
+    Option.some ⟨[c], fun _ hd => (List.mem_singleton.mp hd).symm ▸ hc,
+      fun _ _ hp => hp c (List.mem_singleton_self _)⟩
+  else if absorb then
+    match h : c.absorptionPremises with
+    | none => none
+    | .some ps =>
+      if hp : ps.all known then
+        Option.some ⟨ps, List.all_eq_true.mp hp, Concept.absorptionPremises_sound h⟩
+      else none
+  else none
+
+/-- A local contradiction with explicit label dependencies. Its proof holds at
+    any object in any model of the problem, regardless of the branch's node IDs. -/
+structure NodeClash (p : Problem) where
+  node : Nat
+  premises : List Concept
+  sound : ∀ (i : Interpretation datatypeMap), p.Models i → ∀ x : i.Object,
+    (∀ c ∈ premises, holds i x c) → False
+
+def NodeClash.bottom (p : Problem) (node : Nat) : NodeClash p :=
+  ⟨node, [.bottom], fun _ _ _ hs => hs .bottom (by simp)⟩
+
+def NodeClash.dual (p : Problem) (node : Nat) (c : Concept) : NodeClash p :=
+  ⟨node, [c, c.dual], fun i _ x hs => (holds_dual i x c).mp (hs _ (by simp)) (hs _ (by simp))⟩
+
+/-- Premises and alternatives of a rule that adds a label to one node. This
+    information lets search discharge a choice from a downstream conflict. -/
+structure LocalLabelRule (p : Problem) where
+  node : Nat
+  premises : List Concept
+  alternatives : List Concept
+  sound : ∀ (i : Interpretation datatypeMap), p.Models i → ∀ x : i.Object,
+    (∀ c ∈ premises, holds i x c) → ∃ c ∈ alternatives, holds i x c
+
+def LocalLabelRule.unary {p : Problem} (node : Nat) (ps : List Concept) (c : Concept)
+    (deriveLabel : ∀ (i : Interpretation datatypeMap), p.Models i → ∀ x : i.Object,
+      (∀ d ∈ ps, holds i x d) → holds i x c) : LocalLabelRule p :=
+  ⟨node, ps, [c], fun i hm x hp => ⟨c, by simp, deriveLabel i hm x hp⟩⟩
+
+def LocalLabelRule.binary {p : Problem} (node : Nat) (ps : List Concept) (a b : Concept)
+    (deriveChoice : ∀ (i : Interpretation datatypeMap), p.Models i → ∀ x : i.Object,
+      (∀ d ∈ ps, holds i x d) → holds i x a ∨ holds i x b) : LocalLabelRule p :=
+  ⟨node, ps, [a, b], fun i hm x hp => by
+    rcases deriveChoice i hm x hp with ha | hb
+    · exact ⟨a, by simp, ha⟩
+    · exact ⟨b, by simp, hb⟩⟩
+
+def LocalLabelRule.gci {p : Problem} (node : Nat) (q : Inclusion) (hq : q ∈ p.tbox) :
+    LocalLabelRule p :=
+  .binary node [] q.sub.dual q.sup fun i hm x _ => by
+    classical
+    by_cases hs : holds i x q.sub
+    · exact .inr (hm.tbox q hq x hs)
+    · exact .inl ((holds_dual i x q.sub).mpr hs)
+
+def LocalLabelRule.split (p : Problem) (node : Nat) (c : Concept) : LocalLabelRule p :=
+  .binary node [] c c.dual fun i _ x _ => by
+    classical
+    by_cases h : holds i x c
+    · exact .inl h
+    · exact .inr ((holds_dual i x c).mpr h)
+
+private def dischargeAlternatives {p : Problem} (node : Nat) :
+    (alternatives : List Concept) → List (Option (NodeClash p)) →
+    Option { ps : List Concept // ∀ (i : Interpretation datatypeMap), p.Models i → ∀ x : i.Object,
+      (∀ c ∈ ps, holds i x c) → ∀ c ∈ alternatives, ¬ holds i x c }
+  | [], [] => some ⟨[], fun _ _ _ _ _ hc => nomatch hc⟩
+  | a :: as, some clash :: rest => do
+    if clash.node != node then none else
+      let remaining ← dischargeAlternatives node as rest
+      let ps := clash.premises.filter (· != a) ++ remaining.val
+      return ⟨ps, fun i hm x hp c hc hholds => by
+        rcases List.mem_cons.mp hc with rfl | hc
+        · apply clash.sound i hm x
+          intro d hd
+          if he : d = c then exact he ▸ hholds
+          else exact hp d (List.mem_append_left _ (List.mem_filter.mpr ⟨hd, by simp [he]⟩))
+        · exact remaining.property i hm x (fun d hd => hp d (List.mem_append_right _ hd)) c hc hholds⟩
+  | _, _ => none
+
+/-- Resolve a local conflict in every alternative against the rule that split them. -/
+def LocalLabelRule.resolve {p : Problem} (rule : LocalLabelRule p)
+    (clashes : List (Option (NodeClash p))) : Option (NodeClash p) := do
+  let remaining ← dischargeAlternatives rule.node rule.alternatives clashes
+  return ⟨rule.node, (rule.premises ++ remaining.val).eraseDups, fun i hm x hp => by
+    have labels (c : Concept) (hc : c ∈ rule.premises ++ remaining.val) : holds i x c :=
+      hp c (List.mem_eraseDups.mpr hc)
+    obtain ⟨c, hc, holdsC⟩ := rule.sound i hm x (fun c hc => labels c (List.mem_append_left _ hc))
+    exact remaining.property i hm x (fun c hc => labels c (List.mem_append_right _ hc)) c hc holdsC⟩
+
 structure SROIQDModel where
   graph : Graph
   nominals : List (IRI × graph.World) := []

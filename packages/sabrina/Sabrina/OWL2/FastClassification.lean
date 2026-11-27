@@ -1405,42 +1405,51 @@ private theorem sweepSatUnsat_sound {dm : DatatypeMap} {solve : Ontology → Opt
       · rintro (rfl | ⟨hx, he⟩); exact ⟨Or.inl rfl, hUnsatC⟩; exact ⟨Or.inr hx, he⟩
       · rintro ⟨rfl | hx, he⟩; exact Or.inl rfl; exact Or.inr ⟨hx, he⟩
 
+private def querySubsumption (solve : Ontology → Option Bool)
+    (harvest : Ontology → IRI → IRI → List (IRI × IRI))
+    (idx : LocalityIndex) (o : Ontology) (a b : IRI) : Option (Bool × List (IRI × IRI)) :=
+  let mod := (extractBotModuleWithIndex idx o (axiomSig (.subClassOf (.named a) (.named b)))).1
+  (decidesSubsumption solve mod a b).map fun isSub =>
+    (isSub, if isSub then [] else harvest mod a b)
+
+private def hasTransitiveWitness (classes : List IRI) (st : ClsCache) (a b : IRI) : Bool :=
+  classes.any fun mid => st.knownTrue.contains (a, mid) && st.knownTrue.contains (mid, b)
+
+private def hasContrapositiveWitness (classes : List IRI) (st : ClsCache) (a b : IRI) : Bool :=
+  classes.any fun mid =>
+    (st.knownTrue.contains (mid, a) && st.knownFalse.contains (mid, b)) ||
+    (st.knownTrue.contains (b, mid) && st.knownFalse.contains (a, mid))
+
 /-- Enhanced Traversal over a list of candidate pairs `(a, b)`:
     1. Checks `knownTrue` / `knownFalse` in `O(1)`
     2. Checks transitive `knownTrue` witnesses (`a ⊑ mid ∧ mid ⊑ b`)
     3. Checks Enhanced Traversal contrapositive witnesses (`mid ⊑ a ∧ mid ⋢ b` or `b ⊑ mid ∧ a ⋢ mid`)
     4. Only queries `solve` on the per-pair ⊥-local module when still undecided, and eagerly
        propagates the result (plus any verified countermodel non-subsumptions from `harvest`). -/
-private def traversePairs (solve : Ontology → Option Bool)
-    (harvest : Ontology → IRI → IRI → List (IRI × IRI))
-    (idx : LocalityIndex) (o : Ontology) (allClasses : List IRI) :
+private def traversePairs (query : IRI → IRI → Option (Bool × List (IRI × IRI)))
+    (allClasses : List IRI) :
     List (IRI × IRI) → ClsCache → Option (List (IRI × IRI) × ClsCache)
   | [], st => some ([], st)
   | (a, b) :: rest, st =>
     if st.knownTrue.contains (a, b) then
-      (traversePairs solve harvest idx o allClasses rest st).map fun (ps, st') => ((a, b) :: ps, st')
+      (traversePairs query allClasses rest st).map fun (ps, st') => ((a, b) :: ps, st')
     else if st.knownFalse.contains (a, b) then
-      traversePairs solve harvest idx o allClasses rest st
-    else if allClasses.any fun mid => st.knownTrue.contains (a, mid) && st.knownTrue.contains (mid, b) then
+      traversePairs query allClasses rest st
+    else if hasTransitiveWitness allClasses st a b then
       let st1 := insertTrueAndClose allClasses a b st
-      (traversePairs solve harvest idx o allClasses rest st1).map fun (ps, st') => ((a, b) :: ps, st')
-    else if allClasses.any fun mid =>
-        (st.knownTrue.contains (mid, a) && st.knownFalse.contains (mid, b)) ||
-        (st.knownTrue.contains (b, mid) && st.knownFalse.contains (a, mid)) then
+      (traversePairs query allClasses rest st1).map fun (ps, st') => ((a, b) :: ps, st')
+    else if hasContrapositiveWitness allClasses st a b then
       let st1 := insertFalseAndClose allClasses a b st
-      traversePairs solve harvest idx o allClasses rest st1
+      traversePairs query allClasses rest st1
     else
-      let seed := axiomSig (.subClassOf (.named a) (.named b))
-      let mod := (extractBotModuleWithIndex idx o seed).1
-      (decidesSubsumption solve mod a b).bind fun isSub =>
+      (query a b).bind fun (isSub, harvested) =>
         if isSub then
           let st1 := insertTrueAndClose allClasses a b st
-          (traversePairs solve harvest idx o allClasses rest st1).map fun (ps, st') => ((a, b) :: ps, st')
+          (traversePairs query allClasses rest st1).map fun (ps, st') => ((a, b) :: ps, st')
         else
           let st1 := insertFalseAndClose allClasses a b st
-          let harvested := harvest mod a b
           let st2 := harvested.foldl (fun s p => { s with knownFalse := s.knownFalse.insert p }) st1
-          traversePairs solve harvest idx o allClasses rest st2
+          traversePairs query allClasses rest st2
 
 private theorem traversePairs_sound {dm : DatatypeMap} {solve : Ontology → Option Bool}
     (hsolve : ∀ {o b}, solve o = some b → (b = true ↔ Satisfiable dm o))
@@ -1451,7 +1460,7 @@ private theorem traversePairs_sound {dm : DatatypeMap} {solve : Ontology → Opt
       p ∈ harvest mod a b → ¬ Entails dm o [.subClassOf (.named p.1) (.named p.2)])
     (allClasses : List IRI) (rem : List (IRI × IRI)) :
     ∀ st ps st', st.Valid dm o →
-      traversePairs solve harvest idx o allClasses rem st = some (ps, st') →
+      traversePairs (querySubsumption solve harvest idx o) allClasses rem st = some (ps, st') →
       st'.Valid dm o ∧
       (∀ p, p ∈ ps ↔ p ∈ rem ∧ Entails dm o [.subClassOf (.named p.1) (.named p.2)]) := by
   induction rem with
@@ -1463,7 +1472,7 @@ private theorem traversePairs_sound {dm : DatatypeMap} {solve : Ontology → Opt
   | cons ab rest ih =>
     intro st ps st' hv h
     rcases ab with ⟨a, b⟩
-    simp only [traversePairs] at h
+    simp only [traversePairs, hasTransitiveWitness, hasContrapositiveWitness] at h
     cases ht : st.knownTrue.contains (a, b)
     · simp only [ht, Bool.false_eq_true, ↓reduceIte] at h
       cases hf : st.knownFalse.contains (a, b)
@@ -1474,7 +1483,10 @@ private theorem traversePairs_sound {dm : DatatypeMap} {solve : Ontology → Opt
               (st.knownTrue.contains (mid, a) && st.knownFalse.contains (mid, b)) ||
               (st.knownTrue.contains (b, mid) && st.knownFalse.contains (a, mid))
           · simp only [hct, Bool.false_eq_true, ↓reduceIte, Option.bind_eq_some_iff] at h
-            obtain ⟨isSub, hdec, hrest⟩ := h
+            obtain ⟨⟨isSub, harvested⟩, hquery, hrest⟩ := h
+            obtain ⟨answer, hdec, heq⟩ := Option.map_eq_some_iff.mp hquery
+            have hanswer : answer = isSub := congrArg Prod.fst heq
+            subst answer
             have hmodEnt : Entails dm (extractBotModuleWithIndex idx o (axiomSig (.subClassOf (.named a) (.named b)))).1
                 [.subClassOf (.named a) (.named b)] ↔
                 Entails dm o [.subClassOf (.named a) (.named b)] :=
@@ -1499,6 +1511,9 @@ private theorem traversePairs_sound {dm : DatatypeMap} {solve : Ontology → Opt
               simp only [Bool.false_eq_true, ↓reduceIte] at hrest
               have hNotEnt : ¬ Entails dm o [.subClassOf (.named a) (.named b)] :=
                 fun he => Bool.noConfusion (hiff.mpr he)
+              have hrepl := congrArg Prod.snd heq
+              dsimp only [Bool.false_eq_true, ↓reduceIte] at hrepl
+              subst harvested
               have hv1 := insertFalseAndClose_valid allClasses hv hNotEnt
               have hvb : ∃ seed σ, ValidBotModule o seed
                   (extractBotModuleWithIndex idx o (axiomSig (.subClassOf (.named a) (.named b)))).1 σ :=
@@ -1581,11 +1596,10 @@ private theorem traversePairs_sound {dm : DatatypeMap} {solve : Ontology → Opt
       · rintro (rfl | ⟨hp, he⟩); exact ⟨Or.inl rfl, hEnt⟩; exact ⟨Or.inr hp, he⟩
       · rintro ⟨rfl | hp, he⟩; exact Or.inl rfl; exact Or.inr ⟨hp, he⟩
 
-/-- Certified Enhanced Traversal classifier parameterized by any exact consistency
-    solver `solve` and optional certified countermodel harvester `harvest`. -/
-def classifyEnhancedCore (solve : Ontology → Option Bool)
+private def classifyEnhancedCoreWith (solve : Ontology → Option Bool)
+    (traverse : LocalityIndex → Ontology → List IRI → List (IRI × IRI) →
+      ClsCache → Option (List (IRI × IRI) × ClsCache))
     (initHarvest : Ontology → List IRI → List (IRI × IRI))
-    (stepHarvest : Ontology → IRI → IRI → List (IRI × IRI))
     (o : Ontology) (namedClasses : List IRI) : Option ClassHierarchy :=
   let idx := LocalityIndex.build o
   let mod0 := (extractBotModuleWithIndex idx o Sig.empty).1
@@ -1607,7 +1621,7 @@ def classifyEnhancedCore (solve : Ontology → Option Bool)
         let st3 := (initHarvest o namedClasses).foldl
           (fun s p => { s with knownFalse := s.knownFalse.insert p }) st2
         let allPairs := orderedPairs namedClasses
-        (traversePairs solve stepHarvest idx o namedClasses allPairs st3).map fun (subs, _) =>
+        (traverse idx o namedClasses allPairs st3).map fun (subs, _) =>
           let satClasses := namedClasses.filter (!unsat.contains ·)
           let subSet := setOfPairs subs
           {
@@ -1618,6 +1632,15 @@ def classifyEnhancedCore (solve : Ontology → Option Bool)
             equivalences := computeEquivClassesFast satClasses subSet
             directParents := computeDirectParentsFast satClasses subSet
           }
+
+/-- Certified Enhanced Traversal classifier parameterized by an exact consistency
+    solver and optional certified countermodel harvesters. -/
+def classifyEnhancedCore (solve : Ontology → Option Bool)
+    (initHarvest : Ontology → List IRI → List (IRI × IRI))
+    (stepHarvest : Ontology → IRI → IRI → List (IRI × IRI))
+    (o : Ontology) (namedClasses : List IRI) : Option ClassHierarchy :=
+  classifyEnhancedCoreWith solve
+    (fun idx base => traversePairs (querySubsumption solve stepHarvest idx base)) initHarvest o namedClasses
 
 theorem classifyEnhancedCore_sound_complete {dm : DatatypeMap}
     {solve : Ontology → Option Bool}
@@ -1636,7 +1659,7 @@ theorem classifyEnhancedCore_sound_complete {dm : DatatypeMap}
       (∀ c, c ∈ h.unsatisfiable ↔ c ∈ namedClasses ∧ Entails dm o [.subClassOf (.named c) (.named nothing)]) ∧
       (∀ a b, (a, b) ∈ h.subsumptions ↔
         a ∈ namedClasses ∧ b ∈ namedClasses ∧ Entails dm o [.subClassOf (.named a) (.named b)])) := by
-  unfold classifyEnhancedCore at hcls
+  unfold classifyEnhancedCore classifyEnhancedCoreWith at hcls
   dsimp only at hcls
   obtain ⟨cons, hcons, hrest⟩ := Option.bind_eq_some_iff.mp hcls
   have hsat0 : Satisfiable dm (extractBotModuleWithIndex (LocalityIndex.build o) o Sig.empty).1 ↔
@@ -1875,6 +1898,151 @@ def classifyOntologyCompactELRuntime (o : Ontology)
     | none => none
   else none
 
+private def spawnChunks {α β : Type} (chunk : Nat) (f : α → β) :
+    Nat → List α → List (Task (List β))
+  | 0, xs => [Task.pure (xs.map f)]
+  | _ + 1, [] => []
+  | workers + 1, x :: xs =>
+    let (front, rest) := (x :: xs).splitAt chunk
+    Task.spawn (fun () => front.map f) :: spawnChunks chunk f workers rest
+
+private theorem spawnChunks_get {α β : Type} (chunk : Nat) (f : α → β)
+    (workers : Nat) (xs : List α) :
+    (spawnChunks chunk f workers xs).flatMap Task.get = xs.map f := by
+  induction workers generalizing xs with
+  | zero => simp [spawnChunks]
+  | succ workers ih =>
+    cases xs with
+    | nil => rfl
+    | cons x xs =>
+      simp only [spawnChunks, List.splitAt_eq, List.flatMap_cons, Task.spawn, ih]
+      rw [← List.map_append, List.take_append_drop]
+
+private def mapIndependent {α β : Type} (workers : Nat) (f : α → β) (xs : List α) : List β :=
+  if workers ≤ 1 || xs.length ≤ 1 then xs.map f
+  else
+    let count := min workers xs.length
+    let chunk := (xs.length + count - 1) / count
+    (spawnChunks chunk f count xs).flatMap Task.get
+
+private theorem mapIndependent_eq {α β : Type} (workers : Nat) (f : α → β) (xs : List α) :
+    mapIndependent workers f xs = xs.map f := by
+  unfold mapIndependent
+  split
+  · rfl
+  · apply spawnChunks_get
+
+private theorem traversePairs_append
+    (query : IRI → IRI → Option (Bool × List (IRI × IRI))) (classes : List IRI)
+    (front rest : List (IRI × IRI)) (st : ClsCache) :
+    traversePairs query classes (front ++ rest) st =
+      (traversePairs query classes front st).bind fun (found, current) =>
+        (traversePairs query classes rest current).map fun (later, final) => (found ++ later, final) := by
+  induction front generalizing st with
+  | nil =>
+    simp [traversePairs]
+  | cons pair front ih =>
+    rcases pair with ⟨a, b⟩
+    simp only [List.cons_append, traversePairs]
+    split
+    · rw [ih]
+      simp [Option.bind_map, Function.comp_def]
+    · split
+      · apply ih
+      · split
+        · rw [ih]
+          simp [Option.bind_map, Function.comp_def]
+        · split
+          · apply ih
+          · rw [Option.bind_assoc]
+            apply Option.bind_congr
+            rintro ⟨answer, harvested⟩ _
+            cases answer
+            · exact ih _
+            · rw [ih]
+              simp [Option.bind_map, Function.comp_def]
+
+private def batchQuery (workers : Nat) (query : IRI → IRI → Option (Bool × List (IRI × IRI)))
+    (gaps : List (IRI × IRI)) : IRI → IRI → Option (Bool × List (IRI × IRI)) :=
+  let answers := mapIndependent workers (fun (a, b) => ((a, b), query a b)) gaps
+  fun a b =>
+    match answers.lookup (a, b) with
+    | some answer => answer
+    | none => query a b
+
+private theorem batchQuery_eq (workers : Nat) (query : IRI → IRI → Option (Bool × List (IRI × IRI)))
+    (gaps : List (IRI × IRI)) : batchQuery workers query gaps = query := by
+  funext a b
+  simp only [batchQuery, mapIndependent_eq]
+  split
+  · rename_i answer hanswer
+    obtain ⟨front, rest, heq, _⟩ := List.lookup_eq_some_iff.mp hanswer
+    have hm : ((a, b), answer) ∈ gaps.map (fun (a, b) => ((a, b), query a b)) := by simp [heq]
+    obtain ⟨⟨c, d⟩, _, h⟩ := List.mem_map.mp hm
+    cases h
+    rfl
+  · rfl
+
+/-- Evaluate a bounded batch of independent queries. Merge their answers in
+    traversal order so each decision can still prune later pairs. -/
+private def traversePairsBatched (workers : Nat)
+    (query : IRI → IRI → Option (Bool × List (IRI × IRI))) (classes : List IRI) :
+    Nat → List (IRI × IRI) → ClsCache → List (IRI × IRI) →
+    Option (List (IRI × IRI) × ClsCache)
+  | 0, pairs, st, acc =>
+    (traversePairs query classes pairs st).map fun (found, next) => (acc.reverse ++ found, next)
+  | _ + 1, [], st, acc => some (acc.reverse, st)
+  | batches + 1, pair :: rest, st, acc => do
+    let (batch, pending) := (pair :: rest).splitAt workers
+    let gaps := batch.filter fun (a, b) =>
+      !st.knownTrue.contains (a, b) && !st.knownFalse.contains (a, b) &&
+      !hasTransitiveWitness classes st a b && !hasContrapositiveWitness classes st a b
+    let (found, next) ← traversePairs (batchQuery workers query gaps) classes batch st
+    traversePairsBatched workers query classes batches pending next (found.reverse ++ acc)
+
+private theorem traversePairsBatched_eq (workers : Nat)
+    (query : IRI → IRI → Option (Bool × List (IRI × IRI))) (classes : List IRI)
+    (batches : Nat) (pairs : List (IRI × IRI)) (st : ClsCache) (acc : List (IRI × IRI)) :
+    traversePairsBatched workers query classes batches pairs st acc =
+      (traversePairs query classes pairs st).map fun (found, next) => (acc.reverse ++ found, next) := by
+  induction batches generalizing pairs st acc with
+  | zero => rfl
+  | succ batches ih =>
+    cases pairs with
+    | nil => simp [traversePairsBatched, traversePairs]
+    | cons pair rest =>
+      simp only [traversePairsBatched, List.splitAt_eq, batchQuery_eq]
+      conv =>
+        rhs
+        arg 2
+        rw [← List.take_append_drop workers (pair :: rest), traversePairs_append]
+      simp only [Option.map_bind, Function.comp_def]
+      apply Option.bind_congr
+      rintro ⟨found, next⟩ _
+      rw [ih, Option.map_map]
+      simp [Function.comp_def, List.append_assoc]
+
+private def traversePairsParallel (workers : Nat)
+    (query : IRI → IRI → Option (Bool × List (IRI × IRI))) (classes : List IRI)
+    (pairs : List (IRI × IRI)) (st : ClsCache) :
+    Option (List (IRI × IRI) × ClsCache) :=
+  if workers ≤ 1 then traversePairs query classes pairs st
+  else traversePairsBatched workers query classes ((pairs.length + workers - 1) / workers) pairs st []
+
+private theorem traversePairsParallel_eq (workers : Nat)
+    (query : IRI → IRI → Option (Bool × List (IRI × IRI))) (classes : List IRI)
+    (pairs : List (IRI × IRI)) (st : ClsCache) :
+    traversePairsParallel workers query classes pairs st = traversePairs query classes pairs st := by
+  unfold traversePairsParallel
+  split
+  · rfl
+  · rw [traversePairsBatched_eq]
+    cases traversePairs query classes pairs st
+    · rfl
+    · rename_i result
+      cases result
+      rfl
+
 /-- Fast hybrid runtime TBox classifier:
     1. Pure $\mathcal{EL}^{++}$ ontologies: parallel integer-interned single-model
        `FastEL.classifyFastELToHierarchy` (falling back to `classifyELSinglePass`
@@ -1888,6 +2056,10 @@ def classifyOntologyFastRuntime (o : Ontology) (decls : List FunctionalSyntax.En
     Option ClassHierarchy :=
   let namedClasses := collectNamedClasses o decls
   let fp := profileOntology o
+  let enhanced := fun () => classifyEnhancedCoreWith fastConsistencyCheck
+    (fun idx base classes pairs st => traversePairsParallel numWorkers
+      (querySubsumption fastConsistencyCheck (fun _ _ _ => []) idx base) classes pairs st)
+    proposeInitModelPairs o namedClasses
   if fp.leastFragment == .el then
     match normalizeEL o with
     | some elAxs =>
@@ -1897,12 +2069,16 @@ def classifyOntologyFastRuntime (o : Ontology) (decls : List FunctionalSyntax.En
         | none =>
           match classifyELSinglePass elAxs namedClasses with
           | some h => some h
-          | none => classifyEnhancedCore fastConsistencyCheck proposeInitModelPairs (fun _ _ _ => []) o namedClasses
-      else
-        classifyEnhancedCore fastConsistencyCheck proposeInitModelPairs (fun _ _ _ => []) o namedClasses
-    | none => classifyEnhancedCore fastConsistencyCheck proposeInitModelPairs (fun _ _ _ => []) o namedClasses
-  else
-    classifyEnhancedCore fastConsistencyCheck proposeInitModelPairs (fun _ _ _ => []) o namedClasses
+          | none => enhanced ()
+      else enhanced ()
+    | none => enhanced ()
+  else enhanced ()
+
+theorem classifyOntologyFastRuntime_nonEL_workers_eq (o : Ontology)
+    (decls : List FunctionalSyntax.EntityDecl)
+    (h : (profileOntology o).leastFragment ≠ .el) (workers : Nat) :
+    classifyOntologyFastRuntime o decls workers = classifyOntologyFastRuntime o decls 1 := by
+  simp only [classifyOntologyFastRuntime, beq_iff_eq, h, ↓reduceIte, traversePairsParallel_eq]
 
 /-- Fast hash-indexed direct-type computation (`O(|types|²)` with `O(1)` lookup). -/
 def computeDirectTypesFast (types : List IRI) (subSet : Std.HashSet (IRI × IRI)) : List IRI :=
@@ -1911,7 +2087,7 @@ def computeDirectTypesFast (types : List IRI) (subSet : Std.HashSet (IRI × IRI)
 
 /-- Realize an ABox using the hierarchy already computed for the same ontology. -/
 def realizeFromHierarchyRuntime (o : Ontology) (decls : List FunctionalSyntax.EntityDecl)
-    (hier : ClassHierarchy) : Option RealizationResult :=
+    (hier : ClassHierarchy) (numWorkers : Nat := 8) : Option RealizationResult :=
   let namedClasses := collectNamedClasses o decls
   let namedInds := collectNamedIndividuals o decls
   if !hier.consistent then
@@ -1919,28 +2095,27 @@ def realizeFromHierarchyRuntime (o : Ontology) (decls : List FunctionalSyntax.En
   else
     let idx := LocalityIndex.build o
     let subSet := setOfPairs hier.subsumptions
-    let rec goInds : List IRI → Option (List IndividualTypes)
-      | [] => some []
-      | ind :: rest =>
-        let rec goCls : List IRI → Option (List IRI)
-          | [] => some []
-          | c :: cs =>
-            let seed := axiomSig (.classAssertion (.named c) (.named ind))
-            let mod := (extractBotModuleWithIndex idx o seed).1
-            (decidesInstance fastConsistencyCheck mod c ind).bind fun holds =>
-              (goCls cs).map fun tl => if holds then c :: tl else tl
-        (goCls namedClasses).bind fun ts =>
-          (goInds rest).map fun tl =>
-            { individual := ind
-              allTypes := ts
-              directTypes := computeDirectTypesFast ts subSet } :: tl
-    (goInds namedInds).map fun entries =>
+    let realizeInd (ind : IRI) : Option IndividualTypes := do
+      let types ← namedClasses.filterM fun c =>
+        let seed := axiomSig (.classAssertion (.named c) (.named ind))
+        let mod := (extractBotModuleWithIndex idx o seed).1
+        decidesInstance fastConsistencyCheck mod c ind
+      return { individual := ind, allTypes := types, directTypes := computeDirectTypesFast types subSet }
+    let entries := if numWorkers ≤ 1 then namedInds.mapM realizeInd
+      else (mapIndependent numWorkers realizeInd namedInds).mapM id
+    entries.map fun entries =>
       { consistent := true, individuals := namedInds, entries }
+
+theorem realizeFromHierarchyRuntime_workers_eq (o : Ontology)
+    (decls : List FunctionalSyntax.EntityDecl) (hier : ClassHierarchy) (workers : Nat) :
+    realizeFromHierarchyRuntime o decls hier workers = realizeFromHierarchyRuntime o decls hier 1 := by
+  simp only [realizeFromHierarchyRuntime, mapIndependent_eq, List.mapM_map, Function.id_comp, ite_self]
 
 /-- Fast hybrid runtime ABox realizer backed by `classifyOntologyFastRuntime`
     and cached locality indexing. -/
-def realizeOntologyFastRuntime (o : Ontology) (decls : List FunctionalSyntax.EntityDecl := []) :
-    Option RealizationResult :=
-  (classifyOntologyFastRuntime o decls).bind (realizeFromHierarchyRuntime o decls)
+def realizeOntologyFastRuntime (o : Ontology) (decls : List FunctionalSyntax.EntityDecl := [])
+    (numWorkers : Nat := 8) : Option RealizationResult :=
+  (classifyOntologyFastRuntime o decls numWorkers).bind fun hier =>
+    realizeFromHierarchyRuntime o decls hier numWorkers
 
 end Sabrina.OWL2.FastClassification

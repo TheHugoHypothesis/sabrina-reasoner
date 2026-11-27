@@ -923,6 +923,20 @@ theorem addLabel_realizes {b : BlockedForest} {i : Interpretation datatypeMap}
   { hr with labels := fun y d hd =>
       (addLabel_mem.mp hd).elim (fun ⟨h1, h2⟩ => h1 ▸ h2 ▸ hc) (hr.labels y d) }
 
+/-- A conflict learned deeper in search can close this forest when all its
+    premises already hold at one of this forest's nodes. -/
+def checkNodeClash {p : Problem} (b : BlockedForest) (clash : NodeClash p) :
+    Option { _c : NodeClash p // ∀ (i : Interpretation datatypeMap), p.Models i →
+      ∀ env, ¬ b.Realizes i env } := do
+  if hnode : clash.node < b.size + 1 then
+    let x : b.Node := ⟨clash.node, hnode⟩
+    if h : clash.premises.all (b.labels x).contains then
+      return ⟨clash, fun i hm env hr =>
+        clash.sound i hm (env x) fun c hc => hr.labels x c
+          (List.contains_iff_mem.mp (List.all_eq_true.mp h c hc))⟩
+    else none
+  else none
+
 theorem addLabel_within {b : BlockedForest} {rank : Rank} {p : Problem}
     (hw : b.Within rank p) {x : b.Node} {c : Concept} (hc : c ∈ sroiqClos p) :
     (b.addLabel x c).Within rank p :=

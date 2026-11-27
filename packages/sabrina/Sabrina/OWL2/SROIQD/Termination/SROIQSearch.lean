@@ -232,6 +232,11 @@ structure SROIQCheckedStep (rank : Rank) (p : Problem) (s : SROIQState rank p) w
     s.forest.Realizes i env → ∃ next ∈ branches, ∃ env', next.forest.Realizes i env'
   strict : ∀ next ∈ branches, SROIQStrictStep rank p s.forest next.forest
 
+private structure ExplainedStep (rank : Rank) (p : Problem) (s : SROIQState rank p)
+    extends SROIQCheckedStep rank p s where
+  localRule : Option (LocalLabelRule p) := none
+  clash : Option (NodeClash p) := none
+
 /-! ### State update constructors -/
 
 private def stateAddLabel {rank : Rank} {p : Problem} (s : SROIQState rank p)
@@ -242,6 +247,20 @@ private def stateAddLabel {rank : Rank} {p : Problem} (s : SROIQState rank p)
   geom := addLabel_geom s.geom x c
   abox := addLabel_aboxSeeded s.abox x c
   nomsSound := s.nomsSound
+
+private def addLabelStep {rank : Rank} {p : Problem} (s : SROIQState rank p)
+    (x : s.forest.Node) (c : Concept) (hc : c ∈ sroiqClos p) (hNew : c ∉ s.forest.labels x)
+    (premises : List Concept) (hKnown : ∀ d ∈ premises, d ∈ s.forest.labels x)
+    (deriveLabel : ∀ (i : Interpretation datatypeMap), p.Models i → ∀ y : i.Object,
+      (∀ d ∈ premises, holds i y d) → holds i y c) : ExplainedStep rank p s :=
+  let next := stateAddLabel s x c hc
+  { branches := [next]
+    sound := fun i hm env hr => ⟨next, List.mem_cons_self .., env,
+      addLabel_realizes hr (deriveLabel i hm (env x) fun d hd => hr.labels x d (hKnown d hd))⟩
+    strict := fun _ hn => by
+      obtain rfl := List.mem_singleton.mp hn
+      exact .addLabel x c hc hNew rfl
+    localRule := some (.unary x.val premises c deriveLabel) }
 
 private def stateAddGuard {rank : Rank} {p : Problem} (s : SROIQState rank p)
     (x : s.forest.Node) (g : Guard) (hg : g ∈ sroiqGuards rank p) : SROIQState rank p where
@@ -329,16 +348,17 @@ private def stateMerge {rank : Rank} {p : Problem} (s : SROIQState rank p)
     exact s.nomsSound (a, u) hu
 
 private def closeStep {rank : Rank} {p : Problem} {s : SROIQState rank p}
-    (hunsat : ∀ i : Interpretation datatypeMap, p.Models i → ∀ env, ¬ s.forest.Realizes i env) :
-    SROIQCheckedStep rank p s where
+    (hunsat : ∀ i : Interpretation datatypeMap, p.Models i → ∀ env, ¬ s.forest.Realizes i env)
+    (clash : Option (NodeClash p) := none) : ExplainedStep rank p s where
   branches := []
   sound := fun i hm env hr => (hunsat i hm env hr).elim
   strict := fun _ h => (List.not_mem_nil h).elim
+  clash := clash
 
 /-! ### Inspection monad for fair rule sweeps -/
 
 private inductive Inspection (rank : Rank) (p : Problem) (s : SROIQState rank p) (done : Prop) where
-  | step (t : SROIQCheckedStep rank p s)
+  | step (t : ExplainedStep rank p s)
   | done (h : done)
 
 private def Inspection.mapDone {rank : Rank} {p : Problem} {s : SROIQState rank p}
@@ -390,7 +410,8 @@ private def inspectClash {rank : Rank} {p : Problem} (hsroiqd : p.isSROIQD rank 
   let c1 : Inspection rank p s (∀ x, .bottom ∉ b.labels x) :=
     inspectNodes fun x =>
       if h : (b.labels x).contains .bottom then
-        .step (closeStep fun _ _ _ hr => hr.labels x .bottom (List.contains_iff_mem.mp h))
+        .step (closeStep (fun _ _ _ hr => hr.labels x .bottom (List.contains_iff_mem.mp h))
+          (some (.bottom p x.val)))
       else
         .done fun hm => h (List.contains_iff_mem.mpr hm)
   let c2 : Inspection rank p s (∀ x a, .lit a true ∈ b.labels x → .lit a false ∉ b.labels x) :=
@@ -401,8 +422,9 @@ private def inspectClash {rank : Rank} {p : Problem} (hsroiqd : p.isSROIQD rank 
           | lit a' sign => cases sign <;> cases ha; exact hc
           | _ => cases ha
         if h : (b.labels x).contains (.lit a false) then
-          .step (closeStep fun _ _ _ hr =>
+          .step (closeStep (fun _ _ _ hr =>
             hr.labels x (.lit a false) (List.contains_iff_mem.mp h) (hr.labels x (.lit a true) hc'))
+            (some (.dual p x.val (.lit a true))))
         else
           .done fun hm => h (List.contains_iff_mem.mpr hm)).mapDone fun h a ht hf => h (.lit a true) ht a rfl hf
   let c3 : Inspection rank p s (∀ x, (x, x) ∉ b.unequal) :=
@@ -505,7 +527,7 @@ private def rootMergeStep {rank : Rank} {p : Problem} (s : SROIQState rank p)
     (hne : r₁ ≠ r₂)
     (heqModel : ∀ i : Interpretation datatypeMap, p.Models i → ∀ env,
       s.forest.Realizes i env → env r₁ = env r₂) :
-    SROIQCheckedStep rank p s :=
+    ExplainedStep rank p s :=
   if hrec : s.forest.recordedDistinctBool r₁ r₂ then
     closeStep fun i hm env hreal => by
       have heq := heqModel i hm env hreal
@@ -669,7 +691,8 @@ private def inspectKeyCls {rank : Rank} {p : Problem} (s : SROIQState rank p) :
               rcases List.mem_cons.mp hb' with rfl | hb'
               · exact .addLabel x k.cls hc1 (fun hm => h1 (List.contains_iff_mem.mpr hm)) rfl
               · obtain rfl := List.mem_singleton.mp hb'
-                exact .addLabel x k.cls.dual hc2 (fun hm => h2 (List.contains_iff_mem.mpr hm)) rfl }
+                exact .addLabel x k.cls.dual hc2 (fun hm => h2 (List.contains_iff_mem.mpr hm)) rfl
+            localRule := some (.split p x.val k.cls) }
       else
         .done fun h => (hnr h).elim
 
@@ -903,24 +926,14 @@ private def inspectLabels {rank : Rank} {p : Problem} (hsroiqd : p.isSROIQD rank
               .done ⟨List.contains_iff_mem.mp ha, List.contains_iff_mem.mp hc⟩
             else
               have hcClos : c ∈ sroiqClos p := sroiqClos_operands (s.within.labels x hd') (by simp [operands, c])
-              let next := stateAddLabel s x c hcClos
-              .step {
-                branches := [next]
-                sound := fun i _ env hreal =>
-                  ⟨next, List.mem_cons_self .., env, addLabel_realizes hreal (hreal.labels x (.conj a c) hd').2⟩
-                strict := fun b' hb' => by
-                  obtain rfl := List.mem_singleton.mp hb'
-                  exact .addLabel x c hcClos (fun hm => hc (List.contains_iff_mem.mpr hm)) rfl }
+              .step (addLabelStep s x c hcClos (fun hm => hc (List.contains_iff_mem.mpr hm))
+                [.conj a c] (fun _ h => (List.mem_singleton.mp h).symm ▸ hd')
+                (fun _ _ _ hp => (hp (.conj a c) (by simp)).2))
           else
             have haClos : a ∈ sroiqClos p := sroiqClos_operands (s.within.labels x hd') (by simp [operands, a])
-            let next := stateAddLabel s x a haClos
-            .step {
-              branches := [next]
-              sound := fun i _ env hreal =>
-                ⟨next, List.mem_cons_self .., env, addLabel_realizes hreal (hreal.labels x (.conj a c) hd').1⟩
-              strict := fun b' hb' => by
-                obtain rfl := List.mem_singleton.mp hb'
-                exact .addLabel x a haClos (fun hm => ha (List.contains_iff_mem.mpr hm)) rfl }).mapDone
+            .step (addLabelStep s x a haClos (fun hm => ha (List.contains_iff_mem.mpr hm))
+              [.conj a c] (fun _ h => (List.mem_singleton.mp h).symm ▸ hd')
+              (fun _ _ _ hp => (hp (.conj a c) (by simp)).1))).mapDone
           fun h _ a c hm => h (.conj a c) hm (a, c) rfl
       else
         .done fun hu => (hux (isUnblockedBool_iff.mpr hu)).elim
@@ -940,19 +953,32 @@ private def inspectLabels {rank : Rank} {p : Problem} (hsroiqd : p.isSROIQD rank
           else
             have haClos : a ∈ sroiqClos p := sroiqClos_operands (s.within.labels x hd') (by simp [operands, a])
             have hcClos : c ∈ sroiqClos p := sroiqClos_operands (s.within.labels x hd') (by simp [operands, c])
-            let s1 := stateAddLabel s x a haClos
-            let s2 := stateAddLabel s x c hcClos
-            .step {
-              branches := [s1, s2]
-              sound := fun i _ env hreal => by
-                rcases hreal.labels x (.disj a c) hd' with h1 | h2
-                · exact ⟨s1, List.mem_cons_self .., env, addLabel_realizes hreal h1⟩
-                · exact ⟨s2, List.mem_cons_of_mem _ (List.mem_cons_self ..), env, addLabel_realizes hreal h2⟩
-              strict := fun b' hb' => by
-                rcases List.mem_cons.mp hb' with rfl | hb'
-                · exact .addLabel x a haClos (fun hm => ha (List.contains_iff_mem.mpr hm)) rfl
-                · obtain rfl := List.mem_singleton.mp hb'
-                  exact .addLabel x c hcClos (fun hm => hc (List.contains_iff_mem.mpr hm)) rfl }).mapDone
+            if hna : (b.labels x).contains a.dual then
+              .step (addLabelStep s x c hcClos (fun hm => hc (List.contains_iff_mem.mpr hm))
+                [.disj a c, a.dual] (by simpa using And.intro hd' (List.contains_iff_mem.mp hna))
+                (fun i _ y hp =>
+                  (hp (.disj a c) (by simp)).resolve_left ((holds_dual i y a).mp (hp a.dual (by simp)))))
+            else if hnc : (b.labels x).contains c.dual then
+              .step (addLabelStep s x a haClos (fun hm => ha (List.contains_iff_mem.mpr hm))
+                [.disj a c, c.dual] (by simpa using And.intro hd' (List.contains_iff_mem.mp hnc))
+                (fun i _ y hp =>
+                  (hp (.disj a c) (by simp)).resolve_right ((holds_dual i y c).mp (hp c.dual (by simp)))))
+            else
+              let s1 := stateAddLabel s x a haClos
+              let s2 := stateAddLabel s x c hcClos
+              .step {
+                branches := [s1, s2]
+                sound := fun i _ env hreal => by
+                  rcases hreal.labels x (.disj a c) hd' with h1 | h2
+                  · exact ⟨s1, List.mem_cons_self .., env, addLabel_realizes hreal h1⟩
+                  · exact ⟨s2, List.mem_cons_of_mem _ (List.mem_cons_self ..), env, addLabel_realizes hreal h2⟩
+                strict := fun b' hb' => by
+                  rcases List.mem_cons.mp hb' with rfl | hb'
+                  · exact .addLabel x a haClos (fun hm => ha (List.contains_iff_mem.mpr hm)) rfl
+                  · obtain rfl := List.mem_singleton.mp hb'
+                    exact .addLabel x c hcClos (fun hm => hc (List.contains_iff_mem.mpr hm)) rfl
+                localRule := some (.binary x.val [.disj a c] a c fun _ _ _ hp =>
+                  hp (.disj a c) (by simp)) }).mapDone
           fun h _ a c hm => h (.disj a c) hm (a, c) rfl
       else
         .done fun hu => (hux (isUnblockedBool_iff.mpr hu)).elim
@@ -1038,7 +1064,8 @@ private def inspectLabels {rank : Rank} {p : Problem} (hsroiqd : p.isSROIQD rank
                     rcases List.mem_cons.mp hb' with rfl | hb'
                     · exact .addLabel y c hc1 (fun hm => h1 (List.contains_iff_mem.mpr hm)) rfl
                     · obtain rfl := List.mem_singleton.mp hb'
-                      exact .addLabel y c.dual hc2 (fun hm => h2 (List.contains_iff_mem.mpr hm)) rfl }
+                      exact .addLabel y c.dual hc2 (fun hm => h2 (List.contains_iff_mem.mpr hm)) rfl
+                  localRule := some (.split p y.val c) }
             else
               .done fun h => (he (edgeBool_iff.mpr h)).elim).mapDone fun h _ n r c hm y hy =>
           h (.max n r c) hm (n, r, c) rfl y hy
@@ -1060,20 +1087,31 @@ private def inspectTBox {rank : Rank} {p : Problem} (s : SROIQState rank p) :
           .done fun _ => .inr (List.contains_iff_mem.mp h2)
         else
           have ⟨hc1, hc2⟩ := tbox_mem_sroiqClos hq
-          let s1 := stateAddLabel s x q.sub.dual hc1
-          let s2 := stateAddLabel s x q.sup hc2
-          .step {
-            branches := [s1, s2]
-            sound := fun i hm env hreal => by
-              rcases holds_or_dual i (env x) q.sub with hsub | hdual
-              · exact ⟨s2, List.mem_cons_of_mem _ (List.mem_cons_self ..), env,
-                  addLabel_realizes hreal (hm.tbox q hq (env x) hsub)⟩
-              · exact ⟨s1, List.mem_cons_self .., env, addLabel_realizes hreal hdual⟩
-            strict := fun b' hb' => by
-              rcases List.mem_cons.mp hb' with rfl | hb'
-              · exact .addLabel x q.sub.dual hc1 (fun h => h1 (List.contains_iff_mem.mpr h)) rfl
-              · obtain rfl := List.mem_singleton.mp hb'
-                exact .addLabel x q.sup hc2 (fun h => h2 (List.contains_iff_mem.mpr h)) rfl }
+          if hNotSup : (b.labels x).contains q.sup.dual then
+            .step (addLabelStep s x q.sub.dual hc1 (fun hm => h1 (List.contains_iff_mem.mpr hm))
+              [q.sup.dual] (fun _ h => (List.mem_singleton.mp h).symm ▸ List.contains_iff_mem.mp hNotSup)
+              (fun i hm y hp => (holds_dual i y q.sub).mpr fun sub =>
+                (holds_dual i y q.sup).mp (hp _ (by simp)) (hm.tbox q hq y sub)))
+          else if let some support := q.sub.triggeringPremises (b.labels x).contains then
+            .step (addLabelStep s x q.sup hc2 (fun hm => h2 (List.contains_iff_mem.mpr hm))
+              support.val (fun c hc => List.contains_iff_mem.mp (support.property.1 c hc))
+              (fun i hm y hp => hm.tbox q hq y (support.property.2 i y hp)))
+          else
+            let s1 := stateAddLabel s x q.sub.dual hc1
+            let s2 := stateAddLabel s x q.sup hc2
+            .step {
+              branches := [s1, s2]
+              sound := fun i hm env hreal => by
+                rcases holds_or_dual i (env x) q.sub with hsub | hdual
+                · exact ⟨s2, List.mem_cons_of_mem _ (List.mem_cons_self ..), env,
+                    addLabel_realizes hreal (hm.tbox q hq (env x) hsub)⟩
+                · exact ⟨s1, List.mem_cons_self .., env, addLabel_realizes hreal hdual⟩
+              strict := fun b' hb' => by
+                rcases List.mem_cons.mp hb' with rfl | hb'
+                · exact .addLabel x q.sub.dual hc1 (fun h => h1 (List.contains_iff_mem.mpr h)) rfl
+                · obtain rfl := List.mem_singleton.mp hb'
+                  exact .addLabel x q.sup hc2 (fun h => h2 (List.contains_iff_mem.mpr h)) rfl
+              localRule := some (.gci x.val q hq) }
       else
         .done fun hu => (hux (isUnblockedBool_iff.mpr hu)).elim
 
@@ -1821,7 +1859,7 @@ private def sroiqSweep {rank : Rank} {p : Problem} (hsroiqd : p.isSROIQD rank = 
 private def sroiqStepWith {rank : Rank} {p : Problem} (hsroiqd : p.isSROIQD rank = true)
     (s : SROIQState rank p)
     (rootResult : {r // r = solveDataCSP (s.forest.rootDataCSP p)}) :
-    Option (SROIQCheckedStep rank p s) :=
+    Option (ExplainedStep rank p s) :=
   match sroiqSweep hsroiqd s rootResult with
   | .step t => some t
   | .done _ => none
@@ -1831,12 +1869,14 @@ forest is clash-free and fully saturated; otherwise emits a sound, strictly
 progressing branching transition. -/
 def sroiqStep {rank : Rank} {p : Problem} (hsroiqd : p.isSROIQD rank = true)
     (s : SROIQState rank p) : Option (SROIQCheckedStep rank p s) :=
-  sroiqStepWith hsroiqd s ⟨solveDataCSP (s.forest.rootDataCSP p), rfl⟩
+  (sroiqStepWith hsroiqd s ⟨solveDataCSP (s.forest.rootDataCSP p), rfl⟩).map
+    (·.toSROIQCheckedStep)
 
 private theorem sroiqStepWith_eq {rank : Rank} {p : Problem} (hsroiqd : p.isSROIQD rank = true)
     (s : SROIQState rank p) (result : {r // r = solveDataCSP (s.forest.rootDataCSP p)}) :
-    sroiqStepWith hsroiqd s result = sroiqStep hsroiqd s :=
-  congrArg (sroiqStepWith hsroiqd s) (Subtype.ext result.property)
+    (sroiqStepWith hsroiqd s result).map (·.toSROIQCheckedStep) = sroiqStep hsroiqd s :=
+  congrArg (fun ans => (sroiqStepWith hsroiqd s ans).map (·.toSROIQCheckedStep))
+    (Subtype.ext result.property)
 
 theorem sroiqStep_fair {rank : Rank} {p : Problem} {hsroiqd : p.isSROIQD rank = true}
     {s : SROIQState rank p} (h : sroiqStep hsroiqd s = none) :
@@ -1933,26 +1973,33 @@ private theorem refreshState_eq {rank : Rank} {p : Problem} (state : SROIQState 
   · cases state; rfl
   · rfl
 
-private inductive BranchCheck {rank : Rank} {p : Problem} (xs : List (SROIQState rank p)) where
+private inductive BranchCheck {rank : Rank} {p : Problem} (s : SROIQState rank p)
+    (xs : List (SROIQState rank p)) where
   | sat (leaf : SROIQOpenLeaf rank p)
-  | closed (proof : ∀ next ∈ xs, SROIQRefutation next)
+  | jump (clash : { _c : NodeClash p // ∀ (i : Interpretation datatypeMap), p.Models i →
+      ∀ env, ¬ s.forest.Realizes i env })
+  | closed (proof : ∀ next ∈ xs, SROIQRefutation next) (clashes : List (Option (NodeClash p)))
 
 private def checkBranches {rank : Rank} {p : Problem} {s : SROIQState rank p}
     (t : SROIQCheckedStep rank p s)
-    (visit : ∀ next ∈ t.branches, SROIQVerdict next) :
-    (xs : List (SROIQState rank p)) → (∀ next ∈ xs, next ∈ t.branches) → BranchCheck xs
-  | [], _ => .closed fun _ h => (List.not_mem_nil h).elim
+    (visit : ∀ next ∈ t.branches, SROIQVerdict next × Option (NodeClash p)) :
+    (xs : List (SROIQState rank p)) → (∀ next ∈ xs, next ∈ t.branches) → BranchCheck s xs
+  | [], _ => .closed (fun _ h => (List.not_mem_nil h).elim) []
   | x :: xs, hsub =>
     match visit x (hsub x (List.mem_cons_self ..)) with
-    | .sat leaf => .sat leaf
-    | .unsat ref =>
-      match checkBranches t visit xs (fun y hy => hsub y (List.mem_cons_of_mem _ hy)) with
-      | .sat leaf => .sat leaf
-      | .closed rest =>
-        .closed fun y hy =>
-          match List.mem_cons.mp hy with
-          | .inl h => h ▸ ref
-          | .inr h => rest y h
+    | (.sat leaf, _) => .sat leaf
+    | (.unsat ref, clash) =>
+      if let some jump := clash.bind s.forest.checkNodeClash then
+        .jump jump
+      else
+        match checkBranches t visit xs (fun y hy => hsub y (List.mem_cons_of_mem _ hy)) with
+        | .sat leaf => .sat leaf
+        | .jump jump => .jump jump
+        | .closed rest clashes =>
+          .closed (fun y hy =>
+            match List.mem_cons.mp hy with
+            | .inl h => h ▸ ref
+            | .inr h => rest y h) (clash :: clashes)
 
 /-- Fuel-free decision procedure for any accessible `SROIQ(D)` search state. -/
 def decideSROIQDAccessible {rank : Rank} {p : Problem} (hsroiqd : p.isSROIQD rank = true)
@@ -1961,8 +2008,9 @@ def decideSROIQDAccessible {rank : Rank} {p : Problem} (hsroiqd : p.isSROIQD ran
   let less : A → A → Prop := InvImage (SROIQFollows hsroiqd) Subtype.val
   let wf : WellFounded less := ⟨fun a => InvImage.accessible Subtype.val a.property⟩
   let run (state : A)
-      (visit : ∀ next, less next state → Option RootDataMemo → Nat → SROIQVerdict next.val)
-      (memo : Option RootDataMemo) (depth : Nat) : SROIQVerdict state.val :=
+      (visit : ∀ next, less next state → Option RootDataMemo → Nat →
+        SROIQVerdict next.val × Option (NodeClash p))
+      (memo : Option RootDataMemo) (depth : Nat) : SROIQVerdict state.val × Option (NodeClash p) :=
     let current := refreshState state.val depth
     have hcurrent : current = state.val := refreshState_eq state.val depth
     let problem := current.forest.rootDataCSP p
@@ -1970,20 +2018,30 @@ def decideSROIQDAccessible {rank : Rank} {p : Problem} (hsroiqd : p.isSROIQD ran
     let result : {r // r = solveDataCSP problem} :=
       ⟨saved.val.result, saved.val.correct.trans (congrArg solveDataCSP saved.property)⟩
     match h : sroiqStepWith hsroiqd current result with
+
     | none =>
-      let complete := sroiqStep_fair ((sroiqStepWith_eq hsroiqd current result).symm.trans h)
-      .sat ⟨current.forest.reblock, complete.1, complete.2⟩
+      let complete := sroiqStep_fair ((sroiqStepWith_eq hsroiqd current result).symm.trans
+        (congrArg (Option.map (·.toSROIQCheckedStep)) h))
+      (.sat ⟨current.forest.reblock, complete.1, complete.2⟩, none)
     | some t =>
-      match checkBranches t
+      let step := t.toSROIQCheckedStep
+      match checkBranches step
         (fun next hn =>
+          have hstep := (sroiqStepWith_eq hsroiqd current result).symm.trans
+            (congrArg (Option.map (·.toSROIQCheckedStep)) h)
           have smaller : SROIQFollows hsroiqd next state.val :=
-            hcurrent ▸ SROIQFollows.child ((sroiqStepWith_eq hsroiqd current result).symm.trans h) hn
+            hcurrent ▸ SROIQFollows.child hstep hn
           visit ⟨next, state.property.inv smaller⟩ smaller
             (some saved.val) (depth + 1))
         t.branches (fun _ h => h) with
-      | .sat leaf => .sat leaf
-      | .closed proof => .unsat (hcurrent ▸ .step t proof)
-  exact wf.fix run ⟨s, acc⟩ none 1
+      | .sat leaf => (.sat leaf, none)
+      | .jump clash =>
+
+        let closed := (closeStep (s := current) clash.property).toSROIQCheckedStep
+        (.unsat (hcurrent ▸ .step closed fun _ h => nomatch h), some clash.val)
+      | .closed proof clashes =>
+        (.unsat (hcurrent ▸ .step step proof), t.clash <|> (t.localRule.bind (·.resolve clashes)))
+  exact (wf.fix run ⟨s, acc⟩ none 1).1
 
 theorem decideSROIQDAccessible_sat_iff {rank : Rank} {p : Problem} {hsroiqd : p.isSROIQD rank = true}
     (a : Acc (SROIQFollows hsroiqd) (SROIQState.initial rank p)) :
