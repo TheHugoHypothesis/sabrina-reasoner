@@ -102,7 +102,7 @@ theorem mapIndependent_eq {α β : Type} (workers : Nat) (f : α → β) (xs : L
   · apply spawnChunks_get
 
 /-- A relaxation used to try subsumption counterexamples in a separate component. -/
-private def counterWithoutIndividuals (p : Problem) : Problem :=
+def counterWithoutIndividuals (p : Problem) : Problem :=
   { p with
     tbox := p.tbox.filter fun q => q.sub.individuals.isEmpty && q.sup.individuals.isEmpty
     keys := []
@@ -124,7 +124,7 @@ private theorem counterWithoutIndividuals_sat {p : Problem} (h : p.Sat) :
     exact hi.tbox q (List.mem_filter.mp hq).1
   all_goals simp [counterWithoutIndividuals]
 
-private def appendModelComponent (base component : SROIQDModel) : SROIQDModel :=
+def appendModelComponent (base component : SROIQDModel) : SROIQDModel :=
   let additional := base.graph.additionalWorlds + component.graph.additionalWorlds + 1
   let left (x : base.graph.World) : Fin (additional + 1) := ⟨x.val, by have := x.isLt; omega⟩
   let right (x : component.graph.World) : Fin (additional + 1) :=
@@ -137,6 +137,186 @@ private def appendModelComponent (base component : SROIQDModel) : SROIQDModel :=
     (component.dataEdges.map fun (r, x, v) => (r, right x, v))
   ⟨⟨additional, atoms, edges⟩, base.nominals.map (Prod.map id left),
     base.anons.map (Prod.map id left), data⟩
+
+private def groupListChunks {α : Type} (chunkSize : Nat) (xs : List α) : List (List α) :=
+  let arr := xs.toArray
+  if chunkSize == 0 || arr.isEmpty then []
+  else
+    (List.range ((arr.size + chunkSize - 1) / chunkSize)).map fun i =>
+      (arr.extract (i * chunkSize) ((i + 1) * chunkSize)).toList
+
+/-- Simplify a concept evaluated on a disjoint `right` component of `appendModelComponent base comp`,
+    where every named/anonymous individual lives in `base` (`left` worlds), so `.nom _ true` is
+    always false (`.bottom`) and `.nom _ false` is always true (`.top`). -/
+def simplifyNomRight : Concept → Concept
+  | .nom _ true => .bottom
+  | .nom _ false => .top
+  | .conj a b =>
+    let a' := simplifyNomRight a
+    let b' := simplifyNomRight b
+    if a' == .bottom || b' == .bottom then .bottom
+    else if a' == .top then b'
+    else if b' == .top then a'
+    else .conj a' b'
+  | .disj a b =>
+    let a' := simplifyNomRight a
+    let b' := simplifyNomRight b
+    if a' == .top || b' == .top then .top
+    else if a' == .bottom then b'
+    else if b' == .bottom then a'
+    else .disj a' b'
+  | .some r b =>
+    let b' := simplifyNomRight b
+    if b' == .bottom then .bottom else .some r b'
+  | .all r b =>
+    let b' := simplifyNomRight b
+    if b' == .top then .top else .all r b'
+  | .min (n + 1) r b =>
+    let b' := simplifyNomRight b
+    if b' == .bottom then .bottom else .min (n + 1) r b'
+  | .max n r b =>
+    let b' := simplifyNomRight b
+    if b' == .bottom then .top else .max n r b'
+  | c => c
+
+/-- Extract the non-vacuous nominal-bearing TBox checks that must hold on any disjoint
+    `right` component appended onto a verified `base` model of `p`. -/
+def extractNomRightChecks (p : Problem) : Option (List (Concept × Concept)) :=
+  if !p.keys.isEmpty || !canHarvestStandardModel p then none
+  else
+    let hasTopObj : Concept → Bool := fun c =>
+      let rec go : Concept → Bool
+        | .some r b | .all r b | .min _ r b | .max _ r b => r.1 == topObjectProperty || go b
+        | .self r _ => r.1 == topObjectProperty
+        | .conj a b | .disj a b => go a || go b
+        | _ => false
+      go c
+    if p.tbox.any (fun q => hasTopObj q.sub || hasTopObj q.sup) ||
+        p.rules.any (fun (r, s) => r.1 == topObjectProperty || s.1 == topObjectProperty) then
+      none
+    else
+      let checks := p.tbox.filterMap fun q =>
+        if q.sub.individuals.isEmpty && q.sup.individuals.isEmpty then none
+        else
+          let sub' := simplifyNomRight q.sub
+          let sup' := simplifyNomRight q.sup
+          if sub' == .bottom || sup' == .top then none
+          else some (sub', sup')
+      some checks
+
+/-- Verify that every non-vacuous nominal-bearing TBox GCI of `p` holds on every world
+    of a disjoint `component` (in O(|checks| × |component.worlds|) instead of re-checking `base`). -/
+def checkNomRightOnComponent (checks : List (Concept × Concept)) (comp : SROIQDModel) : Bool :=
+  if checks.isEmpty then true
+  else
+    let worlds := comp.graph.worlds
+    checks.all fun (sub', sup') =>
+      worlds.all fun w =>
+        match eval? comp w sub' with
+        | some true => eval? comp w sup' == some true
+        | some false => true
+        | none => false
+
+/-- Verify TBox components appended onto a base ABox model. When `nomRightChecks?` is
+    available (no `HasKey`, no `owl:topObjectProperty`), checks only the non-vacuous
+    nominal GCIs on each component's worlds in O(|comp.worlds|); otherwise falls back
+    to merged `checkModel p (appendModelComponent base comp)`. -/
+def checkComponentBatches (p : Problem) (base : SROIQDModel) (comps : List SROIQDModel)
+    (numWorkers : Nat) : List SROIQDModel :=
+  match extractNomRightChecks p with
+  | some checks =>
+    comps.filter (checkNomRightOnComponent checks)
+  | none =>
+    let chunks := groupListChunks 4 comps
+    (mapIndependent numWorkers (fun grp =>
+      let combined := grp.foldl appendModelComponent base
+      if checkModel p combined then [combined]
+      else grp.filterMap fun c =>
+        let m := appendModelComponent base c
+        if checkModel p m then some m else none) chunks).flatten
+
+/-- Context for fast disjoint-component TBox reasoning on large ABox ontologies. -/
+structure TBoxFastCtx where
+  tboxOnt : Ontology
+  tboxIdx : LocalityIndex
+  nomChecks : List (Concept × Concept)
+
+private def exprHasIndiv : ClassExpr → Bool
+  | .oneOf _ | .objectValue _ _ => true
+  | .complement c | .objectSome _ c | .objectAll _ c | .objectMin _ _ c | .objectMax _ _ c | .objectExact _ _ c => exprHasIndiv c
+  | .intersection a b | .union a b => exprHasIndiv a || exprHasIndiv b
+  | _ => false
+
+private def isNomOrKeyAxiomFast : Axiom → Bool
+  | .subClassOf a b => exprHasIndiv a || exprHasIndiv b
+  | .equivalentClasses cs | .disjointClasses cs | .disjointUnion _ cs => cs.any exprHasIndiv
+  | .objectPropertyDomain _ c | .objectPropertyRange _ c | .dataPropertyDomain _ c => exprHasIndiv c
+  | .hasKey .. => true
+  | _ => false
+
+private def isABoxAxiomFast : Axiom → Bool
+  | .classAssertion .. | .objectAssertion .. | .negativeObjectAssertion ..
+  | .dataAssertion .. | .negativeDataAssertion .. | .sameIndividuals .. | .differentIndividuals .. => true
+  | _ => false
+
+def buildTBoxFastCtx (o : Ontology) (p : Problem) : Option TBoxFastCtx := do
+  if p.classAssertions.length < 64 then none
+  let checks ← extractNomRightChecks p
+  let tboxOnt := o.filter fun ax => !isABoxAxiomFast ax && !isNomOrKeyAxiomFast ax
+  if tboxOnt.length + 64 > o.length then none
+  return { tboxOnt := tboxOnt, tboxIdx := LocalityIndex.build tboxOnt, nomChecks := checks }
+
+/-- Try to decide `o ⊨ SubObjectPropertyOf(r, s)` via the small ⊥-local module of `tboxOnlyOnt ⊆ o`:
+    - UNSAT on `modT` proves `o ⊨ r ⊑ s` by monotonicity (`modT ⊆ o`).
+    - SAT with a verified model `comp` passing `checkNomRightOnComponent` proves `o ⊭ r ⊑ s`
+      via disjoint union `I_base ⊕ I_⊥(comp) ⊨ o` (fresh witness individuals live in `comp`). -/
+def tryDecideSubObjPropViaTBox (tctx : TBoxFastCtx) (r s : IRI) : Option Bool := do
+  let ax := Axiom.subObjectProperty (.named r) (.named s)
+  let (modT, _) := extractBotModuleWithIndex tctx.tboxIdx tctx.tboxOnt (axiomSig ax)
+  let freshA := "urn:sabrina:subprop_a"
+  let freshB := "urn:sabrina:subprop_b"
+  let cntOnt := Axiom.objectAssertion (.named r) (.named freshA) (.named freshB) ::
+    Axiom.negativeObjectAssertion (.named s) (.named freshA) (.named freshB) :: modT
+  let (_, pCnt) ← normalizeWithDefs cntOnt
+  if !canHarvestStandardModel pCnt || !checkTableauRolesOkFast pCnt then none
+  else
+    let limits := Limits.forProblem pCnt
+    match propose pCnt limits with
+    | some (.refutation d) =>
+      if pCnt.checkSimple && checkEvidence pCnt limits.worlds (.refutation d) then some true
+      else none
+    | some (.model comp) =>
+      if pCnt.checkSimple && checkModel pCnt comp && checkNomRightOnComponent tctx.nomChecks comp then
+        some false
+      else none
+    | none => none
+
+/-- Try to decide `o ⊨ a ⊑ b` using the small ⊥-local module of `tboxOnlyOnt ⊆ o`:
+    - UNSAT on `modT` transfers to `o` immediately by monotonicity (`modT ⊆ o`).
+    - SAT with a verified model `comp` of `modT` that passes `checkNomRightOnComponent`
+      transfers to `o` via disjoint union `I_base ⊕ I_⊥(comp) ⊨ o`. -/
+private def tryDecideSubViaTBox (tctx : TBoxFastCtx) (a b : IRI) :
+    Option (Bool × Option (SROIQDModel × List IRI)) := do
+  let (modT, sigT) := extractBotModuleWithIndex tctx.tboxIdx tctx.tboxOnt
+    (axiomSig (.subClassOf (.named a) (.named b)))
+  let (defs, pT) ← normalizeWithDefs modT
+  match queryToInclusions defs (.subClassOf (.named a) (.named b)) with
+  | some [q] =>
+    let cnt := counterProblem pT q
+    if !canHarvestStandardModel cnt || !checkTableauRolesOkFast cnt then none
+    else
+      let limits := Limits.forProblem cnt
+      match propose cnt limits with
+      | some (.refutation d) =>
+        if cnt.checkSimple && checkEvidence cnt limits.worlds (.refutation d) then
+          some (true, none)
+        else none
+      | some (.model comp) =>
+        if cnt.checkSimple && checkModel cnt comp && checkNomRightOnComponent tctx.nomChecks comp then
+          some (false, some (comp, sigT.cls))
+        else none
+      | none => none
+  | _ => none
 
 /-- Refutations of the relaxed problem transfer to the original problem. A model
     can only settle the query after the original problem checks the combined graph. -/
@@ -335,22 +515,34 @@ private def KPState.isPairDecided (st : KPState) (a b : IRI) : Bool :=
   | none => false
 
 private def queryKPSat (idx : LocalityIndex) (o : Ontology) (namedClassSet : Std.HashSet IRI)
-    (c : IRI) : Option (Bool × List (IRI × List IRI)) :=
-  let (mod, sig) := extractBotModuleWithIndex idx o (axiomSig (.subClassOf (.named c) (.named nothing)))
-  (decideSubWithModel mod c nothing).map fun (isUnsat, m?) =>
-    if isUnsat then (true, [])
-    else match m? with
-      | some m => (false, summarizeModel m sig.cls namedClassSet)
-      | none => (false, [])
+    (baseModel? : Option SROIQDModel) (tctx? : Option TBoxFastCtx) (c : IRI) :
+    Option (Bool × List (IRI × List IRI)) :=
+  match tctx?.bind (fun tctx => tryDecideSubViaTBox tctx c nothing) with
+  | some (true, _) => some (true, [])
+  | some (false, some (comp, sigCls)) => some (false, summarizeModel comp sigCls namedClassSet)
+  | some (false, none) => some (false, [])
+  | none =>
+    let (mod, sig) := extractBotModuleWithIndex idx o (axiomSig (.subClassOf (.named c) (.named nothing)))
+    (decideSubWithModel mod c nothing baseModel?).map fun (isUnsat, m?) =>
+      if isUnsat then (true, [])
+      else match m? with
+        | some m => (false, summarizeModel m sig.cls namedClassSet)
+        | none => (false, [])
 
 private def queryKPSub (idx : LocalityIndex) (o : Ontology) (namedClassSet : Std.HashSet IRI)
-    (baseModel? : Option SROIQDModel) (a b : IRI) : Option (Bool × List (IRI × List IRI)) :=
-  let (mod, sig) := extractBotModuleWithIndex idx o (axiomSig (.subClassOf (.named a) (.named b)))
-  (decideSubWithModel mod a b baseModel?).map fun (isSub, m?) =>
-    if isSub then (true, [])
-    else match m? with
-      | some m => (false, summarizeModel m sig.cls namedClassSet)
-      | none => (false, [])
+    (baseModel? : Option SROIQDModel) (tctx? : Option TBoxFastCtx) (a b : IRI) :
+    Option (Bool × List (IRI × List IRI)) :=
+  match tctx?.bind (fun tctx => tryDecideSubViaTBox tctx a b) with
+  | some (true, _) => some (true, [])
+  | some (false, some (comp, sigCls)) => some (false, summarizeModel comp sigCls namedClassSet)
+  | some (false, none) => some (false, [])
+  | none =>
+    let (mod, sig) := extractBotModuleWithIndex idx o (axiomSig (.subClassOf (.named a) (.named b)))
+    (decideSubWithModel mod a b baseModel?).map fun (isSub, m?) =>
+      if isSub then (true, [])
+      else match m? with
+        | some m => (false, summarizeModel m sig.cls namedClassSet)
+        | none => (false, [])
 
 private def sweepKPSat (satQuery : IRI → Option (Bool × List (IRI × List IRI))) :
     List IRI → KPState → Option KPState
@@ -577,10 +769,14 @@ private def orderLeavesFirst (namedClasses : List IRI) (st : KPState) : List IRI
   let sorted := arr.qsort fun a b => a.1 < b.1
   sorted.toList.map Prod.snd
 
-/-- Try to cover many classes in each checked model. A failed batch contributes
-    no facts. The ordinary satisfiability sweep handles every uncovered class. -/
+/-- Try to cover many classes in each checked model. When a verified base ABox model is
+    available on a larger ABox, build lightweight TBox-only components via
+    `counterWithoutIndividuals` and kernel-verify them appended onto the base model.
+    A failed batch contributes no facts; the ordinary satisfiability sweep handles every
+    uncovered class. -/
 private def seedKPFromBatchModels (o : Ontology) (namedClasses : List IRI)
-    (namedClassSet : Std.HashSet IRI) (numWorkers : Nat) (order : List IRI) (st : KPState) : KPState :=
+    (namedClassSet : Std.HashSet IRI) (numWorkers : Nat) (order : List IRI)
+    (baseModel? : Option SROIQDModel) (st : KPState) : KPState :=
   let gaps := (order.filter fun c => !st.satSet.contains c && !st.unsatSet.contains c).toArray
   let batchSize := 64
   if gaps.size < batchSize then st
@@ -591,12 +787,31 @@ private def seedKPFromBatchModels (o : Ontology) (namedClasses : List IRI)
       if p.root != .top || !canHarvestStandardModel p || !checkTableauRolesOkFast p then st
       else
         let batches := List.range ((gaps.size + batchSize - 1) / batchSize)
-        let summaries := mapIndependent numWorkers (fun i =>
-          let seed := (gaps.extract (i * batchSize) ((i + 1) * batchSize)).toList
-          match proposeSeededCanonicalModel p (seed.map Concept.atom) with
-          | some m => summarizeModel m.val namedClasses namedClassSet
-          | none => []) batches
-        summaries.foldl (fun acc summary => acc.mergeSummary summary) st
+        match baseModel? with
+        | some base =>
+          if p.classAssertions.length ≥ 64 then
+            let core := counterWithoutIndividuals p
+            let comps := (mapIndependent numWorkers (fun i =>
+              let seed := (gaps.extract (i * batchSize) ((i + 1) * batchSize)).toList
+              (proposeSeededCanonicalModel core (seed.map Concept.atom)).map Subtype.val) batches).filterMap id
+            let verified := checkComponentBatches p base comps numWorkers
+            let summaries := mapIndependent numWorkers (fun m =>
+              summarizeModel m namedClasses namedClassSet) verified
+            summaries.foldl (fun acc summary => acc.mergeSummary summary) st
+          else
+            let summaries := mapIndependent numWorkers (fun i =>
+              let seed := (gaps.extract (i * batchSize) ((i + 1) * batchSize)).toList
+              match proposeSeededCanonicalModel p (seed.map Concept.atom) with
+              | some m => summarizeModel m.val namedClasses namedClassSet
+              | none => []) batches
+            summaries.foldl (fun acc summary => acc.mergeSummary summary) st
+        | none =>
+          let summaries := mapIndependent numWorkers (fun i =>
+            let seed := (gaps.extract (i * batchSize) ((i + 1) * batchSize)).toList
+            match proposeSeededCanonicalModel p (seed.map Concept.atom) with
+            | some m => summarizeModel m.val namedClasses namedClassSet
+            | none => []) batches
+          summaries.foldl (fun acc summary => acc.mergeSummary summary) st
 
 /-- Collect the exact remaining `(a, b)` candidates where `b ∈ P(a) \ K(a)` across all
     satisfiable named classes. -/
@@ -635,12 +850,15 @@ private def classifyEnhancedRuntimeCore (o : Ontology) (namedClasses : List IRI)
         | some m0 => st0.mergeSummary (summarizeModel m0 namedClasses namedClassSet)
         | none => st0
       let satOrder := orderLeavesFirst namedClasses stInit
-      let stSeeded := seedKPFromBatchModels o namedClasses namedClassSet numWorkers satOrder stInit
+      let tctx? : Option TBoxFastCtx := match initModel? with
+        | some _ => (normalizeWithDefs o).bind fun (_, p) => buildTBoxFastCtx o p
+        | none => none
+      let stSeeded := seedKPFromBatchModels o namedClasses namedClassSet numWorkers satOrder initModel? stInit
       (sweepKPSatParallel numWorkers
-          (queryKPSat idx o namedClassSet) satOrder stSeeded).bind fun st1 =>
+          (queryKPSat idx o namedClassSet initModel? tctx?) satOrder stSeeded).bind fun st1 =>
         let cands := collectKPCandidates namedClasses st1
         (verifyKPPairsParallel numWorkers
-            (queryKPSub idx o namedClassSet initModel?) cands st1).map fun st2 =>
+            (queryKPSub idx o namedClassSet initModel? tctx?) cands st1).map fun st2 =>
           buildHierarchyFromKP namedClasses st2
 
 private def collectOutputClasses (o : Ontology) (decls : List FunctionalSyntax.EntityDecl)
@@ -698,7 +916,421 @@ theorem classifyOntologyFastRuntime_nonEL_workers_eq (o : Ontology)
       classifyOntologyFastRuntime o decls 1 auxiliaryClass? := by
   simp only [classifyOntologyFastRuntime, classifyOntologyFastWithModelRuntime,
     classifyEnhancedRuntimeCore, beq_iff_eq, h, ↓reduceIte,
-    seedKPFromBatchModels, mapIndependent_eq, sweepKPSatParallel_eq, verifyKPPairsParallel_eq]
+    seedKPFromBatchModels, checkComponentBatches, mapIndependent_eq,
+    sweepKPSatParallel_eq, verifyKPPairsParallel_eq]
+
+/-- Result of deterministic monotone positive ABox forward chaining:
+    every type, object edge, and data value recorded is provably entailed by `o`. -/
+structure PositiveABoxClosure where
+  types : Std.HashMap IRI (Std.HashSet IRI) := {}
+  edges : Std.HashSet (IRI × IRI × IRI) := {}
+  data : Std.HashMap (IRI × IRI) (List Datatypes.Value) := {}
+
+private def walkABoxChainTargets (outAdj inAdj : Std.HashMap (IRI × IRI) (List IRI))
+    (x : IRI) : List Sabrina.ALC.OrientedRole → List IRI
+  | [] => [x]
+  | r :: rs =>
+    (if r.2 then inAdj.getD (r.1, x) [] else outAdj.getD (r.1, x) []).flatMap fun y =>
+      walkABoxChainTargets outAdj inAdj y rs
+
+private def hasPosConclusion : Concept → Bool
+  | .lit _ true | .all .. | .self _ true | .dataValue _ _ true => true
+  | .conj a b => hasPosConclusion a || hasPosConclusion b
+  | _ => false
+
+private def collectPosLeaves : Concept → List Concept
+  | .conj a b => collectPosLeaves a ++ collectPosLeaves b
+  | c => [c]
+
+private partial def posHoldsABox
+    (types : Std.HashMap IRI (Std.HashSet IRI))
+    (outAdj inAdj : Std.HashMap (IRI × IRI) (List IRI))
+    (edgeSet : Std.HashSet (IRI × IRI × IRI))
+    (dataMap : Std.HashMap (IRI × IRI) (List Datatypes.Value))
+    (a : IRI) : Concept → Bool
+  | .top => true
+  | .lit cls true => (types.getD a {}).contains cls
+  | .nom (.named j) true => j == a
+  | .self r true => edgeSet.contains (r.1, a, a)
+  | .conj c1 c2 =>
+    posHoldsABox types outAdj inAdj edgeSet dataMap a c1 &&
+    posHoldsABox types outAdj inAdj edgeSet dataMap a c2
+  | .disj c1 c2 =>
+    posHoldsABox types outAdj inAdj edgeSet dataMap a c1 ||
+    posHoldsABox types outAdj inAdj edgeSet dataMap a c2
+  | .some r body =>
+    (if r.2 then inAdj.getD (r.1, a) [] else outAdj.getD (r.1, a) []).any fun b =>
+      posHoldsABox types outAdj inAdj edgeSet dataMap b body
+  | .min 0 _ _ => true
+  | .min 1 r body =>
+    (if r.2 then inAdj.getD (r.1, a) [] else outAdj.getD (r.1, a) []).any fun b =>
+      posHoldsABox types outAdj inAdj edgeSet dataMap b body
+  | .dataSome dp dr =>
+    (dataMap.getD (dp, a) []).any fun v => SROIQD.Termination.evalDataRange dr v
+  | .dataMin 0 _ _ => true
+  | .dataMin 1 dp dr =>
+    (dataMap.getD (dp, a) []).any fun v => SROIQD.Termination.evalDataRange dr v
+  | .dataValue dp l true =>
+    match Datatypes.decodeLiteral l with
+    | some v => (dataMap.getD (dp, a) []).contains v
+    | none => false
+  | _ => false
+
+/-- Deterministic monotone positive ABox closure over `p` and `superMap`:
+    propagates asserted types, superclasses, object-property hierarchy/inverses/chains/reflexivity,
+    data-property hierarchy, domains, ranges, universal restrictions along proved edges,
+    defined-class equivalences, and anchored SWRL rules with zero closed-world assumptions. -/
+def computePositiveABoxClosure (p : Problem) (superMap : Std.HashMap IRI (List IRI))
+    (inds : List IRI) : PositiveABoxClosure := Id.run do
+  let mut types : Std.HashMap IRI (Std.HashSet IRI) := {}
+  let mut classInds : Std.HashMap IRI (List IRI) := {}
+  let mut allOnInd : Std.HashMap (Sabrina.ALC.OrientedRole × IRI) (List Concept) := {}
+  let mut edgeSet : Std.HashSet (IRI × IRI × IRI) := {}
+  let mut outAdj : Std.HashMap (IRI × IRI) (List IRI) := {}
+  let mut inAdj : Std.HashMap (IRI × IRI) (List IRI) := {}
+  let mut byRole : Std.HashMap IRI (List (IRI × IRI)) := {}
+  let mut roleSources : Std.HashMap Sabrina.ALC.OrientedRole (List IRI) := {}
+  let mut roleSourceSet : Std.HashSet (Sabrina.ALC.OrientedRole × IRI) := {}
+  let mut dataMap : Std.HashMap (IRI × IRI) (List Datatypes.Value) := {}
+  let mut dataSources : Std.HashMap IRI (List IRI) := {}
+  let mut dataSourceSet : Std.HashSet (IRI × IRI) := {}
+  let mut pending : Array (IRI × Concept) := #[]
+  let mut edgesChanged := false
+  let mut dataChanged := false
+  let mut factsChanged := false
+  -- Pre-index positive-conclusion GCIs by LHS anchor
+  let mut topAllByRole : Std.HashMap Sabrina.ALC.OrientedRole (List Concept) := {}
+  let mut topOtherGCIs : Array Concept := #[]
+  let mut classGCIs : Std.HashMap IRI (List Inclusion) := {}
+  let mut roleGCIs : Std.HashMap Sabrina.ALC.OrientedRole (List Inclusion) := {}
+  let mut nomGCIs : Std.HashMap IRI (List Inclusion) := {}
+  let mut dataGCIs : Std.HashMap IRI (List Inclusion) := {}
+  let mut unanchoredGCIs : Array Inclusion := #[]
+  for q in p.tbox do
+    if !hasPosConclusion q.sup then continue
+    if q.sub == .top then
+      for leaf in collectPosLeaves q.sup do
+        match leaf with
+        | .all r body =>
+          if hasPosConclusion body then
+            topAllByRole := topAllByRole.insert r (body :: topAllByRole.getD r [])
+        | c =>
+          if hasPosConclusion c then topOtherGCIs := topOtherGCIs.push c
+    else
+      let leaves := collectPosLeaves q.sub
+      let mut anchored := false
+      for l in leaves do
+        if !anchored then
+          match l with
+          | .lit cls true =>
+            classGCIs := classGCIs.insert cls (q :: classGCIs.getD cls [])
+            anchored := true
+          | _ => pure ()
+      if !anchored then
+        for l in leaves do
+          if !anchored then
+            match l with
+            | .some r _ | .min 1 r _ =>
+              roleGCIs := roleGCIs.insert r (q :: roleGCIs.getD r [])
+              anchored := true
+            | .nom (.named j) true =>
+              nomGCIs := nomGCIs.insert j (q :: nomGCIs.getD j [])
+              anchored := true
+            | .dataSome dp _ | .dataMin 1 dp _ | .dataValue dp _ true =>
+              dataGCIs := dataGCIs.insert dp (q :: dataGCIs.getD dp [])
+              anchored := true
+            | _ => pure ()
+      if !anchored then
+        unanchoredGCIs := unanchoredGCIs.push q
+  -- Seed initial facts from p
+  for (ia, c) in p.classAssertions do
+    if let .named a := ia then
+      pending := pending.push (a, c)
+  for c in topOtherGCIs do
+    for a in inds do
+      pending := pending.push (a, c)
+  let addEdge (es : Std.HashSet (IRI × IRI × IRI))
+      (oa ia : Std.HashMap (IRI × IRI) (List IRI))
+      (br : Std.HashMap IRI (List (IRI × IRI)))
+      (rs : Std.HashMap Sabrina.ALC.OrientedRole (List IRI))
+      (rss : Std.HashSet (Sabrina.ALC.OrientedRole × IRI))
+      (r a b : IRI) :=
+    if es.contains (r, a, b) then (es, oa, ia, br, rs, rss, false)
+    else
+      let (rs1, rss1) :=
+        if rss.contains ((r, false), a) then (rs, rss)
+        else (rs.insert (r, false) (a :: rs.getD (r, false) []), rss.insert ((r, false), a))
+      let (rs2, rss2) :=
+        if rss1.contains ((r, true), b) then (rs1, rss1)
+        else (rs1.insert (r, true) (b :: rs1.getD (r, true) []), rss1.insert ((r, true), b))
+      (es.insert (r, a, b),
+       oa.insert (r, a) (b :: oa.getD (r, a) []),
+       ia.insert (r, b) (a :: ia.getD (r, b) []),
+       br.insert r ((a, b) :: br.getD r []),
+       rs2, rss2, true)
+  for (r, ia, ib) in p.objAssertions do
+    if let (.named a, .named b) := (ia, ib) then
+      let (es', oa', ia', br', rs', rss', ch) := addEdge edgeSet outAdj inAdj byRole roleSources roleSourceSet r a b
+      edgeSet := es'; outAdj := oa'; inAdj := ia'; byRole := br'; roleSources := rs'; roleSourceSet := rss'
+      if ch then edgesChanged := true
+  for r in p.chars.reflexive do
+    for a in inds do
+      let (es', oa', ia', br', rs', rss', ch) := addEdge edgeSet outAdj inAdj byRole roleSources roleSourceSet r a a
+      edgeSet := es'; outAdj := oa'; inAdj := ia'; byRole := br'; roleSources := rs'; roleSourceSet := rss'
+      if ch then edgesChanged := true
+  for (dp, ia, lit) in p.dataAssertions do
+    if let (.named a, some v) := (ia, Datatypes.decodeLiteral lit) then
+      let cur := dataMap.getD (dp, a) []
+      if !cur.contains v then
+        dataMap := dataMap.insert (dp, a) (v :: cur)
+        dataChanged := true
+        if !dataSourceSet.contains (dp, a) then
+          dataSourceSet := dataSourceSet.insert (dp, a)
+          dataSources := dataSources.insert dp (a :: dataSources.getD dp [])
+  -- Close edges and fire topAllGCIs / allOnInd on newly added edges
+  for _iter in [:24] do
+    -- 1. Close edges under rules and chains
+    if edgesChanged then
+      edgesChanged := false
+      let mut eLoop := true
+      let mut eIter := 0
+      while eLoop && eIter < 16 do
+        eLoop := false
+        eIter := eIter + 1
+        let mut newEdges : Array (IRI × IRI × IRI) := #[]
+        for (r, t) in p.rules do
+          for (u, v) in byRole.getD r.1 [] do
+            let (x, y) := if r.2 then (v, u) else (u, v)
+            let (rn, a, b) := if t.2 then (t.1, y, x) else (t.1, x, y)
+            if !edgeSet.contains (rn, a, b) then newEdges := newEdges.push (rn, a, b)
+        for c in p.chains do
+          match c.body with
+          | [] =>
+            for a in inds do
+              if !edgeSet.contains (c.head, a, a) then newEdges := newEdges.push (c.head, a, a)
+          | r0 :: rs =>
+            for (u, v) in byRole.getD r0.1 [] do
+              let (x, mid) := if r0.2 then (v, u) else (u, v)
+              for y in walkABoxChainTargets outAdj inAdj mid rs do
+                if !edgeSet.contains (c.head, x, y) then newEdges := newEdges.push (c.head, x, y)
+        for (rn, a, b) in newEdges do
+          let (es', oa', ia', br', rs', rss', ch) := addEdge edgeSet outAdj inAdj byRole roleSources roleSourceSet rn a b
+          edgeSet := es'; outAdj := oa'; inAdj := ia'; byRole := br'; roleSources := rs'; roleSourceSet := rss'
+          if ch then
+            eLoop := true
+            factsChanged := true
+      -- Fire topAllByRole and allOnInd across edges
+      for (r, bodies) in topAllByRole do
+        for (u, v) in byRole.getD r.1 [] do
+          let target := if r.2 then u else v
+          for body in bodies do
+            pending := pending.push (target, body)
+      for ((r, a), bodies) in allOnInd do
+        let nbs := if r.2 then inAdj.getD (r.1, a) [] else outAdj.getD (r.1, a) []
+        for b in nbs do
+          for body in bodies do
+            pending := pending.push (b, body)
+    -- 2. Close data under p.subData
+    if dataChanged then
+      dataChanged := false
+      let mut dLoop := true
+      let mut dIter := 0
+      while dLoop && dIter < p.subData.length + 2 do
+        dLoop := false
+        dIter := dIter + 1
+        let mut addD : Array (IRI × IRI × Datatypes.Value) := #[]
+        for (r, t) in p.subData do
+          for a in dataSources.getD r [] do
+            let curT := dataMap.getD (t, a) []
+            for v in dataMap.getD (r, a) [] do
+              if !curT.contains v then
+                addD := addD.push (t, a, v)
+        for (t, a, v) in addD do
+          let curT := dataMap.getD (t, a) []
+          if !curT.contains v then
+            dataMap := dataMap.insert (t, a) (v :: curT)
+            if !dataSourceSet.contains (t, a) then
+              dataSourceSet := dataSourceSet.insert (t, a)
+              dataSources := dataSources.insert t (a :: dataSources.getD t [])
+            dLoop := true
+            factsChanged := true
+    -- 3. Drain pending positive conclusions
+    let mut pIdx := 0
+    while h : pIdx < pending.size do
+      let (a, c) := pending[pIdx]
+      pIdx := pIdx + 1
+      for leaf in collectPosLeaves c do
+        match leaf with
+        | .lit cls true =>
+          let mut ta := types.getD a {}
+          if !ta.contains cls then
+            ta := ta.insert cls
+            classInds := classInds.insert cls (a :: classInds.getD cls [])
+            factsChanged := true
+            for sup in superMap.getD cls [] do
+              if !ta.contains sup then
+                ta := ta.insert sup
+                classInds := classInds.insert sup (a :: classInds.getD sup [])
+            types := types.insert a ta
+        | .all r body =>
+          let curBodies := allOnInd.getD (r, a) []
+          if hasPosConclusion body && !curBodies.contains body then
+            allOnInd := allOnInd.insert (r, a) (body :: curBodies)
+            let nbs := if r.2 then inAdj.getD (r.1, a) [] else outAdj.getD (r.1, a) []
+            for b in nbs do
+              pending := pending.push (b, body)
+        | .self r true =>
+          let (es', oa', ia', br', rs', rss', ch) := addEdge edgeSet outAdj inAdj byRole roleSources roleSourceSet r.1 a a
+          edgeSet := es'; outAdj := oa'; inAdj := ia'; byRole := br'; roleSources := rs'; roleSourceSet := rss'
+          if ch then edgesChanged := true; factsChanged := true
+        | .dataValue dp l true =>
+          if let some v := Datatypes.decodeLiteral l then
+            let cur := dataMap.getD (dp, a) []
+            if !cur.contains v then
+              dataMap := dataMap.insert (dp, a) (v :: cur)
+              if !dataSourceSet.contains (dp, a) then
+                dataSourceSet := dataSourceSet.insert (dp, a)
+                dataSources := dataSources.insert dp (a :: dataSources.getD dp [])
+              dataChanged := true; factsChanged := true
+        | _ => pure ()
+    pending := #[]
+    if edgesChanged || dataChanged then continue
+    -- 4. Fire anchored positive-LHS GCIs
+    let mut firedGCI := false
+    for (cls, cands) in classInds do
+      for q in classGCIs.getD cls [] do
+        for a in cands do
+          if posHoldsABox types outAdj inAdj edgeSet dataMap a q.sub then
+            let already := match q.sup with
+              | .lit supC true => (types.getD a {}).contains supC
+              | _ => false
+            if !already then
+              pending := pending.push (a, q.sup)
+              firedGCI := true
+    for (r, cands) in roleSources do
+      for q in roleGCIs.getD r [] do
+        for a in cands do
+          if posHoldsABox types outAdj inAdj edgeSet dataMap a q.sub then
+            let already := match q.sup with
+              | .lit supC true => (types.getD a {}).contains supC
+              | _ => false
+            if !already then
+              pending := pending.push (a, q.sup)
+              firedGCI := true
+    for (j, qs) in nomGCIs do
+      for q in qs do
+        if posHoldsABox types outAdj inAdj edgeSet dataMap j q.sub then
+          let already := match q.sup with
+            | .lit supC true => (types.getD j {}).contains supC
+            | _ => false
+          if !already then
+            pending := pending.push (j, q.sup)
+            firedGCI := true
+    for (dp, cands) in dataSources do
+      for q in dataGCIs.getD dp [] do
+        for a in cands do
+          if posHoldsABox types outAdj inAdj edgeSet dataMap a q.sub then
+            let already := match q.sup with
+              | .lit supC true => (types.getD a {}).contains supC
+              | _ => false
+            if !already then
+              pending := pending.push (a, q.sup)
+              firedGCI := true
+    for q in unanchoredGCIs do
+      for a in inds do
+        if posHoldsABox types outAdj inAdj edgeSet dataMap a q.sub then
+          let already := match q.sup with
+            | .lit supC true => (types.getD a {}).contains supC
+            | _ => false
+          if !already then
+            pending := pending.push (a, q.sup)
+            firedGCI := true
+    if !firedGCI && !factsChanged then break
+    factsChanged := false
+  return { types := types, edges := edgeSet, data := dataMap }
+
+/-- Pre-indexed ABox ego-neighborhood extractor (`o_ego ⊆ o`):
+    any entailment proved on `o_ego` transfers to `o` by monotonicity of OWL 2 Direct Semantics. -/
+structure ABoxEgoIndex where
+  tboxAxioms : List Axiom
+  aboxAxioms : Array (Axiom × List IRI)
+  aboxByInd : Std.HashMap IRI (List Nat)
+  indAdj : Std.HashMap IRI (List IRI)
+
+private def isPureABoxAxiom : Axiom → Option (List IRI)
+  | .classAssertion _ (.named a) => some [a]
+  | .objectAssertion _ (.named a) (.named b) | .negativeObjectAssertion _ (.named a) (.named b) => some [a, b]
+  | .dataAssertion _ (.named a) _ | .negativeDataAssertion _ (.named a) _ => some [a]
+  | .sameIndividuals inds =>
+    if inds.all (fun | .named _ => true | _ => false) then
+      some (inds.filterMap fun | .named a => some a | _ => none)
+    else none
+  | .differentIndividuals inds =>
+    if inds.all (fun | .named _ => true | _ => false) then
+      some (inds.filterMap fun | .named a => some a | _ => none)
+    else none
+  | _ => none
+
+def ABoxEgoIndex.build (o : Ontology) : ABoxEgoIndex := Id.run do
+  let mut tbox : Array Axiom := #[]
+  let mut abox : Array (Axiom × List IRI) := #[]
+  let mut byInd : Std.HashMap IRI (List Nat) := {}
+  let mut adj : Std.HashMap IRI (List IRI) := {}
+  for ax in o do
+    match isPureABoxAxiom ax with
+    | none => tbox := tbox.push ax
+    | some inds =>
+      let idx := abox.size
+      abox := abox.push (ax, inds)
+      for a in inds do
+        byInd := byInd.insert a (idx :: byInd.getD a [])
+      match ax with
+      | .objectAssertion _ (.named a) (.named b)
+      | .negativeObjectAssertion _ (.named a) (.named b) =>
+        if a != b then
+          adj := adj.insert a (b :: adj.getD a [])
+          adj := adj.insert b (a :: adj.getD b [])
+      | .sameIndividuals _ =>
+        for a in inds do
+          for b in inds do
+            if a != b then adj := adj.insert a (b :: adj.getD a [])
+      | _ => pure ()
+  return { tboxAxioms := tbox.toList, aboxAxioms := abox, aboxByInd := byInd, indAdj := adj }
+
+/-- Extract a sound subset `o_ego ⊆ o` keeping the full TBox/RBox plus ABox assertions
+    within a bounded 2-hop ego-neighborhood of `seedInds` (skipping expansion through
+    high-degree hubs with > 16 neighbors so the subset stays small). -/
+def ABoxEgoIndex.egoOntology (eidx : ABoxEgoIndex) (seedInds : List IRI) : Ontology := Id.run do
+  let mut ego : Std.HashSet IRI := {}
+  let mut hop1 : Array IRI := #[]
+  for s in seedInds do
+    if !ego.contains s then
+      ego := ego.insert s
+      hop1 := hop1.push s
+  let mut hop2 : Array IRI := #[]
+  for u in hop1 do
+    let nbs := eidx.indAdj.getD u []
+    if nbs.length ≤ 32 then
+      for v in nbs do
+        if !ego.contains v then
+          ego := ego.insert v
+          hop2 := hop2.push v
+  for u in hop2 do
+    let nbs := eidx.indAdj.getD u []
+    if nbs.length ≤ 16 then
+      for v in nbs do
+        if !ego.contains v then
+          ego := ego.insert v
+  let mut seenAx : Std.HashSet Nat := {}
+  let mut localAbox : Array Axiom := #[]
+  for a in ego do
+    for idx in eidx.aboxByInd.getD a [] do
+      if !seenAx.contains idx then
+        seenAx := seenAx.insert idx
+        if let some (ax, inds) := eidx.aboxAxioms[idx]? then
+          if inds.all (ego.contains ·) then
+            localAbox := localAbox.push ax
+  return eidx.tboxAxioms ++ localAbox.toList
 
 /-- Fast hash-indexed direct-type computation (`O(|types|²)` with `O(1)` lookup). -/
 def computeDirectTypesFast (types : List IRI) (subSet : Std.HashSet (IRI × IRI)) : List IRI :=
@@ -706,13 +1338,17 @@ def computeDirectTypesFast (types : List IRI) (subSet : Std.HashSet (IRI × IRI)
   types.filter fun c => !types.any fun moreSpec => strictSub moreSpec c
 
 /-- Realize an ABox using the hierarchy and an optional kernel-verified full model `m?`:
-    1. Superclasses (in `hier.subsumptions`) of asserted/confirmed types are entailed directly.
+    1. Deterministic positive ABox closure (`computePositiveABoxClosure`) derives all
+       domain/range, superclass, role-chain, defined-class, universal, and SWRL entailments.
     2. Any class false at `m.indVal (.named ind)` in a kernel-verified model `m ⊨ o` is
        soundly pruned in O(1) without a tableau query (scanning only `worldAtoms[w]`).
-    3. Remaining candidates are verified on their ⊥-local modules in parallel. -/
+    3. Multi-round soft negative countermodel refutation (`proposeSoftIndividualModel`)
+       soundly prunes non-entailed disjunctive candidates across all individuals at once.
+    4. Remaining candidates try a local 2-hop ego-neighborhood monotonicity fast path
+       before falling back to full ⊥-local module verification in parallel. -/
 def realizeFromHierarchyWithModelRuntime (o : Ontology) (decls : List FunctionalSyntax.EntityDecl)
     (hier : ClassHierarchy) (numWorkers : Nat := 8) (verifiedModel? : Option SROIQDModel := none)
-    (auxiliaryClass? : Option IRI := none) :
+    (auxiliaryClass? : Option IRI := none) (verifiedProblem? : Option Problem := none) :
     Option RealizationResult :=
   let namedClasses := collectOutputClasses o decls auxiliaryClass?
   let namedInds := collectNamedIndividuals o decls
@@ -726,18 +1362,34 @@ def realizeFromHierarchyWithModelRuntime (o : Ontology) (decls : List Functional
       for (a, b) in hier.subsumptions do
         m := m.insert a (b :: m.getD a [])
       return m
-    let assertedByInd : Std.HashMap IRI (List IRI) := Id.run do
-      let mut m : Std.HashMap IRI (List IRI) := {}
-      for ax in o do
-        match ax with
-        | .classAssertion (.named c) (.named ind) =>
-          m := m.insert ind (c :: m.getD ind [])
-        | _ => pure ()
-      return m
     let namedClassSet : Std.HashSet IRI := namedClasses.foldl (fun s c => s.insert c) {}
     let m? := match verifiedModel? with
       | some m => some m
       | none => (proposeVerifiedModel o).map Prod.fst
+    let p? := match verifiedProblem? with
+      | some p => some p
+      | none => if m?.isSome then (normalizeWithDefs o).map Prod.snd else none
+    let entailedByInd : Std.HashMap IRI (Std.HashSet IRI) :=
+      match p? with
+      | some p =>
+        if canHarvestStandardModel p then
+          (computePositiveABoxClosure p superMap namedInds).types
+        else Id.run do
+          let mut m : Std.HashMap IRI (Std.HashSet IRI) := {}
+          for ax in o do
+            if let .classAssertion (.named c) (.named ind) := ax then
+              let mut s := (m.getD ind {}).insert c
+              for sup in superMap.getD c [] do s := s.insert sup
+              m := m.insert ind s
+          return m
+      | none => Id.run do
+        let mut m : Std.HashMap IRI (Std.HashSet IRI) := {}
+        for ax in o do
+          if let .classAssertion (.named c) (.named ind) := ax then
+            let mut s := (m.getD ind {}).insert c
+            for sup in superMap.getD c [] do s := s.insert sup
+            m := m.insert ind s
+        return m
     let midx? : Option (Sigma fun m => ModelIndex m × Array (List IRI)) :=
       m?.map fun m =>
         let midx := ModelIndex.build m
@@ -748,39 +1400,99 @@ def realizeFromHierarchyWithModelRuntime (o : Ontology) (decls : List Functional
               arr := arr.modify w.val (c :: ·)
           return arr
         ⟨m, midx, worldAtoms⟩
+    -- Multi-round soft negative countermodel refutation for residual candidates
+    let residualByInd : Std.HashMap IRI (List IRI) :=
+      match midx?, p? with
+      | some ⟨_, midx, worldAtoms⟩, some p => Id.run do
+        let mut resMap : Std.HashMap IRI (List IRI) := {}
+        let mut totalRes := 0
+        for ind in namedInds do
+          let ent := entailedByInd.getD ind {}
+          let w := midx.indVal (.named ind)
+          let mut seen : Std.HashSet IRI := {}
+          let mut cands : Array IRI := #[]
+          for c in worldAtoms[w.val]! do
+            if c != thing && !ent.contains c && !seen.contains c then
+              seen := seen.insert c
+              cands := cands.push c
+          if !cands.isEmpty then
+            resMap := resMap.insert ind cands.toList
+            totalRes := totalRes + cands.size
+        if totalRes ≥ 16 && canHarvestStandardModel p && checkTableauRolesOkFast p && p.root == .top then
+          for _round in [:4] do
+            let mut hints : Array (IRI × Concept) := #[]
+            for ind in namedInds do
+              match resMap.getD ind [] with
+              | c :: _ => hints := hints.push (ind, .lit c false)
+              | [] => pure ()
+            if hints.isEmpty then break
+            let negModels : List SROIQDModel :=
+              match proposeSoftIndividualModel p hints.toList with
+              | some ⟨mNeg, _⟩ => [mNeg]
+              | none =>
+                -- If full batch clashed beyond retry budget, split into chunks so isolated clashes don't block other individuals
+                let chunks := groupListChunks 48 hints.toList
+                (mapIndependent numWorkers (fun ch =>
+                  (proposeSoftIndividualModel p ch).map Subtype.val) chunks).filterMap id
+            if negModels.isEmpty then break
+            let mut prunedAny := false
+            for mNeg in negModels do
+              let negIdx := ModelIndex.build mNeg
+              for ind in namedInds do
+                let cur := resMap.getD ind []
+                if !cur.isEmpty then
+                  let wn := negIdx.indVal (.named ind)
+                  let kept := cur.filter fun c => negIdx.atomSet.contains (c, wn)
+                  if kept.length < cur.length then
+                    prunedAny := true
+                    resMap := resMap.insert ind kept
+            if !prunedAny then break
+        return resMap
+      | _, _ => {}
+    let useEgo := namedInds.length ≥ 32
+    let egoIdx? : Option ABoxEgoIndex := if useEgo then some (ABoxEgoIndex.build o) else none
     let realizeInd (ind : IRI) : Option IndividualTypes := do
       let mut entailed : Std.HashSet IRI := {}
-      for c in assertedByInd.getD ind [] do
+      for c in entailedByInd.getD ind {} do
         if namedClassSet.contains c then
           entailed := entailed.insert c
-        for sup in superMap.getD c [] do
-          if namedClassSet.contains sup then
-            entailed := entailed.insert sup
       match midx? with
       | some ⟨_, midx, worldAtoms⟩ =>
-        let w := midx.indVal (.named ind)
-        let candAtW := worldAtoms[w.val]!
+        let candsToCheck := match p? with
+          | some _ => residualByInd.getD ind []
+          | none => worldAtoms[(midx.indVal (.named ind)).val]!
         let mut seenCand : Std.HashSet IRI := {}
         let mut types : Array IRI := #[]
         for c in entailed do
           if !seenCand.contains c then
             seenCand := seenCand.insert c
             types := types.push c
-        for c in candAtW do
+        for c in candsToCheck do
           if !seenCand.contains c then
             seenCand := seenCand.insert c
             if c == thing || entailed.contains c then
               types := types.push c
             else
               let seed := axiomSig (.classAssertion (.named c) (.named ind))
-              let mod := (extractBotModuleWithIndex idx o seed).1
-              let isInst ← decidesInstance fastConsistencyCheck mod c ind
+              let provedLocal := match egoIdx? with
+                | some eidx =>
+                  let egoMod := (extractBotModuleFast (eidx.egoOntology [ind]) seed).1
+                  decidesInstance fastConsistencyCheck egoMod c ind == some true
+                | none => false
+              let isInst ←
+                if provedLocal then pure true
+                else
+                  let mod := (extractBotModuleWithIndex idx o seed).1
+                  decidesInstance fastConsistencyCheck mod c ind
               if isInst then
                 types := types.push c
                 entailed := entailed.insert c
                 for sup in superMap.getD c [] do
                   if namedClassSet.contains sup then
                     entailed := entailed.insert sup
+                    if !seenCand.contains sup then
+                      seenCand := seenCand.insert sup
+                      types := types.push sup
         let typeList := types.toList
         return { individual := ind, allTypes := typeList, directTypes := computeDirectTypesFast typeList subSet }
       | none =>
@@ -820,8 +1532,10 @@ theorem realizeFromHierarchyRuntime_workers_eq (o : Ontology)
     and cached locality indexing. -/
 def realizeOntologyFastRuntime (o : Ontology) (decls : List FunctionalSyntax.EntityDecl := [])
     (numWorkers : Nat := 8) (auxiliaryClass? : Option IRI := none) : Option RealizationResult :=
-  let m0? := (proposeVerifiedModel o).map Prod.fst
+  let verified? := proposeVerifiedModel o
+  let m0? := verified?.map Prod.fst
+  let p0? := verified?.map Prod.snd
   (classifyOntologyFastWithModelRuntime o decls numWorkers m0? auxiliaryClass?).bind fun hier =>
-    realizeFromHierarchyWithModelRuntime o decls hier numWorkers m0? auxiliaryClass?
+    realizeFromHierarchyWithModelRuntime o decls hier numWorkers m0? auxiliaryClass? p0?
 
 end Sabrina.OWL2.FastClassification

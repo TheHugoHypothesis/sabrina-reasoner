@@ -2764,7 +2764,8 @@ private partial def holdsInCanonState
     Returns `.ok m` if `checkModel p m = true`, or `.error newlyBanned` on clash. -/
 private def tryCanonicalModelAttempt (p : Problem) (st : StaticIndex p)
     (ancestors : Std.HashMap IRI (List IRI)) (s : Branch)
-    (banned : Std.HashSet (Nat × Concept)) :
+    (banned : Std.HashSet (Nat × Concept))
+    (softLabels : List (Nat × Concept) := []) :
     Except (List (Nat × Concept)) {m : SROIQDModel // checkModel p m = true} := Id.run do
   -- Identify roles whose superproperties have an inverse upper-bound restriction
   -- (cannot share one witness across distinct sources) or forward functional restriction
@@ -2877,6 +2878,7 @@ private def tryCanonicalModelAttempt (p : Problem) (st : StaticIndex p)
   let mut clashed := false
   let mut edgesChanged := true
   let mut labelsChanged := true
+  let mut softApplied := softLabels.isEmpty
   let rec flattenDisj : Concept → List Concept
     | .disj a b => flattenDisj a ++ flattenDisj b
     | .bottom => []
@@ -3116,6 +3118,15 @@ private def tryCanonicalModelAttempt (p : Problem) (st : StaticIndex p)
             if isTriggeredCanon labelSet outAdj inAdj edgeSet dataByPropNode x q.sub then
               pendingLabels := pendingLabels.push (x, q.sup)
       if !pendingLabels.isEmpty then continue
+    -- 3b. Inject optional soft hints (e.g. negative realization seeds) once deterministic closure settles
+    if !softApplied then
+      softApplied := true
+      for (x, cand) in softLabels do
+        if !labelSet.contains (x, cand) &&
+            localSafe labelSet labelsByNode outAdj inAdj edgeSet dataByPropNode x cand then
+          nodeChoices := nodeChoices.insert x (cand :: nodeChoices.getD x [])
+          pendingLabels := pendingLabels.push (x, cand)
+      if !pendingLabels.isEmpty then continue
     -- 4. Resolve open disjunctions (unit propagation first, then at most one local-safe choice per node)
     let mut pickedDisj := false
     let mut pickedNodes : Std.HashSet Nat := {}
@@ -3310,12 +3321,14 @@ private def tryCanonicalModelAttempt (p : Problem) (st : StaticIndex p)
 /-- Untrusted canonical-witness-reuse finite model proposer (anywhere blocking by `(r, body, allLabels)`
     with conflict-driven disjunction choice restarts). Every returned model is verified by
     `checkModel p m` (`checkModel_sound`) before acceptance. -/
-private def tryCanonicalModel (p : Problem) (st : StaticIndex p) (s : Branch) :
+private def tryCanonicalModel (p : Problem) (st : StaticIndex p) (s : Branch)
+    (softLabels : List (Nat × Concept) := []) :
     Option {m : SROIQDModel // checkModel p m = true} := Id.run do
   let ancestors := buildClassAncestors p
+  let maxAttempts := if softLabels.isEmpty then 6 else 12
   let mut banned : Std.HashSet (Nat × Concept) := {}
-  for _attempt in [:6] do
-    match tryCanonicalModelAttempt p st ancestors s banned with
+  for _attempt in [:maxAttempts] do
+    match tryCanonicalModelAttempt p st ancestors s banned softLabels with
     | .ok m => return some m
     | .error newBans =>
       if newBans.isEmpty then return none
@@ -3336,6 +3349,21 @@ def proposeSeededCanonicalModel (p : Problem) (concepts : List Concept) :
   let firstSeed := 1 + s.noms.length + s.anons.length
   let seeds := (concepts.zipIdx firstSeed).map fun (c, x) => (x, c)
   tryCanonicalModel p (buildStaticIndex p) { s with labels := s.labels ++ seeds }
+
+/-- Try a checked model of `p` guided by soft per-individual concept hints (such as
+    `¬C` assertions during ABox realization). Hints that clash are automatically skipped
+    or dropped on restart; any returned model is strictly verified by `checkModel p m`. -/
+def proposeSoftIndividualModel (p : Problem) (indHints : List (IRI × Concept)) :
+    Option {m : SROIQDModel // checkModel p m = true} := do
+  let s ← initial p
+  let nomMap : Std.HashMap IRI Nat := Id.run do
+    let mut m : Std.HashMap IRI Nat := {}
+    for (ind, x) in s.noms do
+      m := m.insert ind x
+    return m
+  let soft := indHints.filterMap fun (ind, c) => (nomMap[ind]?).map (·, c)
+  if soft.isEmpty then none
+  else tryCanonicalModel p (buildStaticIndex p) s soft
 
 private def tryBranchModel (p : Problem) (s : Branch) : Option SROIQDModel :=
   let m := toModel p s

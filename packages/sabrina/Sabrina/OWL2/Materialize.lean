@@ -593,43 +593,140 @@ private def computeToldObjEdges (p : SROIQD.Problem) (inds : List IRI) :
   return edgeSet
 
 /-- Every recorded row lists the superproperties still possible at one edge of a
-    previously unpopulated role. The edge comes from a checked model of `p`. -/
-private def roleWitnessSuperproperties (p : SROIQD.Problem) {m : SROIQD.SROIQDModel}
-    (base : SROIQD.ModelIndex m) (props : List IRI) (numWorkers : Nat) :
+    previously unpopulated role. The edge comes from a checked model of `p` (or a
+    checked TBox module component passing `checkNomRightOnComponent`). -/
+private def roleWitnessSuperproperties (o : Ontology) (idx : FastLocality.LocalityIndex)
+    (tctx? : Option FastClassification.TBoxFastCtx)
+    (p : SROIQD.Problem) (baseModel : SROIQD.SROIQDModel)
+    (base : SROIQD.ModelIndex baseModel) (props : List IRI) (numWorkers : Nat) :
     Std.HashMap IRI (Std.HashSet IRI) :=
   let missing := (props.filter fun r => (base.edgesByRole.getD r []).isEmpty).toArray
   let batchSize := 16
   let batches := List.range ((missing.size + batchSize - 1) / batchSize)
-  let rows := FastClassification.mapIndependent numWorkers (fun i =>
-    let roles := (missing.extract (i * batchSize) ((i + 1) * batchSize)).toList
-    let seeds := roles.map fun r => SROIQD.Concept.some (r, false) .top
-    match SROIQD.proposeSeededCanonicalModel p seeds with
-    | none => []
-    | some model =>
-      let idx := SROIQD.ModelIndex.build model.val
-      roles.filterMap fun r => do
-        let (src, dst) ← (idx.edgesByRole.getD r []).head?
-        let supers := props.foldl (fun (acc : Std.HashSet IRI) s =>
-          if idx.edgeSet.contains (s, src, dst) then acc.insert s else acc) {}
-        return (r, supers)) batches
-  rows.foldl (fun acc batch => batch.foldl (fun acc (r, supers) => acc.insert r supers) acc) {}
+  let harvestFromModel (m : SROIQD.SROIQDModel) (roles : List IRI) : List (IRI × Std.HashSet IRI) :=
+    let midx := SROIQD.ModelIndex.build m
+    roles.filterMap fun r => do
+      let (src, dst) ← (midx.edgesByRole.getD r []).head?
+      let supers := props.foldl (fun (acc : Std.HashSet IRI) s =>
+        if midx.edgeSet.contains (s, src, dst) then acc.insert s else acc) {}
+      return (r, supers)
+  -- Phase 1: fast batched witness seeding (16 roles per model)
+  let phase1 : Std.HashMap IRI (Std.HashSet IRI) :=
+    if p.classAssertions.length ≥ 64 then
+      let core := FastClassification.counterWithoutIndividuals p
+      let comps := (FastClassification.mapIndependent numWorkers (fun i =>
+        let roles := (missing.extract (i * batchSize) ((i + 1) * batchSize)).toList
+        let seeds := roles.map fun r => SROIQD.Concept.some (r, false) .top
+        (SROIQD.proposeSeededCanonicalModel core seeds).map Subtype.val) batches).filterMap id
+      let verified := FastClassification.checkComponentBatches p baseModel comps numWorkers
+      let missingList := missing.toList
+      let rows := FastClassification.mapIndependent numWorkers (fun m =>
+        harvestFromModel m missingList) verified
+      rows.foldl (fun acc batch => batch.foldl (fun acc (r, supers) =>
+        match acc[r]? with
+        | some prev => acc.insert r (prev.filter fun s => supers.contains s)
+        | none => acc.insert r supers) acc) {}
+    else
+      let rows := FastClassification.mapIndependent numWorkers (fun i =>
+        let roles := (missing.extract (i * batchSize) ((i + 1) * batchSize)).toList
+        let seeds := roles.map fun r => SROIQD.Concept.some (r, false) .top
+        match SROIQD.proposeSeededCanonicalModel p seeds with
+        | none => []
+        | some model => harvestFromModel model.val roles) batches
+      rows.foldl (fun acc batch => batch.foldl (fun acc (r, supers) => acc.insert r supers) acc) {}
+  -- Phase 2: per-role ⊥-local witness for any still-uncovered role so one failed batch
+  -- never causes O(|props|) redundant SubObjectPropertyOf queries
+  let stillMissing := missing.toList.filter fun r => !phase1.contains r
+  if stillMissing.isEmpty then phase1
+  else
+    let singleRoleWitness (r : IRI) : Option (IRI × Std.HashSet IRI) :=
+      let freshA := "urn:sabrina:rolewit_a"
+      let freshB := "urn:sabrina:rolewit_b"
+      let ax := Axiom.subObjectProperty (.named r) (.named r)
+      let tryMod (mod : Ontology) (sigObjs : Option (List IRI)) (nomChecks? : Option (List (SROIQD.Concept × SROIQD.Concept))) :
+          Option (IRI × Std.HashSet IRI) := do
+        let cntOnt := Axiom.objectAssertion (.named r) (.named freshA) (.named freshB) :: mod
+        let (_, pCnt) ← Normalize.normalizeWithDefs cntOnt
+        let limits := SROIQD.Limits.forProblem pCnt
+        match SROIQD.propose pCnt limits with
+        | some (.model comp) =>
+          let ok := pCnt.checkSimple && SROIQD.checkModel pCnt comp &&
+            match nomChecks? with
+            | some checks => FastClassification.checkNomRightOnComponent checks comp
+            | none => true
+          if !ok then none
+          else
+            let midx := SROIQD.ModelIndex.build comp
+            let (src, dst) ← (midx.edgesByRole.getD r []).head?
+            let sigSet? := sigObjs.map fun xs => xs.foldl (fun (s : Std.HashSet IRI) x => s.insert x) {}
+            let supers := props.foldl (fun (acc : Std.HashSet IRI) s =>
+              let inSig := match sigSet? with | some ss => ss.contains s | none => true
+              if inSig && midx.edgeSet.contains (s, src, dst) then acc.insert s else acc) {}
+            return (r, supers)
+        | _ => none
+      let viaTBox := tctx?.bind fun tctx =>
+        let (modT, sigT) := FastLocality.extractBotModuleWithIndex tctx.tboxIdx tctx.tboxOnt (Profile.axiomSig ax)
+        tryMod modT (some sigT.obj) (some tctx.nomChecks)
+      match viaTBox with
+      | some res => some res
+      | none =>
+        let (modFull, sigFull) := FastLocality.extractBotModuleWithIndex idx o (Profile.axiomSig ax)
+        tryMod modFull (some sigFull.obj) none
+    let extraRows := (FastClassification.mapIndependent numWorkers singleRoleWitness stillMissing).filterMap id
+    extraRows.foldl (fun acc (r, supers) => acc.insert r supers) phase1
 
 /-- Check extra entailments using sound & complete model-based pre-filtering
     (any assertion false in a kernel-verified model `m ⊨ o` cannot be entailed by `o`),
-    deterministic role/data-property closure, and parallel ⊥-local module verification. -/
+    deterministic positive ABox closure, local 2-hop ego-neighborhood monotonicity,
+    and parallel ⊥-local module verification. -/
 private def materializeExtraRuntime (o : Ontology) (decls : List EntityDecl) (props inds : List IRI)
-    (opts : MaterializeOptions) (verifiedModel? : Option (SROIQD.SROIQDModel × SROIQD.Problem) := none)
+    (hier : ClassHierarchy) (opts : MaterializeOptions)
+    (verifiedModel? : Option (SROIQD.SROIQDModel × SROIQD.Problem) := none)
     (numWorkers : Nat := 8) : Option (List Axiom) := do
   let idx := FastLocality.LocalityIndex.build o
+  let tctx? : Option FastClassification.TBoxFastCtx :=
+    verifiedModel?.bind fun (_, p) => FastClassification.buildTBoxFastCtx o p
+  let egoIdx? : Option FastClassification.ABoxEgoIndex :=
+    if inds.length ≥ 32 then some (FastClassification.ABoxEgoIndex.build o) else none
+  let axSeedInds : Axiom → List IRI
+    | .objectAssertion _ (.named a) (.named b) => [a, b]
+    | .dataAssertion _ (.named a) _ => [a]
+    | .sameIndividuals is => is.filterMap fun | .named a => some a | _ => none
+    | _ => []
   let checkAx (ax : Axiom) : Option (Option Axiom) := do
-    let axioms := (FastLocality.extractBotModuleWithIndex idx o (Profile.axiomSig ax)).1
-    let entailed ← decidesAxiomEntails fastConsistencyCheck axioms ax
-    return if entailed then some ax else none
+    match ax, tctx? with
+    | .subObjectProperty (.named r) (.named s), some tctx =>
+      if let some entailed := FastClassification.tryDecideSubObjPropViaTBox tctx r s then
+        return if entailed then some ax else none
+    | _, _ => pure ()
+    let seed := Profile.axiomSig ax
+    let provedLocal := match egoIdx?, axSeedInds ax with
+      | some eidx, sInds@(_ :: _) =>
+        let egoMod := (FastLocality.extractBotModuleFast (eidx.egoOntology sInds) seed).1
+        decidesAxiomEntails fastConsistencyCheck egoMod ax == some true
+      | _, _ => false
+    if provedLocal then return some ax
+    else
+      let axioms := (FastLocality.extractBotModuleWithIndex idx o seed).1
+      let entailed ← decidesAxiomEntails fastConsistencyCheck axioms ax
+      return if entailed then some ax else none
   let checkBatch (cands : List Axiom) : Option (List Axiom) := do
     let results ← (FastClassification.mapIndependent numWorkers checkAx cands).mapM id
     return results.filterMap id
   let midx? : Option (Sigma fun m => SROIQD.Problem × SROIQD.ModelIndex m) :=
     verifiedModel?.map fun (m, p) => ⟨m, p, SROIQD.ModelIndex.build m⟩
+  let posClosure? : Option FastClassification.PositiveABoxClosure :=
+    if opts.includeObjectPropertyAssertions || opts.includeDataPropertyAssertions then
+      match midx? with
+      | some ⟨_, p, _⟩ =>
+        let superMap : Std.HashMap IRI (List IRI) := Id.run do
+          let mut m : Std.HashMap IRI (List IRI) := {}
+          for (a, b) in hier.subsumptions do
+            m := m.insert a (b :: m.getD a [])
+          return m
+        some (FastClassification.computePositiveABoxClosure p superMap inds)
+      | none => none
+    else none
   let mut inferred : Array Axiom := #[]
   if opts.includeSubObjectProperties then
     let mut toldSub : Std.HashSet (IRI × IRI) := {}
@@ -638,7 +735,7 @@ private def materializeExtraRuntime (o : Ontology) (decls : List EntityDecl) (pr
         if !r.2 && !s.2 && r.1 != s.1 then
           toldSub := toldSub.insert (r.1, s.1)
     let witnessSupers := match midx? with
-      | some ⟨_, p, midx⟩ => roleWitnessSuperproperties p midx props numWorkers
+      | some ⟨m, p, midx⟩ => roleWitnessSuperproperties o idx tctx? p m midx props numWorkers
       | none => {}
     let mut toCheck : Array Axiom := #[]
     for r in props do
@@ -662,7 +759,9 @@ private def materializeExtraRuntime (o : Ontology) (decls : List EntityDecl) (pr
     match midx? with
     | some ⟨m, p, midx⟩ =>
       let propSet : Std.HashSet IRI := props.foldl (fun s r => s.insert r) {}
-      let toldEdges := computeToldObjEdges p inds
+      let toldEdges := match posClosure? with
+        | some cl => cl.edges
+        | none => computeToldObjEdges p inds
       let mut indsAtWorld : Std.HashMap Nat (List IRI) := {}
       for a in inds do
         let w := (midx.indVal (.named a)).val
@@ -730,32 +829,11 @@ private def materializeExtraRuntime (o : Ontology) (decls : List EntityDecl) (pr
           | _ => pure ()
         return s
       match midx? with
-      | some ⟨_, p, midx⟩ =>
-        -- Close asserted data assertions along `p.subData` deterministically
-        let mut toldData : Std.HashMap (IRI × IRI) (List Datatypes.Value) := {}
-        for (dp, ia, lit) in p.dataAssertions do
-          if let (.named ind, some v) := (ia, Datatypes.decodeLiteral lit) then
-            let cur := toldData.getD (dp, ind) []
-            if !cur.contains v then
-              toldData := toldData.insert (dp, ind) (v :: cur)
-        let mut dChanged := true
-        let mut dIter := 0
-        while dChanged && dIter < p.subData.length + 2 do
-          dChanged := false
-          dIter := dIter + 1
-          let mut addD : Array (IRI × IRI × Datatypes.Value) := #[]
-          for (r, t) in p.subData do
-            for ((dp, ind), vs) in toldData do
-              if dp == r then
-                let curT := toldData.getD (t, ind) []
-                for v in vs do
-                  if !curT.contains v then
-                    addD := addD.push (t, ind, v)
-          for (t, ind, v) in addD do
-            let curT := toldData.getD (t, ind) []
-            if !curT.contains v then
-              toldData := toldData.insert (t, ind) (v :: curT)
-              dChanged := true
+      | some ⟨_, _, midx⟩ =>
+        let toldData : Std.HashMap (IRI × IRI) (List Datatypes.Value) :=
+          match posClosure? with
+          | some cl => cl.data
+          | none => {}
         let decodedLits : List (Literal × Datatypes.Value) :=
           lits.filterMap fun l => (Datatypes.decodeLiteral l).map (l, ·)
         let mut toCheck : Array Axiom := #[]
@@ -791,6 +869,7 @@ def materializeOntologyRuntime (o : Ontology) (decls : List EntityDecl := [])
     (auxiliaryClass? : Option IRI := none) : Option MaterializeResult := do
   let verifiedModel? := FastClassification.proposeVerifiedModel o
   let m0? := verifiedModel?.map Prod.fst
+  let p0? := verifiedModel?.map Prod.snd
   let hier ← FastClassification.classifyOntologyFastWithModelRuntime o decls numWorkers m0? auxiliaryClass?
   if !hier.consistent then
     return {
@@ -799,13 +878,13 @@ def materializeOntologyRuntime (o : Ontology) (decls : List EntityDecl := [])
       inferredAxioms := []
       materializedOntology := if opts.includeAsserted then o else []
     }
-  let real ← FastClassification.realizeFromHierarchyWithModelRuntime o decls hier numWorkers m0? auxiliaryClass?
+  let real ← FastClassification.realizeFromHierarchyWithModelRuntime o decls hier numWorkers m0? auxiliaryClass? p0?
   let extraInferred ←
     if opts.includeSubObjectProperties || opts.includeObjectPropertyAssertions ||
         opts.includeSameIndividuals || opts.includeDataPropertyAssertions then do
       let props := if opts.includeSubObjectProperties || opts.includeObjectPropertyAssertions then
         collectNamedObjectProperties o decls else []
-      materializeExtraRuntime o decls props real.individuals opts verifiedModel? numWorkers
+      materializeExtraRuntime o decls props real.individuals hier opts verifiedModel? numWorkers
     else pure []
   let rawInferred :=
     materializedClassAxioms hier opts ++ materializedTypeAxioms real opts ++ extraInferred
