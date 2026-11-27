@@ -230,7 +230,7 @@ def run (j : Json) : UInt32 × Json := Id.run do
       | .error msg => return (2, response "UNSUPPORTED" false (("reason", toJson msg) :: context))
     if let some err := checkRoleRestrictions p then
       return (2, response "UNSUPPORTED" false (("reason", toJson err) :: context))
-    let limits : Limits := {}
+    let limits := Limits.forProblem p
     let some ev := propose p limits | return (2, response "UNKNOWN" false
       (("reason", toJson "SROIQ(D) search could not certify consistency within interactive limits") :: context))
     if !checkConsistency p limits.worlds ev then
@@ -260,7 +260,7 @@ def run (j : Json) : UInt32 × Json := Id.run do
       | .error e => return (2, response "UNSUPPORTED" false (("reason", toJson e) :: context))
     if let some err := checkRoleRestrictions (inclusionProblem p q) then
       return (2, response "UNSUPPORTED" false (("reason", toJson err) :: context))
-    let limits : Limits := {}
+    let limits := Limits.forProblem p
     let pair := do
       let a ← propose (counterProblem p q) limits
       let b ← propose (inclusionProblem p q) limits

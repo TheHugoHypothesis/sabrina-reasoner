@@ -932,6 +932,12 @@ structure Limits where
   depth : Nat := 256
   visits : Nat := 20000
 
+/-- Convert the default allowance for additional live worlds into the absolute
+    cap used by search and certificate replay. Initialization assigns a world
+    to the query root and to each named and anonymous individual. -/
+def Limits.forProblem (p : Problem) (extra : Limits := {}) : Limits :=
+  { extra with worlds := 1 + p.nominals.length + p.anons.length + extra.worlds }
+
 inductive Evidence where
   | model (model : SROIQDModel)
   | refutation (depth : Nat)

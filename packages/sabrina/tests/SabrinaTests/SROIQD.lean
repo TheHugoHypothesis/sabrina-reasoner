@@ -140,4 +140,20 @@ private def m9RankedInput : Sabrina.OWL2.DecisionProcedure.RankedInput where
 #guard Sabrina.OWL2.DecisionProcedure.decideRankedInclusion m9RankedInput
   ⟨.atom "A", .atom "D"⟩ == .independent
 
+-- Input roots leave room for generated witnesses under the default runtime budget.
+private def manyInputWorlds : Problem := {
+  classAssertions := (List.range 32).map (fun n =>
+    (.named s!"urn:ex:individual{n}", .lit "urn:ex:C" false)) ++
+    [(.anonymous "urn:ex:doc" "a", .some ("urn:ex:r", false) .top)]
+}
+
+#guard (Limits.forProblem manyInputWorlds).worlds == 50
+#guard (propose manyInputWorlds { worlds := 16 }).isNone
+#guard
+  let limits := Limits.forProblem manyInputWorlds
+  match propose manyInputWorlds limits with
+  | some (.model m) => m.graph.additionalWorlds + 1 == 35 &&
+      checkConsistency manyInputWorlds limits.worlds (.model m)
+  | _ => false
+
 end SabrinaTests.SROIQD

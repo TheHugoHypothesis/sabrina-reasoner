@@ -391,7 +391,7 @@ private def checkTableauRolesOk (p : SROIQD.Problem) : Bool :=
 
 private def tryTableauSat (p : SROIQD.Problem) : Option Bool :=
   if !needsExactDataSolverFirst p && checkTableauRolesOk p then
-    let limits : SROIQD.Limits := {}
+    let limits := SROIQD.Limits.forProblem p
     match SROIQD.propose p limits with
     | some ev =>
       if p.checkSimple && SROIQD.checkEvidence p limits.worlds ev then some ev.isModel else none

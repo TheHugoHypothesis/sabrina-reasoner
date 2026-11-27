@@ -1830,7 +1830,7 @@ private def proposeInitModelPairs (o : Ontology) (namedClasses : List IRI) : Lis
   | none => []
   | some (_, p) =>
     if !hasWiderDataOrRealFast p && checkTableauRolesOkFast p && p.root == .top then
-      let limits : Limits := {}
+      let limits := Limits.forProblem p
       match propose p limits with
       | some (.model m) => harvestModelPairs o namedClasses m
       | _ => []
