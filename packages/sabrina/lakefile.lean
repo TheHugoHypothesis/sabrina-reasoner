@@ -2,7 +2,7 @@ import Lake
 open Lake DSL
 
 package sabrina where
-  version := v!"1.2.0"
+  version := v!"1.2.1"
 
 require logicCore from "../logic-core"
 

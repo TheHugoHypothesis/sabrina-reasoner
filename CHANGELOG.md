@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.1 (2026-11-27)
+
+### Changed
+
+- Reuse checked models across class satisfiability, subsumption, and object-property inclusion queries. Compute each parallel query batch once and reuse its answers.
+- Speed up tableau equality merges, model checking, ontology normalization, and RDF import processing.
+- Lower DL-safe SWRL rules with an auxiliary guard on larger ABoxes. Classification and materialization omit the guard from their output signatures and retain its axioms during reasoning.
+
 ## 1.2.0 (2026-11-27)
 
 ### Added
