@@ -600,22 +600,24 @@ private def annotationAxiomTriple : AnnotationAxiom → RDFTriple
   | .range p rng => ⟨.iri p, rdfsRange, .iri rng⟩
 
 /-- Render a materialized ontology (with declarations, annotations, prefixes,
-    and optional ontology/version IRIs) into `.ofn`, `.ttl`, or `.owl` (RDF/XML). -/
+    optional ontology/version IRIs, and optional DL-Safe SWRL rules) into
+    `.ofn`, `.ttl`, or `.owl` (RDF/XML). -/
 def renderMaterialized (fmt : OutputFormat) (decls : List EntityDecl)
     (annots : List AnnotationAxiom) (ont : Ontology) (prefixes : PrefixMap := [])
-    (ontIRI : Option IRI := none) (verIRI : Option IRI := none) : String :=
+    (ontIRI : Option IRI := none) (verIRI : Option IRI := none)
+    (rules : List SWRL.SWRLRule := []) : String :=
   match fmt with
   | .ofn =>
-    renderDocumentOFN decls annots ont prefixes ontIRI verIRI []
+    renderDocumentOFN decls annots ont prefixes ontIRI verIRI [] rules
   | .ttl =>
-    let baseGraph := encodeOntologyRDF decls ont ontIRI verIRI []
+    let baseGraph := encodeOntologyRDF decls ont ontIRI verIRI [] rules
     let fullGraph : RDFGraph := {
       triples := baseGraph.triples ++ annots.map annotationAxiomTriple
       prefixes := prefixes
     }
     renderTurtle fullGraph
   | .rdfxml =>
-    let baseGraph := encodeOntologyRDF decls ont ontIRI verIRI []
+    let baseGraph := encodeOntologyRDF decls ont ontIRI verIRI [] rules
     let fullGraph : RDFGraph := {
       triples := baseGraph.triples ++ annots.map annotationAxiomTriple
       prefixes := prefixes

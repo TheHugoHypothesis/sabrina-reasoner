@@ -1,4 +1,5 @@
 import Sabrina.OWL2.Syntax
+import Sabrina.OWL2.SWRL
 
 /-! Recursive-descent parser for W3C OWL 2 Functional-Style Syntax (`.ofn`)
     producing `Sabrina.OWL2.Ontology`, standalone OWL 2 query axioms, and
@@ -430,10 +431,92 @@ private def parseEntityDecl : Parser EntityDecl := do
   expectRParen
   return ⟨kind, iri⟩
 
+private def parseSWRLIArg : Parser SWRL.IArg := do
+  match ← peek with
+  | some (.ident "Variable") =>
+    let _ ← nextTok; expectLParen
+    let v ← parseIRI
+    expectRParen
+    return .var v
+  | _ => return .ind (← parseIndividual)
+
+private def parseSWRLDArg : Parser SWRL.DArg := do
+  match ← peek with
+  | some (.ident "Variable") =>
+    let _ ← nextTok; expectLParen
+    let v ← parseIRI
+    expectRParen
+    return .var v
+  | _ => return .lit (← parseLiteral)
+
+private def parseSWRLAtom : Parser SWRL.SWRLAtom := do
+  match ← nextTok with
+  | .ident "ClassAtom" =>
+    expectLParen
+    let c ← parseClassExpr
+    let a ← parseSWRLIArg
+    expectRParen
+    return .classAtom c a
+  | .ident "DataRangeAtom" =>
+    expectLParen
+    let dr ← parseDataRange
+    let a ← parseSWRLDArg
+    expectRParen
+    return .dataRangeAtom dr a
+  | .ident "ObjectPropertyAtom" =>
+    expectLParen
+    let r ← parseObjProp
+    let a1 ← parseSWRLIArg
+    let a2 ← parseSWRLIArg
+    expectRParen
+    return .objectPropertyAtom r a1 a2
+  | .ident "DataPropertyAtom" =>
+    expectLParen
+    let p ← parseIRI
+    let a1 ← parseSWRLIArg
+    let a2 ← parseSWRLDArg
+    expectRParen
+    return .dataPropertyAtom p a1 a2
+  | .ident "SameIndividualAtom" =>
+    expectLParen
+    let a1 ← parseSWRLIArg
+    let a2 ← parseSWRLIArg
+    expectRParen
+    return .sameIndividualAtom a1 a2
+  | .ident "DifferentIndividualsAtom" =>
+    expectLParen
+    let a1 ← parseSWRLIArg
+    let a2 ← parseSWRLIArg
+    expectRParen
+    return .differentIndividualsAtom a1 a2
+  | .ident "BuiltInAtom" =>
+    expectLParen
+    let b ← parseIRI
+    let args ← parseManyUntilRParen parseSWRLDArg
+    return .builtinAtom b args
+  | .ident kw => throw s!"unsupported SWRL atom keyword: {kw}"
+  | t => throw s!"expected SWRL atom keyword, got {repr t}"
+
+private def parseSWRLRule : Parser SWRL.SWRLRule := do
+  expectLParen; skipAnnotations
+  match ← nextTok with
+  | .ident "Body" => pure ()
+  | t => throw s!"expected 'Body' in DLSafeRule, got {repr t}"
+  expectLParen
+  let body ← parseManyUntilRParen parseSWRLAtom
+  match ← nextTok with
+  | .ident "Head" => pure ()
+  | t => throw s!"expected 'Head' in DLSafeRule, got {repr t}"
+  expectLParen
+  let head ← parseManyUntilRParen parseSWRLAtom
+  expectRParen
+  return { body, head }
+
 private inductive ParsedItem where
   | logical (ax : Axiom)
   | decl (d : EntityDecl)
   | annot (a : AnnotationAxiom)
+  | rule (r : SWRL.SWRLRule)
   | ontAnnot
   deriving Repr
 
@@ -609,6 +692,8 @@ private partial def parseItem : Parser ParsedItem := do
     expectLParen; skipAnnotations
     let dp ← parseIRI; let a ← parseIndividual; let l ← parseLiteral; expectRParen
     return .logical (.negativeDataAssertion dp a l)
+  | .ident "DLSafeRule" =>
+    return .rule (← parseSWRLRule)
   | .ident kw => throw s!"unsupported Functional Syntax axiom: {kw}"
   | t => throw s!"expected axiom keyword, got {repr t}"
 
@@ -659,14 +744,15 @@ structure ParsedDocument where
   declarations : List EntityDecl := []
   annotationAxioms : List AnnotationAxiom := []
   ontology : Ontology
+  rules : List SWRL.SWRLRule := []
   deriving Repr
 
 /-- Parse a W3C OWL 2 Functional-Style Syntax document (`Prefix(...) Ontology(...)`)
-    scoping anonymous individuals `_:x` to `docId` and retaining entity declarations
-    and annotation axioms for §5.8.2 typing validation. -/
+    scoping anonymous individuals `_:x` to `docId` and retaining entity declarations,
+    annotation axioms, and DL-Safe SWRL rules. -/
 def parseDocumentWithId (docId : String) (input : String) : Except String ParsedDocument := do
   let toks ← tokenize input
-  let ((ontIRI, verIRI, imps, decls, annots, ont), st) ← (do
+  let ((ontIRI, verIRI, imps, decls, annots, ont, rules), st) ← (do
     parsePrefixDecls
     match ← nextTok with
     | .ident "Ontology" =>
@@ -677,6 +763,7 @@ def parseDocumentWithId (docId : String) (input : String) : Except String Parsed
       let mut decls : List EntityDecl := []
       let mut annots : List AnnotationAxiom := []
       let mut axioms : List Axiom := []
+      let mut rules : List SWRL.SWRLRule := []
       while (← peek) != some Token.rparen do
         if (← peek) == some (Token.ident "Import") then
           let _ ← nextTok
@@ -689,9 +776,10 @@ def parseDocumentWithId (docId : String) (input : String) : Except String Parsed
           | .logical ax => axioms := ax :: axioms
           | .decl d => decls := d :: decls
           | .annot a => annots := a :: annots
+          | .rule r => rules := r :: rules
           | .ontAnnot => pure ()
       expectRParen
-      return (ontIRI, verIRI, imps.reverse, decls.reverse, annots.reverse, axioms.reverse)
+      return (ontIRI, verIRI, imps.reverse, decls.reverse, annots.reverse, axioms.reverse, rules.reverse)
     | t => throw s!"expected 'Ontology', got {repr t}").run { tokens := toks, docId := docId }
   if !st.tokens.isEmpty then
     throw "trailing tokens after Ontology(...)"
@@ -703,14 +791,15 @@ def parseDocumentWithId (docId : String) (input : String) : Except String Parsed
     declarations := decls
     annotationAxioms := annots
     ontology := ont
+    rules := rules
   }
 
 /-- Parse a single W3C OWL 2 Functional-Style Syntax document (`Prefix(...) Ontology(...)`). -/
 def parseDocument (input : String) : Except String ParsedDocument :=
   parseDocumentWithId "doc:0" input
 
-/-- Full resolved import closure retaining declarations and annotation axioms
-    across every reachable document for W3C §5.8.2 typing validation. -/
+/-- Full resolved import closure retaining declarations, annotation axioms, and
+    DL-Safe SWRL rules across every reachable document. -/
 structure ResolvedOFNClosure where
   prefixes : PrefixMap
   declarations : List EntityDecl
@@ -718,11 +807,12 @@ structure ResolvedOFNClosure where
   ontology : Ontology
   ontologyIRI : Option IRI := none
   versionIRI : Option IRI := none
+  rules : List SWRL.SWRLRule := []
   deriving Repr
 
 /-- Resolve the transitive `Import(...)` closure of `rootOFN` against a library
-    of `(keyIRI, ofnText)` documents, retaining all declarations and annotation
-    axioms across the closure. -/
+    of `(keyIRI, ofnText)` documents, retaining all declarations, annotation
+    axioms, and DL-Safe SWRL rules across the closure. -/
 def resolveImportClosure (rootOFN : String) (library : List (IRI × String)) :
     Except String ResolvedOFNClosure := do
   let rootDoc ← parseDocumentWithId "doc:0" rootOFN
@@ -750,6 +840,7 @@ def resolveImportClosure (rootOFN : String) (library : List (IRI × String)) :
   let mut allDecls : List EntityDecl := rootDoc.declarations
   let mut allAnnots : List AnnotationAxiom := rootDoc.annotationAxioms
   let mut allAxioms : Ontology := rootDoc.ontology
+  let mut allRules : List SWRL.SWRLRule := rootDoc.rules
   let mut fuel := (parsedLib.length + 1) * (parsedLib.length + 2) + 64
   while !queue.isEmpty && fuel > 0 do
     fuel := fuel - 1
@@ -767,6 +858,7 @@ def resolveImportClosure (rootOFN : String) (library : List (IRI × String)) :
         allDecls := allDecls ++ doc.declarations
         allAnnots := allAnnots ++ doc.annotationAxioms
         allAxioms := allAxioms ++ doc.ontology
+        allRules := allRules ++ doc.rules
         queue := queue ++ doc.imports
   return {
     prefixes := rootDoc.prefixes
@@ -775,6 +867,7 @@ def resolveImportClosure (rootOFN : String) (library : List (IRI × String)) :
     ontology := allAxioms
     ontologyIRI := rootDoc.ontologyIRI
     versionIRI := rootDoc.versionIRI
+    rules := allRules
   }
 
 /-- Resolve the transitive `Import(...)` closure of `rootOFN` against a library
@@ -941,11 +1034,41 @@ def renderOntology (ont : Ontology) (ontIRI : Option IRI := none) (verIRI : Opti
   let axLines := ont.map fun ax => s!"  {renderAxiom ax}\n"
   s!"Ontology({header}\n{"".intercalate impLines}{"".intercalate axLines})"
 
+/-- Render a SWRL individual argument in W3C Functional-Style Syntax. -/
+def renderSWRLIArg : SWRL.IArg → String
+  | .var v => s!"Variable({renderIRI v})"
+  | .ind a => renderIndividual a
+
+/-- Render a SWRL data argument in W3C Functional-Style Syntax. -/
+def renderSWRLDArg : SWRL.DArg → String
+  | .var v => s!"Variable({renderIRI v})"
+  | .lit l => renderLiteral l
+
+/-- Render a SWRL atom in W3C Functional-Style Syntax. -/
+def renderSWRLAtom : SWRL.SWRLAtom → String
+  | .classAtom c a => s!"ClassAtom({renderClassExpr c} {renderSWRLIArg a})"
+  | .dataRangeAtom dr a => s!"DataRangeAtom({renderDataRange dr} {renderSWRLDArg a})"
+  | .objectPropertyAtom r a1 a2 =>
+    s!"ObjectPropertyAtom({renderObjectProperty r} {renderSWRLIArg a1} {renderSWRLIArg a2})"
+  | .dataPropertyAtom p a1 a2 =>
+    s!"DataPropertyAtom({renderIRI p} {renderSWRLIArg a1} {renderSWRLDArg a2})"
+  | .sameIndividualAtom a1 a2 =>
+    s!"SameIndividualAtom({renderSWRLIArg a1} {renderSWRLIArg a2})"
+  | .differentIndividualsAtom a1 a2 =>
+    s!"DifferentIndividualsAtom({renderSWRLIArg a1} {renderSWRLIArg a2})"
+  | .builtinAtom b args =>
+    s!"BuiltInAtom({renderIRI b} {" ".intercalate (args.map renderSWRLDArg)})"
+
+/-- Render a DL-Safe SWRL rule in W3C Functional-Style Syntax. -/
+def renderSWRLRule (r : SWRL.SWRLRule) : String :=
+  s!"DLSafeRule(Body({" ".intercalate (r.body.map renderSWRLAtom)}) Head({" ".intercalate (r.head.map renderSWRLAtom)}))"
+
 /-- Render a full W3C Functional-Style Syntax document including `Prefix(...)`
-    declarations, `Declaration(...)` entity axioms, annotation axioms, and logical axioms. -/
+    declarations, `Declaration(...)` entity axioms, annotation axioms, logical axioms,
+    and optional DL-Safe SWRL rules. -/
 def renderDocumentOFN (decls : List EntityDecl) (annots : List AnnotationAxiom) (ont : Ontology)
     (prefixes : PrefixMap := []) (ontIRI : Option IRI := none) (verIRI : Option IRI := none)
-    (imports : List IRI := []) : String :=
+    (imports : List IRI := []) (rules : List SWRL.SWRLRule := []) : String :=
   let pfxLines := prefixes.map fun (p, ns) => s!"Prefix({p}:={renderIRI ns})\n"
   let header := match ontIRI, verIRI with
     | some o, some v => s!" {renderIRI o} {renderIRI v}"
@@ -955,7 +1078,8 @@ def renderDocumentOFN (decls : List EntityDecl) (annots : List AnnotationAxiom) 
   let declLines := decls.map fun d => s!"  {renderEntityDecl d}\n"
   let annotLines := annots.map fun a => s!"  {renderAnnotationAxiom a}\n"
   let axLines := ont.map fun ax => s!"  {renderAxiom ax}\n"
-  s!"{"".intercalate pfxLines}Ontology({header}\n{"".intercalate impLines}{"".intercalate declLines}{"".intercalate annotLines}{"".intercalate axLines})\n"
+  let ruleLines := rules.map fun r => s!"  {renderSWRLRule r}\n"
+  s!"{"".intercalate pfxLines}Ontology({header}\n{"".intercalate impLines}{"".intercalate declLines}{"".intercalate annotLines}{"".intercalate axLines}{"".intercalate ruleLines})\n"
 
 /-- Explicit tag for every OWL 2 DL AST constructor in canonical S-expression form. -/
 inductive ASTTag where

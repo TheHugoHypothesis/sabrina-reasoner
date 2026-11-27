@@ -11,6 +11,7 @@ import Sabrina.OWL2.Classification
 import Sabrina.OWL2.FastClassification
 import Sabrina.OWL2.Materialize
 import Sabrina.OWL2.Justification
+import Sabrina.OWL2.SWRLReduction
 import Sabrina.OWL2.SROIQD.Termination.SourceImportConformance
 import Sabrina.OWL2.SROIQD.Termination.ExactQueryDecision
 import Sabrina.OWL2.SROIQD.Termination.ExtendedQueryDecision
@@ -108,8 +109,12 @@ private def parseImportsObj (j : Json) : Except String (List (IRI × String)) :=
 
 private structure QueryOptions where
   limits : Limits := {}
+  hasAbsoluteWorldLimit : Bool := false
   hasCustomLimits : Bool := false
   strictOwl2DL : Bool := false
+
+private def QueryOptions.limitsForProblem (opts : QueryOptions) (p : Problem) : Limits :=
+  if opts.hasAbsoluteWorldLimit then opts.limits else Limits.forProblem p opts.limits
 
 private def parseOptionsObj (j : Json) (cliStrict : Bool := false) : Except String QueryOptions := do
   let obj ← j.getObj?
@@ -131,7 +136,7 @@ private def parseOptionsObj (j : Json) (cliStrict : Bool := false) : Except Stri
   if let some v := obj.get? "strict_owl2dl" then
     let b ← v.getBool?
     strictOwl2DL := strictOwl2DL || b
-  return { limits, hasCustomLimits, strictOwl2DL }
+  return { limits, hasAbsoluteWorldLimit := obj.contains "max_worlds", hasCustomLimits, strictOwl2DL }
 
 private def encodeLimits (limits : Limits) : Json :=
   Json.mkObj [
@@ -217,9 +222,37 @@ private def usesReal (p : Problem) : Bool :=
     | .datatype t | .restriction t _ => t == owlReal
     | _ => false
 
+private def declaredNamedInds (decls : List EntityDecl) : List IRI :=
+  decls.filterMap fun d => if d.kind == .namedIndividual then some d.iri else none
+
+private def lowerClosureSWRL (closure : ResolvedOFNClosure) (extraInds : List IRI := []) :
+    Except String (Ontology × List (Axiom × SWRL.SWRLRule)) := do
+  if closure.rules.isEmpty then
+    return (closure.ontology, [])
+  if let some err := SWRL.diagnoseDLSafeRules closure.rules then
+    throw err
+  let inds := SWRL.collectNamedIndividuals closure.ontology closure.rules
+    (declaredNamedInds closure.declarations ++ extraInds)
+  let mut ruleAxs : List Axiom := []
+  let mut prov : List (Axiom × SWRL.SWRLRule) := []
+  for r in closure.rules do
+    let axs ← SWRL.lowerSWRLRules closure.ontology inds [r]
+    ruleAxs := ruleAxs ++ axs
+    for ax in axs do
+      prov := (ax, r) :: prov
+  return (closure.ontology ++ ruleAxs, prov.reverse)
+
+private def renderJustificationWithRules (prov : List (Axiom × SWRL.SWRLRule)) (J : Ontology) :
+    List String :=
+  (J.map fun ax =>
+    match prov.lookup ax with
+    | some r => renderSWRLRule r
+    | none => renderAxiom ax).eraseDups
+
 private def runConsistency (id ofnText : String) (lib : List (IRI × String))
-    (limits : Limits := {}) (allowExact : Bool := true)
-    (strictOwl2DL : Bool := false) : UInt32 × Json := Id.run do
+    (opts : QueryOptions) : UInt32 × Json := Id.run do
+  let strictOwl2DL := opts.strictOwl2DL
+  let allowExact := !opts.hasCustomLimits
   if id.isEmpty then return (2, response "UNSUPPORTED" false [("reason", toJson "empty ontology ID")])
   let scope := Json.mkObj [("semantics", toJson "owl2-ofn-sroiqd"), ("id", toJson id)]
   let baseContext := [("scope", scope)]
@@ -234,6 +267,18 @@ private def runConsistency (id ofnText : String) (lib : List (IRI × String))
   let context := if strictOwl2DL then
       ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: baseContext
     else baseContext
+  if !closure.rules.isEmpty then
+    let swrlCtx := ("swrl_rules", toJson closure.rules.length) :: context
+    let inds := SWRL.collectNamedIndividuals ont closure.rules (declaredNamedInds closure.declarations)
+    match SWRL.decideWithSWRLFast? ont inds closure.rules with
+    | .error err =>
+      return (2, response "UNSUPPORTED" false (("reason", toJson err) :: swrlCtx))
+    | .ok (some sat) =>
+      let verdict := if sat then "SATISFIABLE" else "INCONSISTENT_ONTOLOGY"
+      return (0, response verdict true (("decision_basis", toJson "sroiqd-swrl-dl-safe-v1") :: swrlCtx))
+    | .ok none =>
+      return (2, response "UNKNOWN" false
+        (("reason", toJson "SWRL + SROIQ(D) consistency check could not decide within limits") :: swrlCtx))
   let qp := FastLocality.profileQueryFast ont none
   -- Fast path: polynomial EL++ consequence-based classifier
   if qp.moduleFragment == .el then
@@ -250,6 +295,7 @@ private def runConsistency (id ofnText : String) (lib : List (IRI × String))
   let ctx := ("profile", encodeProfile qp "sroiqd-tableau") :: context
   let some (_, p) := normalizeWithDefs ont | return (2, response "UNSUPPORTED" false
     (("reason", toJson "ontology contains cyclic datatype definitions or constructors outside the normalized SROIQ(D) fragment") :: ctx))
+  let limits := opts.limitsForProblem p
   let hasReal := usesReal p
   let hasOrderedData := p.allDataAtoms.any SROIQD.Termination.WiderData.isOrderedExactAtom
   let hasStringFacets := p.allDataAtoms.any SROIQD.Termination.WiderData.isStringFacetExtraAtom
@@ -332,17 +378,23 @@ private def tryObjectSubclass (ofnText queryText : String) (lib : List (IRI × S
 
 private def tryExactQuery (ofnText queryText : String) (lib : List (IRI × String))
     (ont : Ontology) (qAx : Axiom)
-    (qp : QueryProfile) (context : List (String × Json)) (basis : String) : Option (UInt32 × Json) := do
+    (qp : QueryProfile) (context : List (String × Json)) (basis : String)
+    (hasRules : Bool := false) : Option (UInt32 × Json) := do
   let verdict ←
-    ((SROIQD.Termination.ExactQuery.decideRealSourceQuery? ofnText queryText lib).map fun (_, _, v) => v) <|>
-    SROIQD.Termination.ExtendedQuery.decideRealExtendedQuery? ont qAx
+    if hasRules then
+      SROIQD.Termination.ExtendedQuery.classifyExtendedQueryWith Classification.fastConsistencyCheck ont qAx <|>
+      SROIQD.Termination.ExtendedQuery.decideRealExtendedQuery? ont qAx
+    else
+      ((SROIQD.Termination.ExactQuery.decideRealSourceQuery? ofnText queryText lib).map fun (_, _, v) => v) <|>
+      SROIQD.Termination.ExtendedQuery.decideRealExtendedQuery? ont qAx
   return (0, response (verdictName verdict) true
     (("decision_basis", toJson (basis ++ "-v1")) ::
       ("profile", encodeProfile qp basis) :: context))
 
 private def runQuery (id ofnText queryText : String) (lib : List (IRI × String))
-    (limits : Limits := {}) (allowExact : Bool := true)
-    (strictOwl2DL : Bool := false) : UInt32 × Json := Id.run do
+    (opts : QueryOptions) : UInt32 × Json := Id.run do
+  let strictOwl2DL := opts.strictOwl2DL
+  let allowExact := !opts.hasCustomLimits
   if id.isEmpty then return (2, response "UNSUPPORTED" false [("reason", toJson "empty ontology ID")])
   let scope := Json.mkObj [("semantics", toJson "owl2-ofn-sroiqd"), ("id", toJson id)]
   let baseContext := [("scope", scope), ("query", toJson queryText)]
@@ -350,20 +402,25 @@ private def runQuery (id ofnText queryText : String) (lib : List (IRI × String)
     | .ok r => pure r
     | .error err => return (2, response "UNSUPPORTED" false (("reason", toJson s!"parse/import error: {err}") :: baseContext))
   let prefixes := closure.prefixes
-  let ont := closure.ontology
+  let rawOnt := closure.ontology
   let qAx ← match parseQueryAxiom prefixes queryText with
     | .ok a => pure a
     | .error err => return (2, response "UNSUPPORTED" false (("reason", toJson s!"OFN query parse error: {err}") :: baseContext))
   if strictOwl2DL then
-    if let some err := StrictTyping.diagnoseStrictTypedOWL2DLQuery closure.declarations closure.annotationAxioms ont qAx then
+    if let some err := StrictTyping.diagnoseStrictTypedOWL2DLQuery closure.declarations closure.annotationAxioms rawOnt qAx then
       return (2, response "UNSUPPORTED" false
         (("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson false) :: ("reason", toJson err) :: baseContext))
-  let context := if strictOwl2DL then
+  let hasRules := !closure.rules.isEmpty
+  let (ont, _) ← match lowerClosureSWRL closure (SWRL.axiomNamedInds qAx) with
+    | .ok r => pure r
+    | .error err => return (2, response "UNSUPPORTED" false (("reason", toJson err) :: baseContext))
+  let strictCtx := if strictOwl2DL then
       ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: baseContext
     else baseContext
+  let context := if hasRules then ("swrl_rules", toJson closure.rules.length) :: strictCtx else strictCtx
   let qp := FastLocality.profileQueryFast ont (some qAx)
   let tryGrounding := fun () =>
-    if strictOwl2DL then none else tryObjectSubclass ofnText queryText lib qp context
+    if strictOwl2DL || hasRules then none else tryObjectSubclass ofnText queryText lib qp context
   -- Validate global OWL 2 DL structural/role restrictions on the full ontology
   -- (skipped only when full ontology is pure EL++, where regularity is checked directly in O(|RBox|))
   let fullCheck : Option (DatatypeDefs × Problem) ←
@@ -399,6 +456,7 @@ private def runQuery (id ofnText queryText : String) (lib : List (IRI × String)
       | some dp => pure dp
       | none => return (2, response "UNSUPPORTED" false
           (("reason", toJson "ontology contains cyclic datatype definitions or constructors outside the normalized SROIQ(D) fragment") :: ctx))
+  let limits := opts.limitsForProblem p
   let some incs := queryToInclusions defs qAx | do
     if allowExact then
       if let some verdict := SROIQD.Termination.ExtendedQuery.classifyExtendedQueryWith
@@ -434,7 +492,7 @@ private def runQuery (id ofnText queryText : String) (lib : List (IRI × String)
     | some b => [("decision_basis", toJson (b ++ "-v1"))]
     | none => []
   if allowExact && (hasBuiltInDataProp || !widerAdmissibleForReal) then
-    if let some res := tryExactQuery ofnText queryText lib ont qAx qp context (exactBasis?.getD "sroiqd-exact-query") then
+    if let some res := tryExactQuery ofnText queryText lib ont qAx qp context (exactBasis?.getD "sroiqd-exact-query") hasRules then
       return res
   match incs with
   | [q] =>
@@ -447,7 +505,7 @@ private def runQuery (id ofnText queryText : String) (lib : List (IRI × String)
       return (⟨a, b⟩ : InclusionEvidence)
     let some ev := pair | do
       if allowExact then
-        if let some res := tryExactQuery ofnText queryText lib ont qAx qp context (exactBasis?.getD "sroiqd-exact-query") then
+        if let some res := tryExactQuery ofnText queryText lib ont qAx qp context (exactBasis?.getD "sroiqd-exact-query") hasRules then
           return res
       return (2, response "UNKNOWN" false
         (("reason", toJson "SROIQ(D) search could not produce both certificates within interactive limits") ::
@@ -468,7 +526,7 @@ private def runQuery (id ofnText queryText : String) (lib : List (IRI × String)
       return (⟨← propose (counterProblem p q2) limits, ← propose (inclusionProblem p q2) limits⟩ : InclusionEvidence)
     let (some ev1, some ev2) := (pair1, pair2) | do
       if allowExact then
-        if let some res := tryExactQuery ofnText queryText lib ont qAx qp context (exactBasis?.getD "sroiqd-exact-query") then
+        if let some res := tryExactQuery ofnText queryText lib ont qAx qp context (exactBasis?.getD "sroiqd-exact-query") hasRules then
           return res
       return (2, response "UNKNOWN" false
         (("reason", toJson "SROIQ(D) search could not certify equivalence within interactive limits") ::
@@ -490,35 +548,35 @@ def run (j : Json) (cliStrict : Bool := false)
     [("reason", toJson "expected JSON array [\"sabrina-ofn-query-v1\", ontologyID, ofnText, (optional queryOfn), (optional importsObj), (optional optionsObj)]")])
   match fields.toList with
   | [.str _, .str id, .str ofnText] =>
-    return runConsistency id ofnText extraLib {} true cliStrict
+    return runConsistency id ofnText extraLib { strictOwl2DL := cliStrict }
   | [.str _, .str id, .str ofnText, .str queryText] =>
-    return runQuery id ofnText queryText extraLib {} true cliStrict
+    return runQuery id ofnText queryText extraLib { strictOwl2DL := cliStrict }
   | [.str _, .str id, .str ofnText, obj@(.obj _)] =>
     if isOptionsObj obj then
       match parseOptionsObj obj cliStrict with
-      | .ok opts => return runConsistency id ofnText extraLib opts.limits (!opts.hasCustomLimits) opts.strictOwl2DL
+      | .ok opts => return runConsistency id ofnText extraLib opts
       | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson s!"invalid options: {err}")])
     else
       match parseImportsObj obj with
-      | .ok lib => return runConsistency id ofnText (lib ++ extraLib) {} true cliStrict
+      | .ok lib => return runConsistency id ofnText (lib ++ extraLib) { strictOwl2DL := cliStrict }
       | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson s!"invalid imports map: {err}")])
   | [.str _, .str id, .str ofnText, impJson@(.obj _), optJson@(.obj _)] =>
     match parseImportsObj impJson, parseOptionsObj optJson cliStrict with
-    | .ok lib, .ok opts => return runConsistency id ofnText (lib ++ extraLib) opts.limits (!opts.hasCustomLimits) opts.strictOwl2DL
+    | .ok lib, .ok opts => return runConsistency id ofnText (lib ++ extraLib) opts
     | .error err, _ => return (2, response "UNSUPPORTED" false [("reason", toJson s!"invalid imports map: {err}")])
     | _, .error err => return (2, response "UNSUPPORTED" false [("reason", toJson s!"invalid options: {err}")])
   | [.str _, .str id, .str ofnText, .str queryText, obj@(.obj _)] =>
     if isOptionsObj obj then
       match parseOptionsObj obj cliStrict with
-      | .ok opts => return runQuery id ofnText queryText extraLib opts.limits (!opts.hasCustomLimits) opts.strictOwl2DL
+      | .ok opts => return runQuery id ofnText queryText extraLib opts
       | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson s!"invalid options: {err}")])
     else
       match parseImportsObj obj with
-      | .ok lib => return runQuery id ofnText queryText (lib ++ extraLib) {} true cliStrict
+      | .ok lib => return runQuery id ofnText queryText (lib ++ extraLib) { strictOwl2DL := cliStrict }
       | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson s!"invalid imports map: {err}")])
   | [.str _, .str id, .str ofnText, .str queryText, impJson@(.obj _), optJson@(.obj _)] =>
     match parseImportsObj impJson, parseOptionsObj optJson cliStrict with
-    | .ok lib, .ok opts => return runQuery id ofnText queryText (lib ++ extraLib) opts.limits (!opts.hasCustomLimits) opts.strictOwl2DL
+    | .ok lib, .ok opts => return runQuery id ofnText queryText (lib ++ extraLib) opts
     | .error err, _ => return (2, response "UNSUPPORTED" false [("reason", toJson s!"invalid imports map: {err}")])
     | _, .error err => return (2, response "UNSUPPORTED" false [("reason", toJson s!"invalid options: {err}")])
   | _ => return (2, response "UNSUPPORTED" false
@@ -574,8 +632,11 @@ def runClassifyDocument (id docText : String) (lib : List (IRI × String))
       return (2, response "UNSUPPORTED" false [
         ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
         ("reason", toJson err), ("scope", scope)])
-  if summaryOnly then
-    if let some ch := FastClassification.classifyOntologyCompactELRuntime closure.ontology closure.declarations numWorkers then
+  let (ont, _) ← match lowerClosureSWRL closure with
+    | .ok r => pure r
+    | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson err), ("scope", scope)])
+  if summaryOnly && closure.rules.isEmpty then
+    if let some ch := FastClassification.classifyOntologyCompactELRuntime ont closure.declarations numWorkers then
       let verdict := if ch.consistent then "CLASSIFIED" else "INCONSISTENT_ONTOLOGY"
       let subCount := ch.superClasses.foldl (fun acc arr => acc + arr.size) 0
       let dpCount := ch.directParents.foldl (fun acc arr => acc + if arr.isEmpty then 1 else arr.size) 0
@@ -591,7 +652,7 @@ def runClassifyDocument (id docText : String) (lib : List (IRI × String))
       let base := [("classification_summary", summary), ("scope", scope)]
       let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: base else base
       return (0, response verdict true fields)
-  match FastClassification.classifyOntologyFastRuntime closure.ontology closure.declarations numWorkers with
+  match FastClassification.classifyOntologyFastRuntime ont closure.declarations numWorkers with
   | some hier =>
     let verdict := if hier.consistent then "CLASSIFIED" else "INCONSISTENT_ONTOLOGY"
     let base := if summaryOnly then
@@ -607,7 +668,8 @@ def runClassifyDocument (id docText : String) (lib : List (IRI × String))
         [("classification_summary", summary), ("scope", scope)]
       else
         [("classification", encodeClassHierarchy hier), ("scope", scope)]
-    let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: base else base
+    let baseWithSWRL := if closure.rules.isEmpty then base else ("swrl_rules", toJson closure.rules.length) :: base
+    let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: baseWithSWRL else baseWithSWRL
     return (0, response verdict true fields)
   | none =>
     return (2, response "UNSUPPORTED" false [("reason", toJson "ontology outside exact classification fragment"), ("scope", scope)])
@@ -635,11 +697,15 @@ def runRealize (j : Json) (cliStrict : Bool := false)
       return (2, response "UNSUPPORTED" false [
         ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
         ("reason", toJson err), ("scope", scope)])
-  match FastClassification.realizeOntologyFastRuntime closure.ontology closure.declarations with
+  let (ont, _) ← match lowerClosureSWRL closure with
+    | .ok r => pure r
+    | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson err), ("scope", scope)])
+  match FastClassification.realizeOntologyFastRuntime ont closure.declarations with
   | some real =>
     let verdict := if real.consistent then "REALIZED" else "INCONSISTENT_ONTOLOGY"
     let base := [("realization", encodeRealization real), ("scope", scope)]
-    let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: base else base
+    let baseWithSWRL := if closure.rules.isEmpty then base else ("swrl_rules", toJson closure.rules.length) :: base
+    let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: baseWithSWRL else baseWithSWRL
     return (0, response verdict true fields)
   | none =>
     return (2, response "UNSUPPORTED" false [("reason", toJson "ontology outside exact realization fragment"), ("scope", scope)])
@@ -659,7 +725,10 @@ def runMaterializeDocument (id docText : String) (lib : List (IRI × String))
       return (2, response "UNSUPPORTED" false [
         ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
         ("reason", toJson err), ("scope", scope)], none)
-  match Materialize.materializeOntologyRuntime closure.ontology closure.declarations opts with
+  let (ont, _) ← match lowerClosureSWRL closure with
+    | .ok r => pure r
+    | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson err), ("scope", scope)], none)
+  match Materialize.materializeOntologyRuntime ont closure.declarations opts with
   | none =>
     return (2, response "UNSUPPORTED" false [
       ("reason", toJson "ontology outside exact materialization fragment"), ("scope", scope)], none)
@@ -668,17 +737,21 @@ def runMaterializeDocument (id docText : String) (lib : List (IRI × String))
       let base := [("consistent", toJson false), ("scope", scope)]
       let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: base else base
       return (1, response "INCONSISTENT_ONTOLOGY" true fields, none)
+    let freshInferred := res.inferredAxioms.filter fun ax => !closure.ontology.contains ax
+    let finalOnt := if opts.includeAsserted then closure.ontology ++ freshInferred else freshInferred
+    let finalRules := if opts.includeAsserted then closure.rules else []
     let rendered := Materialize.renderMaterialized fmt closure.declarations
-      closure.annotationAxioms res.materializedOntology closure.prefixes
-      closure.ontologyIRI closure.versionIRI
+      closure.annotationAxioms finalOnt closure.prefixes
+      closure.ontologyIRI closure.versionIRI finalRules
     let base := [
       ("consistent", toJson true),
       ("output_format", toJson fmt.name),
-      ("asserted_axioms", toJson res.assertedAxioms.length),
-      ("inferred_axioms", toJson res.inferredAxioms.length),
-      ("total_axioms", toJson res.materializedOntology.length),
+      ("asserted_axioms", toJson closure.ontology.length),
+      ("inferred_axioms", toJson freshInferred.length),
+      ("total_axioms", toJson finalOnt.length),
       ("scope", scope)]
-    let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: base else base
+    let baseWithSWRL := if closure.rules.isEmpty then base else ("swrl_rules", toJson closure.rules.length) :: base
+    let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: baseWithSWRL else baseWithSWRL
     return (0, response "MATERIALIZED" true fields, some rendered)
 
 private def isMaterializeOptionsObj (j : Json) : Bool :=
@@ -753,8 +826,12 @@ def runMaterialize (j : Json) (cliStrict : Bool := false)
       return (code, Json.mkObj (("output", toJson txt) :: obj.toList))
     | _, _ => return (code, metaJson)
 
-private def encodeJustifications (justs : List Ontology) : Json :=
-  toJson (justs.map fun J => toJson (J.map renderAxiom))
+private def encodeJustifications (justs : List Ontology)
+    (prov : List (Axiom × SWRL.SWRLRule) := []) : Json :=
+  if prov.isEmpty then
+    toJson (justs.map fun J => toJson (J.map renderAxiom))
+  else
+    toJson (justs.map fun J => toJson (renderJustificationWithRules prov J))
 
 /-- Explain inconsistency (`queryText? = none`) or entailment (`queryText? = some q`)
     with kernel-verified minimal justifications (Horridge–Kalyanpur–Parsia + Reiter HST). -/
@@ -773,7 +850,10 @@ def runExplainDocument (id docText : String) (queryText? : Option String)
         return (2, response "UNSUPPORTED" false [
           ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
           ("reason", toJson err), ("scope", scope)])
-    match Justification.explainInconsistencyRuntime closure.ontology maxJusts with
+    let (ont, prov) ← match lowerClosureSWRL closure with
+      | .ok r => pure r
+      | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson err), ("scope", scope)])
+    match Justification.explainInconsistencyRuntime ont maxJusts with
     | none =>
       return (2, response "UNSUPPORTED" false [("reason", toJson "ontology outside exact justification fragment"), ("scope", scope)])
     | some res =>
@@ -782,9 +862,10 @@ def runExplainDocument (id docText : String) (queryText? : Option String)
         ("kind", toJson "inconsistency"),
         ("inconsistent", toJson res.inconsistent),
         ("justification_count", toJson res.justifications.length),
-        ("justifications", encodeJustifications res.justifications),
+        ("justifications", encodeJustifications res.justifications prov),
         ("scope", scope)]
-      let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: base else base
+      let baseWithSWRL := if closure.rules.isEmpty then base else ("swrl_rules", toJson closure.rules.length) :: base
+      let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: baseWithSWRL else baseWithSWRL
       return (0, response verdict true fields)
   | some qText =>
     let qAx ← match parseQueryAxiom closure.prefixes qText with
@@ -796,7 +877,10 @@ def runExplainDocument (id docText : String) (queryText? : Option String)
         return (2, response "UNSUPPORTED" false [
           ("strict_owl2dl", toJson true), ("owl2dl_valid", toJson false),
           ("reason", toJson err), ("query", toJson qText), ("scope", scope)])
-    match Justification.explainEntailmentRuntime closure.ontology qAx maxJusts with
+    let (ont, prov) ← match lowerClosureSWRL closure (SWRL.axiomNamedInds qAx) with
+      | .ok r => pure r
+      | .error err => return (2, response "UNSUPPORTED" false [("reason", toJson err), ("query", toJson qText), ("scope", scope)])
+    match Justification.explainEntailmentRuntime ont qAx maxJusts with
     | none =>
       return (2, response "UNSUPPORTED" false [("reason", toJson "query/ontology outside exact justification fragment"), ("query", toJson qText), ("scope", scope)])
     | some res =>
@@ -806,9 +890,10 @@ def runExplainDocument (id docText : String) (queryText? : Option String)
         ("query", toJson qText),
         ("entailed", toJson res.entailed),
         ("justification_count", toJson res.justifications.length),
-        ("justifications", encodeJustifications res.justifications),
+        ("justifications", encodeJustifications res.justifications prov),
         ("scope", scope)]
-      let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: base else base
+      let baseWithSWRL := if closure.rules.isEmpty then base else ("swrl_rules", toJson closure.rules.length) :: base
+      let fields := if strict then ("strict_owl2dl", toJson true) :: ("owl2dl_valid", toJson true) :: baseWithSWRL else baseWithSWRL
       return (0, response verdict true fields)
 
 private def isExplainOptionsObj (j : Json) : Bool :=

@@ -9,6 +9,7 @@ import Sabrina.OWL2.IncrementalABox
 import Sabrina.OWL2.Classification
 import Sabrina.OWL2.FastClassification
 import Sabrina.OWL2.Justification
+import Sabrina.OWL2.SWRLReduction
 import Sabrina.OWL2.SROIQD.Termination.ExtendedQueryDecision
 
 /-! Persistent JSON-lines session server (`sabrina-session`) for incremental
@@ -41,6 +42,7 @@ private structure SessionState where
   prefixes : PrefixMap := []
   declarations : List EntityDecl := []
   baseOnt : Ontology := []
+  rules : List SWRL.SWRLRule := []
   baseIndex : Option FastLocality.LocalityIndex := none
   fullFragment : Fragment := .el
   elState : Option IncrementalState := none
@@ -78,8 +80,8 @@ private def parseImportsField (obj : Std.TreeMap.Raw String Json compare) :
       out := (k, ← v.getStr?) :: out
     return out.reverse
 
-private def parseLimitsField (obj : Std.TreeMap.Raw String Json compare) : Limits := Id.run do
-  let mut limits : Limits := {}
+private def parseLimitsField (obj : Std.TreeMap.Raw String Json compare) (p : Problem) : Limits := Id.run do
+  let mut limits := Limits.forProblem p
   if let some (.num n) := obj.get? "max_worlds" then
     if n.mantissa > 0 && n.exponent == 0 then limits := { limits with worlds := n.mantissa.toNat }
   if let some (.num n) := obj.get? "max_steps" then
@@ -87,13 +89,34 @@ private def parseLimitsField (obj : Std.TreeMap.Raw String Json compare) : Limit
   return limits
 
 private def currentMode (st : SessionState) : String :=
-  if st.elState.isSome && st.sroiqdOnlyCount == 0 then "el-incremental" else "sroiqd-cached"
+  if st.elState.isSome && st.sroiqdOnlyCount == 0 && st.rules.isEmpty then "el-incremental" else "sroiqd-cached"
 
 private def activeABox (st : SessionState) : Ontology :=
   st.aboxByName.map (fun (_, _, ax) => ax)
 
 private def activeOnt (st : SessionState) : Ontology :=
   st.baseOnt ++ activeABox st
+
+private def activeOntWithRules (st : SessionState) (extraInds : List IRI := []) :
+    Except String (Ontology × List (Axiom × SWRL.SWRLRule)) := do
+  let ont := activeOnt st
+  if st.rules.isEmpty then return (ont, [])
+  if let some err := SWRL.diagnoseDLSafeRules st.rules then throw err
+  let declInds := st.declarations.filterMap fun d =>
+    if d.kind == .namedIndividual then some d.iri else none
+  let inds := SWRL.collectNamedIndividuals ont st.rules (declInds ++ extraInds)
+  let mut ruleAxs : List Axiom := []
+  let mut prov : List (Axiom × SWRL.SWRLRule) := []
+  for r in st.rules do
+    let axs ← SWRL.lowerSWRLRules ont inds [r]
+    ruleAxs := ruleAxs ++ axs
+    for ax in axs do
+      prov := (ax, r) :: prov
+  return (ont ++ ruleAxs, prov.reverse)
+
+private def renderSessionJust (prov : List (Axiom × SWRL.SWRLRule)) (J : Ontology) : List String :=
+  if prov.isEmpty then J.map renderAxiom
+  else (J.map fun ax => match prov.lookup ax with | some r => renderSWRLRule r | none => renderAxiom ax).eraseDups
 
 private def verdictName : InclusionVerdict → String
   | .entailed => "ENTAILED"
@@ -146,11 +169,14 @@ private def handleLoadTBox (obj : Std.TreeMap.Raw String Json compare) : Session
     | .error err => return ({}, Json.mkObj [("ok", toJson false), ("error", toJson s!"parse/import error: {err}")])
   let prefixes := closure.prefixes
   let ont := closure.ontology
+  if !closure.rules.isEmpty then
+    if let some err := SWRL.diagnoseDLSafeRules closure.rules then
+      return ({}, Json.mkObj [("ok", toJson false), ("error", toJson err)])
   let fp := profileOntology ont
   let frag := fp.leastFragment
   -- Validate global restrictions once at TBox load time
   let mut elState : Option IncrementalState := none
-  if frag == .el then
+  if frag == .el && closure.rules.isEmpty then
     if let some elAxs := normalizeEL ont then
       let mut rules : Sabrina.ALC.RoleTheory := []
       let mut chains : List RoleChains.Chain := []
@@ -174,6 +200,7 @@ private def handleLoadTBox (obj : Std.TreeMap.Raw String Json compare) : Session
     prefixes := prefixes
     declarations := closure.declarations
     baseOnt := ont
+    rules := closure.rules
     baseIndex := some (FastLocality.LocalityIndex.build ont)
     fullFragment := frag
     elState := elState
@@ -186,6 +213,7 @@ private def handleLoadTBox (obj : Std.TreeMap.Raw String Json compare) : Session
     ("cmd", toJson "load_tbox"),
     ("id", toJson id),
     ("tbox_axioms", toJson ont.length),
+    ("swrl_rules", toJson closure.rules.length),
     ("fragment", toJson frag.name),
     ("mode", toJson (currentMode st))]
   return (st, res)
@@ -260,7 +288,6 @@ private def handleRetract (st : SessionState) (obj : Std.TreeMap.Raw String Json
 private def handleCheckConsistency (st : SessionState) (obj : Std.TreeMap.Raw String Json compare) : Json := Id.run do
   if !st.loaded then
     return Json.mkObj [("ok", toJson false), ("error", toJson "no TBox loaded; call load_tbox first")]
-  let limits := parseLimitsField obj
   if st.sroiqdOnlyCount == 0 then
     if let some inc := st.elState then
       if let some res := inc.checkConsistency then
@@ -276,6 +303,25 @@ private def handleCheckConsistency (st : SessionState) (obj : Std.TreeMap.Raw St
             ("verdict", toJson "INCONSISTENT_ONTOLOGY"), ("lean_verified", toJson true),
             ("mode", toJson "el-incremental"), ("certificate", encodeABoxProof pf)]
   -- Cached SROIQ(D) path: extract ⊥-local module (provably equisatisfiable via FastLocality.extractBotModuleWithIndex_sat_iff)
+  if !st.rules.isEmpty then
+    let ont := activeOnt st
+    let declInds := st.declarations.filterMap fun d =>
+      if d.kind == .namedIndividual then some d.iri else none
+    let inds := SWRL.collectNamedIndividuals ont st.rules declInds
+    match SWRL.decideWithSWRLFast? ont inds st.rules with
+    | .error err =>
+      return Json.mkObj [("ok", toJson false), ("verdict", toJson "UNSUPPORTED"), ("lean_verified", toJson false), ("reason", toJson err)]
+    | .ok (some sat) =>
+      let verdict := if sat then "SATISFIABLE" else "INCONSISTENT_ONTOLOGY"
+      return Json.mkObj [
+        ("ok", toJson true), ("cmd", toJson "check_consistency"),
+        ("verdict", toJson verdict), ("lean_verified", toJson true),
+        ("mode", toJson "sroiqd-swrl")]
+    | .ok none =>
+      return Json.mkObj [
+        ("ok", toJson true), ("cmd", toJson "check_consistency"),
+        ("verdict", toJson "UNKNOWN"), ("lean_verified", toJson false),
+        ("mode", toJson "sroiqd-swrl")]
   let ont := activeOnt st
   let mod := match st.baseIndex with
     | some baseIdx =>
@@ -287,6 +333,7 @@ private def handleCheckConsistency (st : SessionState) (obj : Std.TreeMap.Raw St
     ("reason", toJson "active ontology outside normalized SROIQ(D)")]
   if let some err := checkRoleRestrictions p then
     return Json.mkObj [("ok", toJson false), ("verdict", toJson "UNSUPPORTED"), ("lean_verified", toJson false), ("reason", toJson err)]
+  let limits := parseLimitsField obj p
   let some ev := propose p limits | return Json.mkObj [
     ("ok", toJson true), ("cmd", toJson "check_consistency"),
     ("verdict", toJson "UNKNOWN"), ("lean_verified", toJson false),
@@ -307,7 +354,6 @@ private def handleQuery (st : SessionState) (obj : Std.TreeMap.Raw String Json c
   let qAx ← match parseQueryAxiom st.prefixes qText with
     | .ok a => pure a
     | .error err => return Json.mkObj [("ok", toJson false), ("error", toJson s!"OFN query parse error: {err}")]
-  let limits := parseLimitsField obj
   -- Fast path: live EL++ incremental ABox state
   if st.sroiqdOnlyCount == 0 then
     if let some inc := st.elState then
@@ -356,19 +402,24 @@ private def handleQuery (st : SessionState) (obj : Std.TreeMap.Raw String Json c
               ("verdict", toJson "ENTAILED"), ("lean_verified", toJson true),
               ("mode", toJson "el-incremental"), ("certificate", encodeABoxProof pf)]
       | _ => pure ()
-  -- General cached SROIQ(D) path over ⊥-local module of (baseOnt ++ activeABox)
-  let ont := activeOnt st
-  let qp := match st.baseIndex with
-    | some baseIdx =>
-      let idx := if st.aboxByName.isEmpty then baseIdx else baseIdx.extend (activeABox st)
-      FastLocality.profileQueryWithIndex idx ont (some qAx)
-    | none => FastLocality.profileQueryFast ont (some qAx)
+  -- General cached SROIQ(D) path over ⊥-local module of (baseOnt ++ activeABox ++ loweredRules)
+  let (ont, _) ← match activeOntWithRules st (SWRL.axiomNamedInds qAx) with
+    | .ok r => pure r
+    | .error err => return Json.mkObj [("ok", toJson false), ("verdict", toJson "UNSUPPORTED"), ("lean_verified", toJson false), ("reason", toJson err)]
+  let qp :=
+    if !st.rules.isEmpty then FastLocality.profileQueryFast ont (some qAx)
+    else match st.baseIndex with
+      | some baseIdx =>
+        let idx := if st.aboxByName.isEmpty then baseIdx else baseIdx.extend (activeABox st)
+        FastLocality.profileQueryWithIndex idx ont (some qAx)
+      | none => FastLocality.profileQueryFast ont (some qAx)
   let some (defs, p) := normalizeWithDefs qp.extractedModule | return Json.mkObj [
     ("ok", toJson false), ("verdict", toJson "UNSUPPORTED"), ("lean_verified", toJson false),
     ("reason", toJson "active ontology outside normalized SROIQ(D)")]
   let some incs := queryToInclusions defs qAx | return Json.mkObj [
     ("ok", toJson false), ("verdict", toJson "UNSUPPORTED"), ("lean_verified", toJson false),
     ("reason", toJson "unsupported query axiom form")]
+  let limits := parseLimitsField obj p
   match incs with
   | [q] =>
     if let some err := checkRoleRestrictions (inclusionProblem p q) then
@@ -400,41 +451,47 @@ private def handleClassify (st : SessionState) : Json :=
   if !st.loaded then
     Json.mkObj [("ok", toJson false), ("error", toJson "no TBox loaded; call load_tbox first")]
   else
-    let ont := activeOnt st
-    match FastClassification.classifyOntologyFastRuntime ont st.declarations with
-    | some h =>
-      Json.mkObj [
-        ("ok", toJson true), ("cmd", toJson "classify"),
-        ("lean_verified", toJson true),
-        ("consistent", toJson h.consistent),
-        ("classes", toJson h.classes),
-        ("unsatisfiable", toJson h.unsatisfiable),
-        ("subsumptions", toJson (h.subsumptions.map fun (a, b) => #[toJson a, toJson b])),
-        ("equivalences", toJson h.equivalences),
-        ("direct_parents", Json.mkObj (h.directParents.map fun (c, ps) => (c, toJson ps)))]
-    | none =>
-      Json.mkObj [("ok", toJson false), ("cmd", toJson "classify"), ("lean_verified", toJson false),
-        ("error", toJson "active ontology outside exact classification fragment")]
+    match activeOntWithRules st with
+    | .error err =>
+      Json.mkObj [("ok", toJson false), ("cmd", toJson "classify"), ("lean_verified", toJson false), ("error", toJson err)]
+    | .ok (ont, _) =>
+      match FastClassification.classifyOntologyFastRuntime ont st.declarations with
+      | some h =>
+        Json.mkObj [
+          ("ok", toJson true), ("cmd", toJson "classify"),
+          ("lean_verified", toJson true),
+          ("consistent", toJson h.consistent),
+          ("classes", toJson h.classes),
+          ("unsatisfiable", toJson h.unsatisfiable),
+          ("subsumptions", toJson (h.subsumptions.map fun (a, b) => #[toJson a, toJson b])),
+          ("equivalences", toJson h.equivalences),
+          ("direct_parents", Json.mkObj (h.directParents.map fun (c, ps) => (c, toJson ps)))]
+      | none =>
+        Json.mkObj [("ok", toJson false), ("cmd", toJson "classify"), ("lean_verified", toJson false),
+          ("error", toJson "active ontology outside exact classification fragment")]
 
 private def handleRealize (st : SessionState) : Json :=
   if !st.loaded then
     Json.mkObj [("ok", toJson false), ("error", toJson "no TBox loaded; call load_tbox first")]
   else
-    let ont := activeOnt st
-    match FastClassification.realizeOntologyFastRuntime ont st.declarations with
-    | some r =>
-      Json.mkObj [
-        ("ok", toJson true), ("cmd", toJson "realize"),
-        ("lean_verified", toJson true),
-        ("consistent", toJson r.consistent),
-        ("individuals", toJson r.individuals),
-        ("entries", toJson (r.entries.map fun e => Json.mkObj [
-          ("individual", toJson e.individual),
-          ("all_types", toJson e.allTypes),
-          ("direct_types", toJson e.directTypes)]))]
-    | none =>
-      Json.mkObj [("ok", toJson false), ("cmd", toJson "realize"), ("lean_verified", toJson false),
-        ("error", toJson "active ontology outside exact realization fragment")]
+    match activeOntWithRules st with
+    | .error err =>
+      Json.mkObj [("ok", toJson false), ("cmd", toJson "realize"), ("lean_verified", toJson false), ("error", toJson err)]
+    | .ok (ont, _) =>
+      match FastClassification.realizeOntologyFastRuntime ont st.declarations with
+      | some r =>
+        Json.mkObj [
+          ("ok", toJson true), ("cmd", toJson "realize"),
+          ("lean_verified", toJson true),
+          ("consistent", toJson r.consistent),
+          ("individuals", toJson r.individuals),
+          ("entries", toJson (r.entries.map fun e => Json.mkObj [
+            ("individual", toJson e.individual),
+            ("all_types", toJson e.allTypes),
+            ("direct_types", toJson e.directTypes)]))]
+      | none =>
+        Json.mkObj [("ok", toJson false), ("cmd", toJson "realize"), ("lean_verified", toJson false),
+          ("error", toJson "active ontology outside exact realization fragment")]
 
 private def handleExplain (st : SessionState) (obj : Std.TreeMap.Raw String Json compare) : Json := Id.run do
   if !st.loaded then
@@ -442,9 +499,11 @@ private def handleExplain (st : SessionState) (obj : Std.TreeMap.Raw String Json
   let maxJ := match obj.get? "max_justifications" with
     | some (.num n) => if n.mantissa > 0 && n.exponent == 0 then n.mantissa.toNat else 5
     | _ => 5
-  let ont := activeOnt st
   match obj.get? "ofn" with
   | none | some .null =>
+    let (ont, prov) ← match activeOntWithRules st with
+      | .ok r => pure r
+      | .error err => return Json.mkObj [("ok", toJson false), ("cmd", toJson "explain"), ("lean_verified", toJson false), ("error", toJson err)]
     match Justification.explainInconsistencyRuntime ont maxJ with
     | some res =>
       let verdict := if res.inconsistent then "EXPLAINED" else "SATISFIABLE"
@@ -453,7 +512,7 @@ private def handleExplain (st : SessionState) (obj : Std.TreeMap.Raw String Json
         ("verdict", toJson verdict), ("lean_verified", toJson true),
         ("inconsistent", toJson res.inconsistent),
         ("justification_count", toJson res.justifications.length),
-        ("justifications", toJson (res.justifications.map fun J => toJson (J.map renderAxiom)))]
+        ("justifications", toJson (res.justifications.map fun J => toJson (renderSessionJust prov J)))]
     | none =>
       return Json.mkObj [("ok", toJson false), ("cmd", toJson "explain"), ("lean_verified", toJson false),
         ("error", toJson "active ontology outside exact justification fragment")]
@@ -461,6 +520,9 @@ private def handleExplain (st : SessionState) (obj : Std.TreeMap.Raw String Json
     let qAx ← match parseQueryAxiom st.prefixes qText with
       | .ok a => pure a
       | .error err => return Json.mkObj [("ok", toJson false), ("error", toJson s!"OFN query parse error: {err}")]
+    let (ont, prov) ← match activeOntWithRules st (SWRL.axiomNamedInds qAx) with
+      | .ok r => pure r
+      | .error err => return Json.mkObj [("ok", toJson false), ("cmd", toJson "explain"), ("lean_verified", toJson false), ("error", toJson err)]
     match Justification.explainEntailmentRuntime ont qAx maxJ with
     | some res =>
       let verdict := if res.entailed then "EXPLAINED" else "NOT_ENTAILED"
@@ -469,7 +531,7 @@ private def handleExplain (st : SessionState) (obj : Std.TreeMap.Raw String Json
         ("query", toJson qText), ("verdict", toJson verdict), ("lean_verified", toJson true),
         ("entailed", toJson res.entailed),
         ("justification_count", toJson res.justifications.length),
-        ("justifications", toJson (res.justifications.map fun J => toJson (J.map renderAxiom)))]
+        ("justifications", toJson (res.justifications.map fun J => toJson (renderSessionJust prov J)))]
     | none =>
       return Json.mkObj [("ok", toJson false), ("cmd", toJson "explain"), ("lean_verified", toJson false),
         ("error", toJson "query/ontology outside exact justification fragment")]

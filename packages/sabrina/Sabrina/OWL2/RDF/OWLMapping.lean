@@ -2,6 +2,7 @@ import Sabrina.OWL2.RDF.Graph
 import Sabrina.OWL2.RDF.XMLParser
 import Sabrina.OWL2.RDF.TurtleParser
 import Sabrina.OWL2.StrictTyping
+import Sabrina.OWL2.SWRL
 
 /-! W3C OWL 2 Mapping from RDF Graphs to the Structural Specification (Tables 3–18),
     forward Structural-to-RDF encoder, unified auto-detecting document & import-closure
@@ -35,6 +36,8 @@ private structure MapState where
   declarations : List EntityDecl := []
   annotationAxioms : List AnnotationAxiom := []
   axioms : List Axiom := []
+  swrlVars : List RDFTerm := []
+  rules : List SWRL.SWRLRule := []
 
 private abbrev MapM (α : Type) := StateT MapState (Except String) α
 
@@ -144,6 +147,8 @@ private def consumeRDFListAux : Nat → RDFTerm → List RDFTerm → List RDFTer
       markConsumed i2
       if let some iTy ← hasType cur (rdfNS ++ "List") then
         markConsumed iTy
+      if let some iTy2 ← hasType cur swrlAtomList then
+        markConsumed iTy2
       consumeRDFListAux fuel nextNode (cur :: visited) (item :: items)
     | _, _ =>
       throw s!"malformed rdf:List cell at {repr cur}"
@@ -373,6 +378,13 @@ private def addDecl (kind : EntityKind) (iri : IRI) : MapM Unit :=
 private def addAnnot (a : AnnotationAxiom) : MapM Unit :=
   modify fun st => { st with annotationAxioms := a :: st.annotationAxioms }
 
+private def addSWRLVar (t : RDFTerm) : MapM Unit :=
+  modify fun st =>
+    if st.swrlVars.contains t then st else { st with swrlVars := t :: st.swrlVars }
+
+private def addSWRLRule (r : SWRL.SWRLRule) : MapM Unit :=
+  modify fun st => { st with rules := r :: st.rules }
+
 /-- Pass 1: Ontology header, `owl:versionIRI`, `owl:imports` (Tables 3–4),
     and reified axiom/annotation wrappers (`owl:Axiom`, `owl:Annotation`). -/
 private def passHeaderAndReification : MapM Unit := do
@@ -410,7 +422,9 @@ private def passDeclarations : MapM Unit := do
   let act ← activeIndices
   for (i, t) in act do
     if t.predicate == rdfType then
-      if let .iri iri := t.subject then
+      if t.object == .iri swrlVariable then
+        markConsumed i; addSWRLVar t.subject
+      else if let .iri iri := t.subject then
         if t.object == .iri owlClass then
           markConsumed i; addDecl .cls iri
         else if t.object == .iri rdfsDatatype then
@@ -431,6 +445,143 @@ private def passDeclarations : MapM Unit := do
     for (i, t) in ← findActiveByS hdrTerm do
       if t.predicate != rdfType then
         markConsumed i
+
+private def decodeSWRLIArg (term : RDFTerm) : MapM SWRL.IArg := do
+  let st ← get
+  if st.swrlVars.contains term then
+    match term with
+    | .iri u => return .var u
+    | .bnode b => return .var s!"urn:swrl:bnode:{st.docId}:{b}"
+    | .literal _ _ _ => throw "SWRL variable cannot be a literal"
+  else
+    match term with
+    | .iri u =>
+      if u.startsWith "urn:swrl" then return .var u
+      else return .ind (.named u)
+    | .bnode b => return .ind (.anonymous st.docId b)
+    | .literal _ _ _ => throw "expected individual or SWRL variable, got literal"
+
+private def decodeSWRLDArg (term : RDFTerm) : MapM SWRL.DArg := do
+  let st ← get
+  if st.swrlVars.contains term then
+    match term with
+    | .iri u => return .var u
+    | .bnode b => return .var s!"urn:swrl:bnode:{st.docId}:{b}"
+    | .literal _ _ _ => throw "SWRL variable cannot be a literal"
+  else
+    match term with
+    | .iri u => return .var u
+    | .bnode b => return .var s!"urn:swrl:bnode:{st.docId}:{b}"
+    | .literal _ _ _ =>
+      match term.toOwlLiteral with
+      | some l => return .lit l
+      | none => throw "invalid literal in SWRL data argument"
+
+private def consumeSWRLAtom (fuel : Nat) (atomNode : RDFTerm) : MapM SWRL.SWRLAtom := do
+  if let some iTy ← hasType atomNode swrlClassAtom then
+    markConsumed iTy
+    let preds ← findActiveBySP atomNode swrlClassPredicate
+    let arg1s ← findActiveBySP atomNode swrlArgument1
+    match preds, arg1s with
+    | [(i1, clsTerm)], [(i2, a1Term)] =>
+      markConsumed i1; markConsumed i2
+      let c ← consumeClassExpr fuel clsTerm
+      let a1 ← decodeSWRLIArg a1Term
+      return .classAtom c a1
+    | _, _ => throw "malformed swrl:ClassAtom (requires swrl:classPredicate and swrl:argument1)"
+  else if let some iTy ← hasType atomNode swrlDataRangeAtom then
+    markConsumed iTy
+    let drs ← findActiveBySP atomNode swrlDataRange
+    let arg1s ← findActiveBySP atomNode swrlArgument1
+    match drs, arg1s with
+    | [(i1, drTerm)], [(i2, a1Term)] =>
+      markConsumed i1; markConsumed i2
+      let dr ← consumeDataRange fuel drTerm
+      let a1 ← decodeSWRLDArg a1Term
+      return .dataRangeAtom dr a1
+    | _, _ => throw "malformed swrl:DataRangeAtom (requires swrl:dataRange and swrl:argument1)"
+  else if let some iTy ← hasType atomNode swrlIndividualPropertyAtom then
+    markConsumed iTy
+    let preds ← findActiveBySP atomNode swrlPropertyPredicate
+    let arg1s ← findActiveBySP atomNode swrlArgument1
+    let arg2s ← findActiveBySP atomNode swrlArgument2
+    match preds, arg1s, arg2s with
+    | [(i1, pTerm)], [(i2, a1Term)], [(i3, a2Term)] =>
+      markConsumed i1; markConsumed i2; markConsumed i3
+      let r ← consumeObjPropExpr pTerm
+      let a1 ← decodeSWRLIArg a1Term
+      let a2 ← decodeSWRLIArg a2Term
+      return .objectPropertyAtom r a1 a2
+    | _, _, _ => throw "malformed swrl:IndividualPropertyAtom"
+  else if let some iTy ← hasType atomNode swrlDatavaluedPropertyAtom then
+    markConsumed iTy
+    let preds ← findActiveBySP atomNode swrlPropertyPredicate
+    let arg1s ← findActiveBySP atomNode swrlArgument1
+    let arg2s ← findActiveBySP atomNode swrlArgument2
+    match preds, arg1s, arg2s with
+    | [(i1, .iri pIRI)], [(i2, a1Term)], [(i3, a2Term)] =>
+      markConsumed i1; markConsumed i2; markConsumed i3
+      let a1 ← decodeSWRLIArg a1Term
+      let a2 ← decodeSWRLDArg a2Term
+      return .dataPropertyAtom pIRI a1 a2
+    | _, _, _ => throw "malformed swrl:DatavaluedPropertyAtom"
+  else if let some iTy ← hasType atomNode swrlSameIndividualAtom then
+    markConsumed iTy
+    let arg1s ← findActiveBySP atomNode swrlArgument1
+    let arg2s ← findActiveBySP atomNode swrlArgument2
+    match arg1s, arg2s with
+    | [(i1, a1Term)], [(i2, a2Term)] =>
+      markConsumed i1; markConsumed i2
+      return .sameIndividualAtom (← decodeSWRLIArg a1Term) (← decodeSWRLIArg a2Term)
+    | _, _ => throw "malformed swrl:SameIndividualAtom"
+  else if let some iTy ← hasType atomNode swrlDifferentIndividualsAtom then
+    markConsumed iTy
+    let arg1s ← findActiveBySP atomNode swrlArgument1
+    let arg2s ← findActiveBySP atomNode swrlArgument2
+    match arg1s, arg2s with
+    | [(i1, a1Term)], [(i2, a2Term)] =>
+      markConsumed i1; markConsumed i2
+      return .differentIndividualsAtom (← decodeSWRLIArg a1Term) (← decodeSWRLIArg a2Term)
+    | _, _ => throw "malformed swrl:DifferentIndividualsAtom"
+  else if let some iTy ← hasType atomNode swrlBuiltinAtom then
+    markConsumed iTy
+    let bs ← findActiveBySP atomNode swrlBuiltin
+    let argLists ← findActiveBySP atomNode swrlArguments
+    match bs, argLists with
+    | [(i1, .iri bIRI)], [(i2, listHead)] =>
+      markConsumed i1; markConsumed i2
+      let items ← consumeRDFList listHead
+      let args ← items.mapM decodeSWRLDArg
+      return .builtinAtom bIRI args
+    | _, _ => throw "malformed swrl:BuiltinAtom"
+  else
+    throw s!"unrecognized SWRL atom node {repr atomNode}"
+
+/-- Pass 2.5: W3C SWRL rules (`swrl:Imp`, `swrl:body`, `swrl:head`, `swrl:AtomList`). -/
+private def passSWRLRules (fuel : Nat) : MapM Unit := do
+  let act ← activeIndices
+  for (i, t) in act do
+    if ← isConsumed i then continue
+    if t.predicate != rdfType || t.object != .iri swrlImp then continue
+    markConsumed i
+    let impNode := t.subject
+    let bodies ← findActiveBySP impNode swrlBody
+    let heads ← findActiveBySP impNode swrlHead
+    match bodies, heads with
+    | [(ib, bodyHead)], [(ih, headHead)] =>
+      markConsumed ib; markConsumed ih
+      -- Consume optional rule-level annotations (rdfs:label, rdfs:comment, swrla:*, etc.)
+      let st ← get
+      for (ia, ta) in ← findActiveByS impNode do
+        if isAnnotPropIRI st ta.predicate || ta.predicate.startsWith swrlaNS ||
+            isKnownMetadataVocab ta.predicate then
+          markConsumed ia
+      let bodyTerms ← consumeRDFList bodyHead
+      let headTerms ← consumeRDFList headHead
+      let bodyAtoms ← bodyTerms.mapM (consumeSWRLAtom fuel)
+      let headAtoms ← headTerms.mapM (consumeSWRLAtom fuel)
+      addSWRLRule { body := bodyAtoms, head := headAtoms }
+    | _, _ => throw "malformed swrl:Imp (requires swrl:body and swrl:head)"
 
 /-- Pass 3: Blank-node multi-triple axioms (`owl:AllDisjointClasses`,
     `owl:AllDisjointProperties`, `owl:AllDifferent`, `owl:NegativePropertyAssertion`). -/
@@ -746,6 +897,7 @@ def mapRDFGraph (docId : String) (g : RDFGraph) (strictUnconsumed : Bool := true
   let ((), st) ← (do
     passHeaderAndReification
     passDeclarations
+    passSWRLRules fuel
     passCompoundAxioms fuel
     passTBoxRBoxAxioms fuel
     passAssertions fuel
@@ -763,6 +915,7 @@ def mapRDFGraph (docId : String) (g : RDFGraph) (strictUnconsumed : Bool := true
     declarations := st.declarations.reverse
     annotationAxioms := st.annotationAxioms.reverse
     ontology := st.axioms.reverse
+    rules := st.rules.reverse
   }
 
 /-! ### 4. Auto-Detecting Multi-Syntax Document & Import-Closure Parser -/
@@ -950,12 +1103,14 @@ def resolveImportClosureAuto (rootText : String) (library : List (IRI × String)
   let mut allDecls : List EntityDecl := []
   let mut allAnnots : List AnnotationAxiom := []
   let mut allAxioms : Ontology := []
+  let mut allRules : List SWRL.SWRLRule := []
   for raw in reachableOrd do
     let doc ← raw.finalize strictRDF closureDecls
     if rootDoc?.isNone then rootDoc? := some doc
     allDecls := allDecls ++ doc.declarations
     allAnnots := allAnnots ++ doc.annotationAxioms
     allAxioms := allAxioms ++ doc.ontology
+    allRules := allRules ++ doc.rules
   let rootDoc := rootDoc?.getD { prefixes := [], ontology := [] }
   return {
     prefixes := rootDoc.prefixes
@@ -964,6 +1119,7 @@ def resolveImportClosureAuto (rootText : String) (library : List (IRI × String)
     ontology := allAxioms
     ontologyIRI := rootDoc.ontologyIRI
     versionIRI := rootDoc.versionIRI
+    rules := allRules
   }
 
 /-! ### 5. Forward Structural-to-RDF Mapping (W3C Table 1) & Correspondence Proofs -/
@@ -1297,29 +1453,110 @@ private def encodeAxiomEnc : Axiom → EncM Unit
     emitEnc node owlAssertionProperty (.iri dp)
     emitEnc node owlTargetValue (encodeLitEnc l)
 
-/-- Forward-encode an OWL 2 ontology (with declarations & optional header) into
-    a W3C OWL 2 RDF graph. -/
+private def encodeSWRLIArgEnc : SWRL.IArg → RDFTerm
+  | .var v => .iri v
+  | .ind a => encodeIndEnc a
+
+private def encodeSWRLDArgEnc : SWRL.DArg → RDFTerm
+  | .var v => .iri v
+  | .lit l => encodeLitEnc l
+
+private def encodeSWRLAtomListEnc (items : List RDFTerm) : EncM RDFTerm := do
+  match items with
+  | [] => return .iri rdfNil
+  | x :: xs =>
+    let cell ← freshEnc
+    let rest ← encodeSWRLAtomListEnc xs
+    emitEnc cell rdfType (.iri swrlAtomList)
+    emitEnc cell rdfFirst x
+    emitEnc cell rdfRest rest
+    return cell
+
+private def encodeSWRLAtomEnc : SWRL.SWRLAtom → EncM RDFTerm
+  | .classAtom c a => do
+    let b ← freshEnc
+    emitEnc b rdfType (.iri swrlClassAtom)
+    emitEnc b swrlClassPredicate (← encodeClassExprEnc c)
+    emitEnc b swrlArgument1 (encodeSWRLIArgEnc a)
+    return b
+  | .dataRangeAtom dr a => do
+    let b ← freshEnc
+    emitEnc b rdfType (.iri swrlDataRangeAtom)
+    emitEnc b swrlDataRange (← encodeDataRangeEnc dr)
+    emitEnc b swrlArgument1 (encodeSWRLDArgEnc a)
+    return b
+  | .objectPropertyAtom r a1 a2 => do
+    let b ← freshEnc
+    emitEnc b rdfType (.iri swrlIndividualPropertyAtom)
+    emitEnc b swrlPropertyPredicate (← encodeObjPropEnc r)
+    emitEnc b swrlArgument1 (encodeSWRLIArgEnc a1)
+    emitEnc b swrlArgument2 (encodeSWRLIArgEnc a2)
+    return b
+  | .dataPropertyAtom p a1 a2 => do
+    let b ← freshEnc
+    emitEnc b rdfType (.iri swrlDatavaluedPropertyAtom)
+    emitEnc b swrlPropertyPredicate (.iri p)
+    emitEnc b swrlArgument1 (encodeSWRLIArgEnc a1)
+    emitEnc b swrlArgument2 (encodeSWRLDArgEnc a2)
+    return b
+  | .sameIndividualAtom a1 a2 => do
+    let b ← freshEnc
+    emitEnc b rdfType (.iri swrlSameIndividualAtom)
+    emitEnc b swrlArgument1 (encodeSWRLIArgEnc a1)
+    emitEnc b swrlArgument2 (encodeSWRLIArgEnc a2)
+    return b
+  | .differentIndividualsAtom a1 a2 => do
+    let b ← freshEnc
+    emitEnc b rdfType (.iri swrlDifferentIndividualsAtom)
+    emitEnc b swrlArgument1 (encodeSWRLIArgEnc a1)
+    emitEnc b swrlArgument2 (encodeSWRLIArgEnc a2)
+    return b
+  | .builtinAtom bi args => do
+    let b ← freshEnc
+    emitEnc b rdfType (.iri swrlBuiltinAtom)
+    emitEnc b swrlBuiltin (.iri bi)
+    emitEnc b swrlArguments (← encodeListEnc (args.map encodeSWRLDArgEnc))
+    return b
+
+private def encodeSWRLRuleEnc (r : SWRL.SWRLRule) : EncM Unit := do
+  let imp ← freshEnc
+  let bodyNodes ← r.body.mapM encodeSWRLAtomEnc
+  let headNodes ← r.head.mapM encodeSWRLAtomEnc
+  let bodyList ← encodeSWRLAtomListEnc bodyNodes
+  let headList ← encodeSWRLAtomListEnc headNodes
+  emitEnc imp rdfType (.iri swrlImp)
+  emitEnc imp swrlBody bodyList
+  emitEnc imp swrlHead headList
+
+/-- Forward-encode an OWL 2 ontology (with declarations, optional header, and optional
+    DL-Safe SWRL rules) into a W3C OWL 2 RDF graph. -/
 def encodeOntologyRDF (decls : List EntityDecl) (ont : Ontology)
     (ontIRI : Option IRI := none) (verIRI : Option IRI := none)
-    (imports : List IRI := []) : RDFGraph :=
+    (imports : List IRI := []) (rules : List SWRL.SWRLRule := []) : RDFGraph :=
   let ((), st) := (do
     if let some o := ontIRI then
       emitEnc (.iri o) rdfType (.iri owlOntology)
       if let some v := verIRI then emitEnc (.iri o) owlVersionIRI (.iri v)
       for imp in imports do emitEnc (.iri o) owlImports (.iri imp)
     for d in decls do encodeDeclEnc d
-    for ax in ont do encodeAxiomEnc ax).run {}
+    for ax in ont do encodeAxiomEnc ax
+    let allVars := (rules.flatMap fun (r : SWRL.SWRLRule) => r.iVars ++ r.dVars).eraseDups
+    for v in allVars do
+      emitEnc (.iri v) rdfType (.iri swrlVariable)
+    for r in rules do encodeSWRLRuleEnc r).run {}
   { triples := st.triples.reverse }
 
 private def checkRDFRoundtrip (decls : List EntityDecl) (ont : Ontology)
-    (ontIRI : Option IRI := none) (verIRI : Option IRI := none) : Bool :=
-  let g := encodeOntologyRDF decls ont ontIRI verIRI []
+    (ontIRI : Option IRI := none) (verIRI : Option IRI := none)
+    (rules : List SWRL.SWRLRule := []) : Bool :=
+  let g := encodeOntologyRDF decls ont ontIRI verIRI [] rules
   match mapRDFGraph "d" g true with
   | .ok doc =>
     doc.ontologyIRI == ontIRI &&
     doc.versionIRI == verIRI &&
     doc.declarations.length == decls.length &&
-    ont.all (doc.ontology.contains ·)
+    ont.all (doc.ontology.contains ·) &&
+    doc.rules == rules
   | .error _ => false
 
 set_option maxHeartbeats 800000 in
@@ -1383,6 +1620,86 @@ theorem owl2_rdf_mapping_roundtrip_correspondence :
    owl2_rdf_property_chain_and_key_roundtrip,
    owl2_rdf_data_and_assertions_roundtrip⟩
 
+set_option maxHeartbeats 800000 in
+theorem owl2_rdf_swrl_obj_roundtrip :
+    checkRDFRoundtrip
+      [⟨.cls, "ex:A"⟩, ⟨.cls, "ex:B"⟩, ⟨.objectProperty, "ex:r"⟩]
+      []
+      none none
+      [{ body := [
+           .classAtom (.named "ex:A") (.var "urn:swrl:var#x"),
+           .objectPropertyAtom (.named "ex:r") (.var "urn:swrl:var#x") (.var "urn:swrl:var#y")
+         ],
+         head := [
+           .classAtom (.named "ex:B") (.var "urn:swrl:var#y")
+         ] }] = true := by
+  decide
+
+set_option maxHeartbeats 800000 in
+theorem owl2_rdf_swrl_data_roundtrip :
+    checkRDFRoundtrip
+      [⟨.dataProperty, "ex:p"⟩]
+      []
+      none none
+      [{ body := [
+           .dataPropertyAtom "ex:p" (.var "urn:swrl:var#x") (.var "urn:swrl:var#v"),
+           .dataRangeAtom (.datatype (xsdNS ++ "integer")) (.var "urn:swrl:var#v")
+         ],
+         head := [
+           .sameIndividualAtom (.var "urn:swrl:var#x") (.ind (.named "ex:a"))
+         ] }] = true := by
+  decide
+
+set_option maxHeartbeats 800000 in
+theorem owl2_rdf_swrl_builtin_roundtrip :
+    checkRDFRoundtrip
+      []
+      []
+      none none
+      [{ body := [
+           .builtinAtom (swrlbNS ++ "greaterThan") [.var "urn:swrl:var#v", .lit ⟨"0", xsdNS ++ "integer"⟩]
+         ],
+         head := [
+           .differentIndividualsAtom (.var "urn:swrl:var#x") (.ind (.named "ex:a"))
+         ] }] = true := by
+  decide
+
+theorem owl2_rdf_swrl_roundtrip :
+    checkRDFRoundtrip
+      [⟨.cls, "ex:A"⟩, ⟨.cls, "ex:B"⟩, ⟨.objectProperty, "ex:r"⟩]
+      []
+      none none
+      [{ body := [
+           .classAtom (.named "ex:A") (.var "urn:swrl:var#x"),
+           .objectPropertyAtom (.named "ex:r") (.var "urn:swrl:var#x") (.var "urn:swrl:var#y")
+         ],
+         head := [
+           .classAtom (.named "ex:B") (.var "urn:swrl:var#y")
+         ] }] = true ∧
+    checkRDFRoundtrip
+      [⟨.dataProperty, "ex:p"⟩]
+      []
+      none none
+      [{ body := [
+           .dataPropertyAtom "ex:p" (.var "urn:swrl:var#x") (.var "urn:swrl:var#v"),
+           .dataRangeAtom (.datatype (xsdNS ++ "integer")) (.var "urn:swrl:var#v")
+         ],
+         head := [
+           .sameIndividualAtom (.var "urn:swrl:var#x") (.ind (.named "ex:a"))
+         ] }] = true ∧
+    checkRDFRoundtrip
+      []
+      []
+      none none
+      [{ body := [
+           .builtinAtom (swrlbNS ++ "greaterThan") [.var "urn:swrl:var#v", .lit ⟨"0", xsdNS ++ "integer"⟩]
+         ],
+         head := [
+           .differentIndividualsAtom (.var "urn:swrl:var#x") (.ind (.named "ex:a"))
+         ] }] = true :=
+  ⟨owl2_rdf_swrl_obj_roundtrip, owl2_rdf_swrl_data_roundtrip, owl2_rdf_swrl_builtin_roundtrip⟩
+
 #print axioms owl2_rdf_mapping_roundtrip_correspondence
+#print axioms owl2_rdf_swrl_roundtrip
 
 end Sabrina.OWL2.RDF.OWLMapping

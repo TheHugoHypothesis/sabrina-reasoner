@@ -90,8 +90,17 @@ private def renderTurtleTerm (prefixes : List (String × IRI)) : RDFTerm → Str
         if dt == xsdString then s!"\"{esc}\""
         else s!"\"{esc}\"^^{renderTurtleIRI prefixes dt}"
 
-private def mergePrefixes (custom : PrefixMap) : List (String × IRI) := Id.run do
+private def mergePrefixes (custom : PrefixMap) (triples : List RDFTriple := []) : List (String × IRI) := Id.run do
   let mut out : List (String × IRI) := standardPrefixes
+  let usesSWRL := triples.any fun t =>
+    t.predicate.startsWith swrlNS ||
+    match t.object with | .iri u => u.startsWith swrlNS | _ => false
+  let usesSWRLB := triples.any fun t =>
+    match t.object with | .iri u => u.startsWith swrlbNS | _ => false
+  if usesSWRL && !custom.any (fun (p, _) => p == "swrl") then
+    out := out ++ [("swrl", swrlNS)]
+  if usesSWRLB && !custom.any (fun (p, _) => p == "swrlb") then
+    out := out ++ [("swrlb", swrlbNS)]
   for (pfx, ns) in custom do
     if !out.any (fun (p, _) => p == pfx) && !ns.isEmpty then
       out := out ++ [(pfx, ns)]
@@ -99,7 +108,7 @@ private def mergePrefixes (custom : PrefixMap) : List (String × IRI) := Id.run 
 
 /-- Render an `RDFGraph` as a valid W3C Turtle 1.1 document. -/
 def renderTurtle (g : RDFGraph) : String := Id.run do
-  let pfxs := mergePrefixes g.prefixes
+  let pfxs := mergePrefixes g.prefixes g.triples
   let mut lines : Array String := #[]
   for (pfx, ns) in pfxs do
     lines := lines.push s!"@prefix {pfx}: <{ns}> ."
@@ -178,6 +187,12 @@ def renderRDFXML (g : RDFGraph) : String := Id.run do
   for (pfx, ns) in standardPrefixes do
     nsToPfx := nsToPfx.insert ns pfx
     pfxList := pfxList.push (pfx, ns)
+  let usesSWRL := g.triples.any fun t =>
+    t.predicate.startsWith swrlNS ||
+    match t.object with | .iri u => u.startsWith swrlNS | _ => false
+  if usesSWRL && !nsToPfx.contains swrlNS then
+    nsToPfx := nsToPfx.insert swrlNS "swrl"
+    pfxList := pfxList.push ("swrl", swrlNS)
   for (pfx, ns) in g.prefixes do
     if !pfx.isEmpty && isValidNCName pfx && !ns.isEmpty && !nsToPfx.contains ns &&
         !pfxList.any (fun (p, _) => p == pfx) then

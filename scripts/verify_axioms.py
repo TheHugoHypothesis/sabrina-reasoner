@@ -30,6 +30,9 @@ HEADLINE_MODULES = [
     "Sabrina.OWL2.SROIQD.Termination.RegularObjectDecision",
     "Sabrina.OWL2.SROIQD.Termination.RegularOWL2DLDecision",
     "Sabrina.OWL2.SROIQD.Termination.RegularOWL2DLExamples",
+    "Sabrina.OWL2.SWRL",
+    "Sabrina.OWL2.SWRLBuiltins",
+    "Sabrina.OWL2.SWRLReduction",
 ]
 
 HEADLINE_THEOREMS = [
@@ -88,6 +91,27 @@ HEADLINE_THEOREMS = [
     "Sabrina.OWL2.FastLocality.extractBotModuleFast_mem_iff",
     "Sabrina.OWL2.FastLocality.extractBotModuleFast_sat_iff",
     "Sabrina.OWL2.FastLocality.extractBotModuleFast_entails_iff",
+    "Sabrina.OWL2.RDF.OWLMapping.owl2_rdf_swrl_roundtrip",
+    "Sabrina.OWL2.SWRL.modelsWithRules_nil_iff",
+    "Sabrina.OWL2.SWRL.atomHolds_subst_iff",
+    "Sabrina.OWL2.SWRL.atomHolds_ground_irrel",
+    "Sabrina.OWL2.SWRL.satisfiesDLSafeRule_ground_instance",
+    "Sabrina.OWL2.SWRL.evalBuiltinRel_of_output",
+    "Sabrina.OWL2.SWRL.builtinToDataRange_equal_iff",
+    "Sabrina.OWL2.SWRL.builtinToDataRange_notEqual_iff",
+    "Sabrina.OWL2.SWRL.encodeGroundAtom_holds_iff",
+    "Sabrina.OWL2.SWRL.encodeGroundRule_holds_iff",
+    "Sabrina.OWL2.SWRL.encodeSingleIndGroundRule_holds_iff",
+    "Sabrina.OWL2.SWRL.encodeUnaryRule_holds_iff",
+    "Sabrina.OWL2.SWRL.rollupOneIndVar_holds_iff",
+    "Sabrina.OWL2.SWRL.rollupLocalIndVars_holds_iff",
+    "Sabrina.OWL2.SWRL.groundRuleAll_holds_iff",
+    "Sabrina.OWL2.SWRL.encodeDLSafeRule_holds_iff",
+    "Sabrina.OWL2.SWRL.groundAllRules_holds_iff",
+    "Sabrina.OWL2.SWRL.groundAllRules_sat_iff",
+    "Sabrina.OWL2.SWRL.groundAllRules_entails_iff",
+    "Sabrina.OWL2.SWRL.rollupOneDataVar_holds_iff",
+    "Sabrina.OWL2.SWRL.decideRealWithSWRL_iff",
 ]
 
 

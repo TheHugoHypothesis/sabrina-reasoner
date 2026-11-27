@@ -25,3 +25,6 @@ import Sabrina.OWL2.RDF.Serialize
 import Sabrina.OWL2.Materialize
 import Sabrina.OWL2.FastClassification
 import Sabrina.OWL2.Justification
+import Sabrina.OWL2.SWRL
+import Sabrina.OWL2.SWRLBuiltins
+import Sabrina.OWL2.SWRLReduction
