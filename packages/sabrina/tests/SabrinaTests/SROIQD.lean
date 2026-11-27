@@ -156,4 +156,83 @@ private def manyInputWorlds : Problem := {
       checkConsistency manyInputWorlds limits.worlds (.model m)
   | _ => false
 
+-- 9. Generalized GCI absorption: n-ary atomic conjunctions and nominal-anchored axioms
+private def quadConj : Concept :=
+  .conj (.conj (.atom "urn:ex:A1") (.atom "urn:ex:A2"))
+        (.conj (.atom "urn:ex:A3") (.atom "urn:ex:A4"))
+
+#guard quadConj.absorptionPremises ==
+  some [.atom "urn:ex:A1", .atom "urn:ex:A2", .atom "urn:ex:A3", .atom "urn:ex:A4"]
+
+private def naryConjClash : Problem := {
+  tbox :=
+    [⟨quadConj, .atom "urn:ex:Target"⟩,
+     ⟨.conj (.atom "urn:ex:Target") (.atom "urn:ex:Disj"), .bottom⟩] ++
+    (List.range 12).map fun k =>
+      ⟨.conj (.conj (.atom s!"urn:ex:P{k}") (.atom s!"urn:ex:Q{k}")) (.atom s!"urn:ex:R{k}"),
+       .atom s!"urn:ex:Out{k}"⟩
+  root := .conj quadConj (.atom "urn:ex:Disj")
+}
+
+#guard
+  let limits := Limits.forProblem naryConjClash
+  match propose naryConjClash limits with
+  | some (.refutation d) => checkEvidence naryConjClash limits.worlds (.refutation d)
+  | _ => false
+
+private def nominalAnchoredProblem (withClash : Bool) : Problem := {
+  tbox := (List.range 16).map fun k =>
+    ⟨.conj (.nom (.named s!"urn:ex:n{k}") true) (.some ("urn:ex:r", false) (.atom "urn:ex:D")),
+     .atom s!"urn:ex:E{k}"⟩
+  classAssertions :=
+    [(.named "urn:ex:n0", .some ("urn:ex:r", false) (.atom "urn:ex:D"))] ++
+    (if withClash then [(.named "urn:ex:n0", .lit "urn:ex:E0" false)] else []) ++
+    (List.range 15).map fun k => (.named s!"urn:ex:n{k + 1}", .atom "urn:ex:Other")
+}
+
+#guard
+  let p := nominalAnchoredProblem false
+  let limits := Limits.forProblem p
+  match propose p limits with
+  | some (.model m) => checkConsistency p limits.worlds (.model m)
+  | _ => false
+
+#guard
+  let p := nominalAnchoredProblem true
+  let limits := Limits.forProblem p
+  match propose p limits with
+  | some (.refutation d) => checkConsistency p limits.worlds (.refutation d)
+  | _ => false
+
+#guard
+  let disjGuard := Concept.conj
+    (.disj (.nom (.named "urn:ex:a") true) (.nom (.named "urn:ex:b") true))
+    (.some ("urn:ex:r", false) (.atom "urn:ex:D"))
+  disjGuard.nominalGuard? == some ([.named "urn:ex:a", .named "urn:ex:b"], .some ("urn:ex:r", false) (.atom "urn:ex:D"))
+
+private def nominalEdgeAnchoredProblem (withClash : Bool) : Problem := {
+  tbox := (List.range 16).map fun k =>
+    ⟨.conj (.nom (.named s!"urn:ex:n{k}") true) (.some ("urn:ex:r", false) (.atom "urn:ex:D")),
+     .atom s!"urn:ex:E{k}"⟩
+  classAssertions :=
+    [(.named "urn:ex:n1", .atom "urn:ex:D")] ++
+    (if withClash then [(.named "urn:ex:n0", .lit "urn:ex:E0" false)] else []) ++
+    (List.range 14).map fun k => (.named s!"urn:ex:n{k + 2}", .atom "urn:ex:Other")
+  objAssertions := [("urn:ex:r", .named "urn:ex:n0", .named "urn:ex:n1")]
+}
+
+#guard
+  let p := nominalEdgeAnchoredProblem false
+  let limits := Limits.forProblem p
+  match propose p limits with
+  | some (.model m) => checkConsistency p limits.worlds (.model m)
+  | _ => false
+
+#guard
+  let p := nominalEdgeAnchoredProblem true
+  let limits := Limits.forProblem p
+  match propose p limits with
+  | some (.refutation d) => checkConsistency p limits.worlds (.refutation d)
+  | _ => false
+
 end SabrinaTests.SROIQD

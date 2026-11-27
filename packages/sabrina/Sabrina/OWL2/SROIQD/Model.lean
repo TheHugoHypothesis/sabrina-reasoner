@@ -11,30 +11,175 @@ open Sabrina.RoleChains (Graph checkRoleAxioms checkRoleAxioms_iff)
 open Sabrina.OWL2.Datatypes (Value datatypeMap decodeLiteral)
 open Sabrina.OWL2.DataRanges (compile Compiled)
 
-/-- Positive atomic antecedents can be tested directly against the node labels. -/
+/-- Positive atomic, nominal, self, and data-value conjunctions (of arbitrary arity)
+    can be tested directly against node labels without splitting inactive antecedents. -/
 def Concept.absorptionPremises : Concept → Option (List Concept)
   | .lit a true => Option.some [.atom a]
-  | .conj (.lit a true) (.lit b true) => Option.some [.atom a, .atom b]
+  | .nom ind true => Option.some [.nom ind true]
+  | .self r true => Option.some [.self r true]
+  | .dataValue dp l true => Option.some [.dataValue dp l true]
+  | .conj a b => do
+    let pa ← a.absorptionPremises
+    let pb ← b.absorptionPremises
+    return pa ++ pb
   | _ => none
 
 theorem Concept.absorptionPremises_sound {c : Concept} {ps : List Concept}
     (h : c.absorptionPremises = Option.some ps) (i : Interpretation datatypeMap) (x : i.Object)
     (hp : ∀ d ∈ ps, holds i x d) : holds i x c := by
-  cases c with
+  induction c generalizing ps with
   | lit a b =>
     cases b <;> simp [Concept.absorptionPremises] at h
     subst ps
     exact hp _ (by simp)
-  | conj a b =>
-    cases a <;> cases b <;> simp [Concept.absorptionPremises] at h
-    rename_i a sa b sb
-    cases sa <;> cases sb <;> simp at h
+  | nom ind b =>
+    cases b <;> simp [Concept.absorptionPremises] at h
     subst ps
-    exact ⟨hp _ (by simp), hp _ (by simp)⟩
+    exact hp _ (by simp)
+  | self r b =>
+    cases b <;> simp [Concept.absorptionPremises] at h
+    subst ps
+    exact hp _ (by simp)
+  | dataValue dp l b =>
+    cases b <;> simp [Concept.absorptionPremises] at h
+    subst ps
+    exact hp _ (by simp)
+  | conj a b iha ihb =>
+    simp only [Concept.absorptionPremises, bind, Option.bind, pure] at h
+    cases ha : a.absorptionPremises with
+    | none => rw [ha] at h; cases h
+    | some pa =>
+      rw [ha] at h; dsimp only at h
+      cases hb : b.absorptionPremises with
+      | none => rw [hb] at h; cases h
+      | some pb =>
+        rw [hb] at h; dsimp only at h
+        simp only [Option.some.injEq] at h
+        subst h
+        exact ⟨iha ha fun d hd => hp d (List.mem_append_left _ hd),
+               ihb hb fun d hd => hp d (List.mem_append_right _ hd)⟩
   | _ => simp [Concept.absorptionPremises] at h
 
+/-- Extract a finite disjunction of positive nominals `(a₁ ⊔ … ⊔ aₖ)` (including a singleton `{a}`). -/
+def Concept.nominalDisj? : Concept → Option (List Individual)
+  | .nom a true => Option.some [a]
+  | .disj a b => do
+    let ia ← a.nominalDisj?
+    let ib ← b.nominalDisj?
+    return ia ++ ib
+  | _ => none
+
+theorem Concept.nominalDisj?_sound {c : Concept} {inds : List Individual}
+    (h : c.nominalDisj? = Option.some inds) (i : Interpretation datatypeMap) (x : i.Object)
+    {a : Individual} (ha : a ∈ inds) (hnom : holds i x (.nom a true)) :
+    holds i x c := by
+  induction c generalizing inds with
+  | nom ind b =>
+    cases b <;> simp [Concept.nominalDisj?] at h
+    subst inds
+    rcases List.mem_singleton.mp ha with rfl
+    exact hnom
+  | disj l r ihl ihr =>
+    simp only [Concept.nominalDisj?, bind, Option.bind, pure] at h
+    cases hl : l.nominalDisj? with
+    | none => rw [hl] at h; cases h
+    | some il =>
+      rw [hl] at h; dsimp only at h
+      cases hr : r.nominalDisj? with
+      | none => rw [hr] at h; cases h
+      | some ir =>
+        rw [hr] at h; dsimp only at h
+        simp only [Option.some.injEq] at h
+        subst h
+        rcases List.mem_append.mp ha with hal | har
+        · exact Or.inl (ihl hl hal)
+        · exact Or.inr (ihr hr har)
+  | _ => simp [Concept.nominalDisj?] at h
+
+/-- Extract a nominal guard `(inds, rest)` from a nominal-anchored antecedent such as
+    `{a} ⊓ B` or `({a₁} ⊔ … ⊔ {aₖ}) ⊓ B`, where `B` may be an arbitrary complex concept. -/
+def Concept.nominalGuard? : Concept → Option (List Individual × Concept)
+  | .nom a true => Option.some ([a], .top)
+  | .disj a b => (Concept.nominalDisj? (.disj a b)).map (·, .top)
+  | .conj a b =>
+    match a.nominalDisj? with
+    | Option.some inds => Option.some (inds, b)
+    | Option.none =>
+      match b.nominalDisj? with
+      | Option.some inds => Option.some (inds, a)
+      | Option.none =>
+        match a.nominalGuard? with
+        | Option.some (inds, rest) => Option.some (inds, if rest == .top then b else .conj rest b)
+        | Option.none =>
+          match b.nominalGuard? with
+          | Option.some (inds, rest) => Option.some (inds, if rest == .top then a else .conj a rest)
+          | Option.none => Option.none
+  | _ => Option.none
+
+theorem Concept.nominalGuard?_sound {c : Concept} {inds : List Individual} {rest : Concept}
+    (h : c.nominalGuard? = Option.some (inds, rest)) (i : Interpretation datatypeMap) (x : i.Object)
+    {a : Individual} (ha : a ∈ inds) (hnom : holds i x (.nom a true)) (hrest : holds i x rest) :
+    holds i x c := by
+  induction c generalizing inds rest with
+  | nom ind b =>
+    cases b <;> simp [Concept.nominalGuard?] at h
+    obtain ⟨rfl, rfl⟩ := h
+    rcases List.mem_singleton.mp ha with rfl
+    exact hnom
+  | disj l r _ _ =>
+    simp only [Concept.nominalGuard?, Option.map_eq_some_iff] at h
+    obtain ⟨ds, hds, hpair⟩ := h
+    cases hpair
+    exact Concept.nominalDisj?_sound hds i x ha hnom
+  | conj l r ihl ihr =>
+    simp only [Concept.nominalGuard?] at h
+    cases hld : l.nominalDisj? with
+    | some il =>
+      rw [hld] at h; dsimp only at h
+      simp only [Option.some.injEq, Prod.mk.injEq] at h
+      obtain ⟨rfl, rfl⟩ := h
+      exact ⟨Concept.nominalDisj?_sound hld i x ha hnom, hrest⟩
+    | none =>
+      rw [hld] at h; dsimp only at h
+      cases hrd : r.nominalDisj? with
+      | some ir =>
+        rw [hrd] at h; dsimp only at h
+        simp only [Option.some.injEq, Prod.mk.injEq] at h
+        obtain ⟨rfl, rfl⟩ := h
+        exact ⟨hrest, Concept.nominalDisj?_sound hrd i x ha hnom⟩
+      | none =>
+        rw [hrd] at h; dsimp only at h
+        cases hlg : l.nominalGuard? with
+        | some pl =>
+          rcases pl with ⟨il, rl⟩
+          rw [hlg] at h; dsimp only at h
+          simp only [Option.some.injEq, Prod.mk.injEq] at h
+          obtain ⟨rfl, rfl⟩ := h
+          by_cases htop : rl == .top
+          · simp only [htop, ↓reduceIte] at hrest
+            have hrl : rl = .top := beq_iff_eq.mp htop
+            exact ⟨ihl hlg ha (hrl ▸ trivial), hrest⟩
+          · simp only [htop, Bool.false_eq_true, ↓reduceIte] at hrest
+            exact ⟨ihl hlg ha hrest.1, hrest.2⟩
+        | none =>
+          rw [hlg] at h; dsimp only at h
+          cases hrg : r.nominalGuard? with
+          | some pr =>
+            rcases pr with ⟨ir, rr⟩
+            rw [hrg] at h; dsimp only at h
+            simp only [Option.some.injEq, Prod.mk.injEq] at h
+            obtain ⟨rfl, rfl⟩ := h
+            by_cases htop : rr == .top
+            · simp only [htop, ↓reduceIte] at hrest
+              have hrr : rr = .top := beq_iff_eq.mp htop
+              exact ⟨hrest, ihr hrg ha (hrr ▸ trivial)⟩
+            · simp only [htop, Bool.false_eq_true, ↓reduceIte] at hrest
+              exact ⟨hrest.1, ihr hrg ha hrest.2⟩
+          | none => rw [hrg] at h; cases h
+  | _ => simp [Concept.nominalGuard?] at h
+
 /-- Prefer the whole antecedent if it is already labelled, otherwise try
-    unfolding the positive atomic premises of an absorbable conjunction. -/
+    unfolding the positive atomic/nominal premises of an absorbable conjunction. -/
 def Concept.triggeringPremises (c : Concept) (known : Concept → Bool)
     (absorb : Bool := true) :
     Option { ps : List Concept // (∀ d ∈ ps, known d = true) ∧

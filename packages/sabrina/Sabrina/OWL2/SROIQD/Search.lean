@@ -540,6 +540,41 @@ private def deterministicGCI (p : Problem) (s : Branch) (nodes : List Nat)
       some (add x q.sup
         (fun i env hm hs => hm.tbox q hq (env x) (support.property.2 i (env x)
           (fun c hc => Branch.known_sound hs (support.property.1 c hc)))))
+    else if absorb then
+      match hng : q.sub.nominalGuard? with
+      | none => none
+      | some (inds, rest) =>
+        inds.attach.findSome? fun ⟨a, ha⟩ =>
+          if hnom : s.known x (.nom a true) then
+            if htop : rest = .top then
+              some (add x q.sup (fun i env hm hs =>
+                hm.tbox q hq (env x)
+                  (Concept.nominalGuard?_sound hng i (env x) ha (Branch.known_sound hs hnom)
+                    (htop ▸ trivial))))
+            else if hrest : s.known x rest then
+              some (add x q.sup (fun i env hm hs =>
+                hm.tbox q hq (env x)
+                  (Concept.nominalGuard?_sound hng i (env x) ha (Branch.known_sound hs hnom)
+                    (Branch.known_sound hs hrest))))
+            else if hrt : (rest.triggeringPremises (s.known x) true).isSome then
+              let supR := (rest.triggeringPremises (s.known x) true).get hrt
+              some (add x q.sup (fun i env hm hs =>
+                hm.tbox q hq (env x)
+                  (Concept.nominalGuard?_sound hng i (env x) ha (Branch.known_sound hs hnom)
+                    (supR.property.2 i (env x) fun c hc => Branch.known_sound hs (supR.property.1 c hc)))))
+            else
+              match rest with
+              | .some r body =>
+                nodes.findSome? fun y =>
+                  if he : s.edge r x y && s.known y body then
+                    some (add x q.sup (fun i env hm hs => by
+                      have ⟨hEdge, hBody⟩ := Bool.and_eq_true_iff.mp he
+                      exact hm.tbox q hq (env x)
+                        (Concept.nominalGuard?_sound hng i (env x) ha (Branch.known_sound hs hnom)
+                          ⟨env y, Branch.edge_sound hs hEdge, Branch.known_sound hs hBody⟩)))
+                  else none
+              | _ => none
+          else none
     else none
 
 private def disjunctions (p : Problem) (s : Branch) : Option (Transition p s) :=
@@ -568,12 +603,44 @@ private def undecidedGCI (p : Problem) (s : Branch) (nodes : List Nat)
     Option (Transition p s) :=
   nodes.findSome? fun x => p.tbox.attach.findSome? fun ⟨q, hq⟩ =>
     if s.known x q.sup || s.known x q.sub.dual ||
-        (deferAbsorbed && q.sub.absorptionPremises.isSome) then none
+        (deferAbsorbed && (q.sub.absorptionPremises.isSome || q.sub.nominalGuard?.isSome)) then none
     else some (select x q.sub.dual q.sup (fun i env hm _ => by
       classical
       rcases Classical.em (holds i (env x) q.sub) with ha | ha
       · exact Or.inr (hm.tbox q hq (env x) ha)
       · exact Or.inl ((holds_dual i (env x) q.sub).mpr ha)))
+
+private def undecidedGCIFallback (p : Problem) (s : Branch) (nodes : List Nat) :
+    Option (Transition p s) :=
+  nodes.findSome? fun x => p.tbox.attach.findSome? fun ⟨q, hq⟩ =>
+    if s.known x q.sup || s.known x q.sub.dual then none
+    else
+      match hng : q.sub.nominalGuard? with
+      | some (inds, rest) =>
+        let matched : Option { a : Individual // a ∈ inds ∧ s.known x (.nom a true) = true } :=
+          inds.attach.findSome? fun ⟨a, ha⟩ =>
+            if hnom : s.known x (.nom a true) then some ⟨a, ha, hnom⟩ else none
+        match matched with
+        | some ⟨a, ha, hnom⟩ =>
+          if s.known x rest.dual then none
+          else some (select x rest.dual q.sup (fun i env hm hs => by
+            classical
+            rcases Classical.em (holds i (env x) rest) with hr | hr
+            · exact Or.inr (hm.tbox q hq (env x)
+                (Concept.nominalGuard?_sound hng i (env x) ha (Branch.known_sound hs hnom) hr))
+            · exact Or.inl ((holds_dual i (env x) rest).mpr hr)))
+        | none =>
+          some (select x q.sub.dual q.sup (fun i env hm _ => by
+            classical
+            rcases Classical.em (holds i (env x) q.sub) with ha | ha
+            · exact Or.inr (hm.tbox q hq (env x) ha)
+            · exact Or.inl ((holds_dual i (env x) q.sub).mpr ha)))
+      | none =>
+        some (select x q.sub.dual q.sup (fun i env hm _ => by
+          classical
+          rcases Classical.em (holds i (env x) q.sub) with ha | ha
+          · exact Or.inr (hm.tbox q hq (env x) ha)
+          · exact Or.inl ((holds_dual i (env x) q.sub).mpr ha)))
 
 private def qualifiers (p : Problem) (s : Branch) (nodes : List Nat) : Option (Transition p s) :=
   s.labels.findSome? fun (x, c) =>
@@ -994,10 +1061,35 @@ private def explainLocalLabel (p : Problem) (s : Branch) (x : Nat) (c : Concept)
           (hp (.disj a b) (by simp)).resolve_right ((holds_dual i z b).mp (hp b.dual (by simp))))
       else none
     | _ => none) <|>
-  (p.tbox.attach.findSome? fun ⟨q, hq⟩ => do
+  (p.tbox.attach.findSome? fun ⟨q, hq⟩ =>
     if h : c = q.sup then
-      let support ← q.sub.triggeringPremises (s.known x)
-      return .unary x support.val c fun i hm z hp => h.symm ▸ hm.tbox q hq z (support.property.2 i z hp)
+      match q.sub.triggeringPremises (s.known x) with
+      | some support =>
+        some (.unary x support.val c fun i hm z hp => h.symm ▸ hm.tbox q hq z (support.property.2 i z hp))
+      | none =>
+        match hng : q.sub.nominalGuard? with
+        | none => none
+        | some (inds, rest) =>
+          inds.attach.findSome? fun ⟨a, ha⟩ =>
+            if s.known x (.nom a true) then
+              if htop : rest = .top then
+                some (.unary x [.nom a true] c fun i hm z hp =>
+                  h.symm ▸ hm.tbox q hq z
+                    (Concept.nominalGuard?_sound hng i z ha (hp (.nom a true) (by simp)) (htop ▸ trivial)))
+              else if s.known x rest then
+                some (.unary x [.nom a true, rest] c fun i hm z hp =>
+                  h.symm ▸ hm.tbox q hq z
+                    (Concept.nominalGuard?_sound hng i z ha
+                      (hp (.nom a true) (by simp)) (hp rest (by simp))))
+              else match rest.triggeringPremises (s.known x) with
+              | some supR =>
+                some (.unary x (.nom a true :: supR.val) c fun i hm z hp =>
+                  h.symm ▸ hm.tbox q hq z
+                    (Concept.nominalGuard?_sound hng i z ha
+                      (hp (.nom a true) (List.mem_cons_self ..))
+                      (supR.property.2 i z fun d hd => hp d (List.mem_cons_of_mem _ hd))))
+              | none => none
+            else none
     else none)
 
 private def explainLocalChoice (p : Problem) (s : Branch) (x : Nat) (a b : Concept) :
@@ -1006,7 +1098,25 @@ private def explainLocalChoice (p : Problem) (s : Branch) (x : Nat) (a b : Conce
   else if s.known x (.disj a b) then
     some (.binary x [.disj a b] a b fun _ _ _ hp => hp (.disj a b) (by simp))
   else p.tbox.attach.findSome? fun ⟨q, hq⟩ =>
-    if q.sub.dual == a && q.sup == b then some (.gci x q hq) else none
+    if q.sub.dual == a && q.sup == b then some (.gci x q hq)
+    else
+      match hng : q.sub.nominalGuard? with
+      | some (inds, rest) =>
+        if haEq : rest.dual = a then
+          if hbEq : q.sup = b then
+            inds.attach.findSome? fun ⟨ind, hind⟩ =>
+              if s.known x (.nom ind true) then
+                some (.binary x [.nom ind true] a b fun i hm z hp => by
+                  subst haEq; subst hbEq
+                  classical
+                  rcases Classical.em (holds i z rest) with hr | hr
+                  · exact Or.inr (hm.tbox q hq z
+                      (Concept.nominalGuard?_sound hng i z hind (hp (.nom ind true) (by simp)) hr))
+                  · exact Or.inl ((holds_dual i z rest).mpr hr))
+              else none
+          else none
+        else none
+      | none => none
 
 /-- Explain closures only when the conflict contains a label newly introduced
     at the head of the child branch. More involved transitions keep their
@@ -1093,7 +1203,7 @@ private def probe (p : Problem) (maxNodes : Nat) (searchModels : Bool) :
     -- needs a split only if the candidate model cannot discharge it.
     if step.isNone && searchModels then
       if let some m := tryBranchModel p s then return (.model m, fuel)
-    let some t := step <|> undecidedGCI p s s.nodes | return (.unknown, fuel)
+    let some t := step <|> undecidedGCIFallback p s s.nodes | return (.unknown, fuel)
     let tryEarlyModel := match t.branches with
       | [] => false
       | [u] => u.nodes.length > s.nodes.length

@@ -413,6 +413,242 @@ private theorem hstLoop_sound {P : Ontology → Prop}
                   · exact hinv J hJf
               exact ih (rest ++ j.map (· :: hit)) closedHits _ res hinv' hrec
 
+/-! ### 3.5 Verified Parallel Frontier Reiter HST (`Task.spawn`) -/
+
+private def spawnChunks {α β : Type} (chunk : Nat) (f : α → β) :
+    Nat → List α → List (Task (List β))
+  | 0, xs => [Task.pure (xs.map f)]
+  | _ + 1, [] => []
+  | workers + 1, x :: xs =>
+    let (front, rest) := (x :: xs).splitAt chunk
+    Task.spawn (fun () => front.map f) :: spawnChunks chunk f workers rest
+
+private theorem spawnChunks_get {α β : Type} (chunk : Nat) (f : α → β)
+    (workers : Nat) (xs : List α) :
+    (spawnChunks chunk f workers xs).flatMap Task.get = xs.map f := by
+  induction workers generalizing xs with
+  | zero => simp [spawnChunks]
+  | succ workers ih =>
+    cases xs with
+    | nil => rfl
+    | cons x xs =>
+      simp only [spawnChunks, List.splitAt_eq, List.flatMap_cons, Task.spawn, ih]
+      rw [← List.map_append, List.take_append_drop]
+
+private def mapIndependent {α β : Type} (workers : Nat) (f : α → β) (xs : List α) : List β :=
+  if workers ≤ 1 || xs.length ≤ 1 then xs.map f
+  else
+    let count := min workers xs.length
+    let chunk := (xs.length + count - 1) / count
+    (spawnChunks chunk f count xs).flatMap Task.get
+
+private theorem mapIndependent_eq {α β : Type} (workers : Nat) (f : α → β) (xs : List α) :
+    mapIndependent workers f xs = xs.map f := by
+  unfold mapIndependent
+  split
+  · rfl
+  · apply spawnChunks_get
+
+/-- Evaluate a single open HST hitting-set node independently:
+    - `none` if the oracle returns `none`
+    - `some none` if `base \ hit` does not satisfy `pred` (closed branch)
+    - `some (some j)` if a certified minimal justification `j ⊆ base \ hit` is found. -/
+private def evalHSTNode (pred : Ontology → Option Bool) (base : Ontology) (hit : Ontology) :
+    Option (Option Ontology) :=
+  let sub := base.filter fun a => !hit.contains a
+  (pred sub).bind fun holds =>
+    if !holds then some none
+    else (findOneMinimal pred sub).map some
+
+private theorem evalHSTNode_sound {P : Ontology → Prop}
+    (hmono : ∀ {o1 o2}, (∀ a ∈ o1, a ∈ o2) → P o1 → P o2)
+    {pred : Ontology → Option Bool}
+    (hpred : ∀ {o b}, pred o = some b → (b = true ↔ P o))
+    {base hit j : Ontology}
+    (h : evalHSTNode pred base hit = some (some j)) :
+    (∀ a ∈ j, a ∈ base) ∧ P j ∧ (∀ a ∈ j, ¬ P (j.filter (· != a))) := by
+  unfold evalHSTNode at h
+  dsimp only at h
+  obtain ⟨holds, hchk, hrest⟩ := Option.bind_eq_some_iff.mp h
+  cases holds with
+  | false => simp at hrest
+  | true =>
+    simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, Option.map_eq_some_iff] at hrest
+    obtain ⟨j', hj', hEq⟩ := hrest
+    cases hEq
+    have hPsub : P (base.filter fun a => !hit.contains a) := (hpred hchk).mp rfl
+    obtain ⟨hsubJ, hPJ, hminJ⟩ := findOneMinimal_sound hmono hpred hPsub hj'
+    exact ⟨fun a ha => (List.mem_filter.mp (hsubJ a ha)).1, hPJ, hminJ⟩
+
+/-- Pop up to `batchCap` genuinely open hitting sets from the BFS frontier,
+    skipping hits subsumed by `closedHits` or already in the batch, and reusing
+    already-found justifications without oracle calls. -/
+private def popOpenBatch (closedHits found : List Ontology) :
+    Nat → Nat → List Ontology → List Ontology → List Ontology × List Ontology
+  | 0, _, queue, acc => (acc.reverse, queue)
+  | _, 0, queue, acc => (acc.reverse, queue)
+  | _ + 1, _ + 1, [], acc => (acc.reverse, [])
+  | scanFuel + 1, rem + 1, hit :: rest, acc =>
+    if closedHits.any (fun ch => isSupersetHit ch hit) ||
+       acc.any (fun prev => isSupersetHit prev hit || sameAxiomSet prev hit) then
+      popOpenBatch closedHits found scanFuel (rem + 1) rest acc
+    else
+      match found.find? (fun j => !j.any (hit.contains ·)) with
+      | some existing =>
+        let nextHits := existing.map fun a => a :: hit
+        popOpenBatch closedHits found scanFuel (rem + 1) (rest ++ nextHits) acc
+      | none =>
+        popOpenBatch closedHits found scanFuel rem rest (hit :: acc)
+
+/-- Merge evaluated `(hit, result)` pairs from a parallel HST batch into
+    `(queue, closedHits, found)`. -/
+private def applyHSTBatch (maxJusts : Nat) :
+    List (Ontology × Option (Option Ontology)) →
+    List Ontology → List Ontology → List Ontology →
+    Option (List Ontology × List Ontology × List Ontology)
+  | [], queue, closedHits, found => some (queue, closedHits, found)
+  | (hit, res?) :: rest, queue, closedHits, found =>
+    match res? with
+    | none => none
+    | some none =>
+      applyHSTBatch maxJusts rest queue (hit :: closedHits) found
+    | some (some j) =>
+      if found.length ≥ maxJusts then
+        some (queue, closedHits, found)
+      else
+        let found' := if found.any (sameAxiomSet j) then found else j :: found
+        let nextHits := j.map fun a => a :: hit
+        applyHSTBatch maxJusts rest (queue ++ nextHits) closedHits found'
+
+private theorem applyHSTBatch_sound {P : Ontology → Prop}
+    (hmono : ∀ {o1 o2}, (∀ a ∈ o1, a ∈ o2) → P o1 → P o2)
+    {pred : Ontology → Option Bool}
+    (hpred : ∀ {o b}, pred o = some b → (b = true ↔ P o))
+    (base : Ontology) (maxJusts : Nat)
+    (batch : List Ontology)
+    (queue closedHits found queue' closedHits' found' : List Ontology)
+    (hinv : ∀ J ∈ found, (∀ a ∈ J, a ∈ base) ∧ P J ∧ (∀ a ∈ J, ¬ P (J.filter (· != a))))
+    (h : applyHSTBatch maxJusts (batch.zip (batch.map (evalHSTNode pred base)))
+          queue closedHits found = some (queue', closedHits', found')) :
+    ∀ J ∈ found', (∀ a ∈ J, a ∈ base) ∧ P J ∧ (∀ a ∈ J, ¬ P (J.filter (· != a))) := by
+  induction batch generalizing queue closedHits found with
+  | nil =>
+    simp only [List.map_nil, List.zip_nil_right, applyHSTBatch, Option.some.injEq, Prod.mk.injEq] at h
+    obtain ⟨_, _, rfl⟩ := h
+    exact hinv
+  | cons hit tl ih =>
+    simp only [List.map_cons, List.zip_cons_cons, applyHSTBatch] at h
+    cases heval : evalHSTNode pred base hit with
+    | none => rw [heval] at h; cases h
+    | some res =>
+      rw [heval] at h
+      cases res with
+      | none =>
+        exact ih queue (hit :: closedHits) found hinv h
+      | some j =>
+        dsimp only at h
+        split at h
+        · simp only [Option.some.injEq, Prod.mk.injEq] at h
+          obtain ⟨_, _, rfl⟩ := h
+          exact hinv
+        · have hjSpec := evalHSTNode_sound hmono hpred heval
+          have hinv' : ∀ J ∈ (if found.any (sameAxiomSet j) then found else j :: found),
+              (∀ a ∈ J, a ∈ base) ∧ P J ∧ (∀ a ∈ J, ¬ P (J.filter (· != a))) := by
+            intro J hJm
+            split at hJm
+            · exact hinv J hJm
+            · rcases List.mem_cons.mp hJm with rfl | hJf
+              · exact hjSpec
+              · exact hinv J hJf
+          exact ih (queue ++ j.map (· :: hit)) closedHits _ hinv' h
+
+/-- Batch-parallel Reiter Hitting-Set Tree (HST) enumeration backed by `Task.spawn`.
+    Uses a fixed frontier batch width `batchWidth` so output is provably identical across
+    all worker counts (`hstLoopPar_workers_eq`). -/
+private def hstLoopPar (pred : Ontology → Option Bool) (base : Ontology) (maxJusts : Nat)
+    (workers : Nat) (batchWidth : Nat) :
+    Nat → List Ontology → List Ontology → List Ontology → Option (List Ontology)
+  | 0, _, _, found => some found.reverse
+  | _ + 1, [], _, found => some found.reverse
+  | fuel + 1, queue, closedHits, found =>
+    if found.length ≥ maxJusts then
+      some found.reverse
+    else
+      let scanFuel := queue.length + batchWidth * 8 + 16
+      let (batch, remQueue) := popOpenBatch closedHits found scanFuel batchWidth queue []
+      if batch.isEmpty then
+        if remQueue.isEmpty then some found.reverse
+        else hstLoopPar pred base maxJusts workers batchWidth fuel remQueue closedHits found
+      else
+        let results := mapIndependent workers (evalHSTNode pred base) batch
+        (applyHSTBatch maxJusts (batch.zip results) remQueue closedHits found).bind
+          fun (q', cl', f') =>
+            hstLoopPar pred base maxJusts workers batchWidth fuel q' cl' f'
+
+private theorem hstLoopPar_workers_eq (pred : Ontology → Option Bool) (base : Ontology)
+    (maxJusts workers batchWidth : Nat) :
+    ∀ (fuel : Nat) (queue closedHits found : List Ontology),
+      hstLoopPar pred base maxJusts workers batchWidth fuel queue closedHits found =
+      hstLoopPar pred base maxJusts 1 batchWidth fuel queue closedHits found := by
+  intro fuel
+  induction fuel with
+  | zero => intros; rfl
+  | succ n ih =>
+    intro queue closedHits found
+    cases queue with
+    | nil => rfl
+    | cons h q =>
+      simp only [hstLoopPar]
+      split
+      · rfl
+      · split
+        · split
+          · rfl
+          · exact ih _ _ _
+        · rw [mapIndependent_eq workers, mapIndependent_eq 1]
+          cases applyHSTBatch maxJusts _ _ closedHits found with
+          | none => rfl
+          | some triple =>
+            rcases triple with ⟨q', cl', f'⟩
+            simp only [Option.bind_some]
+            exact ih q' cl' f'
+
+private theorem hstLoopPar_sound {P : Ontology → Prop}
+    (hmono : ∀ {o1 o2}, (∀ a ∈ o1, a ∈ o2) → P o1 → P o2)
+    {pred : Ontology → Option Bool}
+    (hpred : ∀ {o b}, pred o = some b → (b = true ↔ P o))
+    (base : Ontology) (maxJusts workers batchWidth : Nat) :
+    ∀ (fuel : Nat) (queue closedHits found res : List Ontology),
+      (∀ J ∈ found, (∀ a ∈ J, a ∈ base) ∧ P J ∧ (∀ a ∈ J, ¬ P (J.filter (· != a)))) →
+      hstLoopPar pred base maxJusts workers batchWidth fuel queue closedHits found = some res →
+      ∀ J ∈ res, (∀ a ∈ J, a ∈ base) ∧ P J ∧ (∀ a ∈ J, ¬ P (J.filter (· != a))) := by
+  intro fuel
+  induction fuel with
+  | zero =>
+    intro queue closedHits found res hinv h
+    simp only [hstLoopPar, Option.some.injEq] at h; subst h
+    exact fun J hJ => hinv J (List.mem_reverse.mp hJ)
+  | succ n ih =>
+    intro queue closedHits found res hinv h
+    cases queue with
+    | nil =>
+      simp only [hstLoopPar, Option.some.injEq] at h; subst h
+      exact fun J hJ => hinv J (List.mem_reverse.mp hJ)
+    | cons hd tl =>
+      simp only [hstLoopPar] at h
+      split at h
+      · simp only [Option.some.injEq] at h; subst h
+        exact fun J hJ => hinv J (List.mem_reverse.mp hJ)
+      · split at h
+        · split at h
+          · simp only [Option.some.injEq] at h; subst h
+            exact fun J hJ => hinv J (List.mem_reverse.mp hJ)
+          · exact ih _ closedHits found res hinv h
+        · rw [mapIndependent_eq] at h
+          obtain ⟨⟨q', cl', f'⟩, hbatch, hrec⟩ := Option.bind_eq_some_iff.mp h
+          have hinv' := applyHSTBatch_sound hmono hpred base maxJusts _ _ closedHits found q' cl' f' hinv hbatch
+          exact ih q' cl' f' res hinv' hrec
+
 /-! ### 4. Public Certified Justification APIs (Inconsistency & Entailment) -/
 
 structure UnsatExplanation where
@@ -680,19 +916,177 @@ theorem findAllJustificationsReal_sound {o : Ontology} {qAx : Axiom}
       ∀ J ∈ res.justifications, IsMinimalJustification realDatatypeMap o qAx J) :=
   findAllJustificationsWith_sound decideRealOntology_iff h
 
-/-- Fast hybrid runtime inconsistency explainer (backed by `FastLocality` + `fastConsistencyCheck`). -/
-def explainInconsistencyRuntime (o : Ontology) (maxJusts : Nat := 5) : Option UnsatExplanation :=
+/-- Parallel Reiter HST enumeration for inconsistency justifications (`Task.spawn`),
+    with kernel-verified soundness and worker-count invariance. -/
+def findAllUnsatJustificationsParWith (solve : Ontology → Option Bool) (o : Ontology)
+    (maxJusts : Nat := 5) (numWorkers : Nat := 8) (hstFuel : Nat := 128) :
+    Option UnsatExplanation :=
+  let mod := (extractBotModuleFast o Sig.empty).1
+  (unsatPred solve mod).bind fun isUnsat =>
+    if !isUnsat then
+      some { inconsistent := false, justifications := [] }
+    else
+      (hstLoopPar (unsatPred solve) (dedupAxioms mod) maxJusts numWorkers 8 hstFuel [[]] [] []).map fun justs =>
+        { inconsistent := true, justifications := justs }
+
+theorem findAllUnsatJustificationsParWith_workers_eq (solve : Ontology → Option Bool)
+    (o : Ontology) (maxJusts numWorkers hstFuel : Nat) :
+    findAllUnsatJustificationsParWith solve o maxJusts numWorkers hstFuel =
+    findAllUnsatJustificationsParWith solve o maxJusts 1 hstFuel := by
+  unfold findAllUnsatJustificationsParWith
+  dsimp only
+  cases unsatPred solve (extractBotModuleFast o Sig.empty).1 with
+  | none => rfl
+  | some b =>
+    cases b with
+    | false => rfl
+    | true =>
+      simp only [Option.bind_some, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+      rw [hstLoopPar_workers_eq]
+
+theorem findAllUnsatJustificationsParWith_sound {dm : DatatypeMap} {solve : Ontology → Option Bool}
+    (hsolve : ∀ {o b}, solve o = some b → (b = true ↔ Satisfiable dm o))
+    {o : Ontology} {maxJusts numWorkers hstFuel : Nat} {res : UnsatExplanation}
+    (h : findAllUnsatJustificationsParWith solve o maxJusts numWorkers hstFuel = some res) :
+    (res.inconsistent = false → Satisfiable dm o) ∧
+    (res.inconsistent = true →
+      ¬ Satisfiable dm o ∧
+      ∀ J ∈ res.justifications, IsMinimalUnsatJustification dm o J) := by
+  unfold findAllUnsatJustificationsParWith at h
+  dsimp only at h
+  obtain ⟨isUnsat, hchk, hrest⟩ := Option.bind_eq_some_iff.mp h
+  have hModSat : Satisfiable dm o ↔ Satisfiable dm (extractBotModuleFast o Sig.empty).1 :=
+    extractBotModuleFast_sat_iff o Sig.empty
+  have hModSub : ∀ a ∈ (extractBotModuleFast o Sig.empty).1, a ∈ o :=
+    (extractBotModuleFast_valid o Sig.empty).1
+  cases isUnsat with
+  | false =>
+    simp only [Bool.not_false, ↓reduceIte, Option.some.injEq] at hrest; subst hrest
+    have hSatMod : Satisfiable dm (extractBotModuleFast o Sig.empty).1 :=
+      Classical.byContradiction fun hnu => Bool.noConfusion ((unsatPred_iff hsolve hchk).mpr hnu)
+    exact ⟨fun _ => hModSat.mpr hSatMod, fun hc => by cases hc⟩
+  | true =>
+    simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, Option.map_eq_some_iff] at hrest
+    obtain ⟨justs, hjusts, rfl⟩ := hrest
+    have hUnsatMod : ¬ Satisfiable dm (extractBotModuleFast o Sig.empty).1 :=
+      (unsatPred_iff hsolve hchk).mp rfl
+    have hall := hstLoopPar_sound (P := fun x => ¬ Satisfiable dm x)
+      (fun hsub => unsat_mono hsub) (unsatPred_iff hsolve)
+      (dedupAxioms (extractBotModuleFast o Sig.empty).1) maxJusts numWorkers 8 hstFuel [[]] [] [] justs
+      (fun _ hm => by cases hm) hjusts
+    refine ⟨(fun hc => by cases hc), fun _ => ⟨fun hs => hUnsatMod (hModSat.mp hs), fun J hJ => ?_⟩⟩
+    obtain ⟨hsubJ, hUJ, hminJ⟩ := hall J hJ
+    exact ⟨fun a ha => hModSub a (dedupAxioms_mem_iff.mp (hsubJ a ha)), hUJ,
+      fun a ha => Classical.byContradiction (hminJ a ha)⟩
+
+/-- Parallel Reiter HST enumeration for entailment justifications (`Task.spawn`),
+    with kernel-verified soundness and worker-count invariance. -/
+def findAllJustificationsParWith (solve : Ontology → Option Bool) (o : Ontology) (qAx : Axiom)
+    (maxJusts : Nat := 5) (numWorkers : Nat := 8) (hstFuel : Nat := 128) :
+    Option EntailmentExplanation :=
+  let mod := (extractBotModuleFast o (axiomSig qAx)).1
+  (decidesAxiomEntails solve mod qAx).bind fun isEnt =>
+    if !isEnt then
+      some { entailed := false, justifications := [] }
+    else
+      (hstLoopPar (fun sub => decidesAxiomEntails solve sub qAx) (dedupAxioms mod)
+        maxJusts numWorkers 8 hstFuel [[]] [] []).map fun justs =>
+        { entailed := true, justifications := justs }
+
+theorem findAllJustificationsParWith_workers_eq (solve : Ontology → Option Bool)
+    (o : Ontology) (qAx : Axiom) (maxJusts numWorkers hstFuel : Nat) :
+    findAllJustificationsParWith solve o qAx maxJusts numWorkers hstFuel =
+    findAllJustificationsParWith solve o qAx maxJusts 1 hstFuel := by
+  unfold findAllJustificationsParWith
+  dsimp only
+  cases decidesAxiomEntails solve (extractBotModuleFast o (axiomSig qAx)).1 qAx with
+  | none => rfl
+  | some b =>
+    cases b with
+    | false => rfl
+    | true =>
+      simp only [Option.bind_some, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+      rw [hstLoopPar_workers_eq]
+
+theorem findAllJustificationsParWith_sound {dm : DatatypeMap} {solve : Ontology → Option Bool}
+    (hsolve : ∀ {o b}, solve o = some b → (b = true ↔ Satisfiable dm o))
+    {o : Ontology} {qAx : Axiom} {maxJusts numWorkers hstFuel : Nat} {res : EntailmentExplanation}
+    (h : findAllJustificationsParWith solve o qAx maxJusts numWorkers hstFuel = some res) :
+    (res.entailed = false → ¬ Entails dm o [qAx]) ∧
+    (res.entailed = true →
+      Entails dm o [qAx] ∧
+      ∀ J ∈ res.justifications, IsMinimalJustification dm o qAx J) := by
+  unfold findAllJustificationsParWith at h
+  dsimp only at h
+  obtain ⟨isEnt, hchk, hrest⟩ := Option.bind_eq_some_iff.mp h
+  have hModEnt : Entails dm o [qAx] ↔ Entails dm (extractBotModuleFast o (axiomSig qAx)).1 [qAx] :=
+    extractBotModuleFast_entails_iff o [qAx] (axiomSig qAx)
+      (fun q hq => by rw [List.mem_singleton.mp hq]; exact Sig.Subset.refl _)
+  have hModSub : ∀ a ∈ (extractBotModuleFast o (axiomSig qAx)).1, a ∈ o :=
+    (extractBotModuleFast_valid o (axiomSig qAx)).1
+  cases isEnt with
+  | false =>
+    simp only [Bool.not_false, ↓reduceIte, Option.some.injEq] at hrest; subst hrest
+    have hNotMod : ¬ Entails dm (extractBotModuleFast o (axiomSig qAx)).1 [qAx] :=
+      fun he => Bool.noConfusion ((decidesAxiomEntails_iff hsolve hchk).mpr he)
+    exact ⟨fun _ he => hNotMod (hModEnt.mp he), fun hc => by cases hc⟩
+  | true =>
+    simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, Option.map_eq_some_iff] at hrest
+    obtain ⟨justs, hjusts, rfl⟩ := hrest
+    have hEntMod : Entails dm (extractBotModuleFast o (axiomSig qAx)).1 [qAx] :=
+      (decidesAxiomEntails_iff hsolve hchk).mp rfl
+    have hall := hstLoopPar_sound (P := fun x => Entails dm x [qAx])
+      (fun hsub => entails_mono hsub) (fun {x b} hx => decidesAxiomEntails_iff hsolve hx)
+      (dedupAxioms (extractBotModuleFast o (axiomSig qAx)).1) maxJusts numWorkers 8 hstFuel [[]] [] [] justs
+      (fun _ hm => by cases hm) hjusts
+    refine ⟨(fun hc => by cases hc), fun _ => ⟨hModEnt.mpr hEntMod, fun J hJ => ?_⟩⟩
+    obtain ⟨hsubJ, hEJ, hminJ⟩ := hall J hJ
+    exact ⟨fun a ha => hModSub a (dedupAxioms_mem_iff.mp (hsubJ a ha)), hEJ, hminJ⟩
+
+def findAllUnsatJustificationsParReal (o : Ontology) (maxJusts : Nat := 5)
+    (numWorkers : Nat := 8) (hstFuel : Nat := 128) : Option UnsatExplanation :=
+  findAllUnsatJustificationsParWith decideRealOntology? o maxJusts numWorkers hstFuel
+
+theorem findAllUnsatJustificationsParReal_sound {o : Ontology} {maxJusts numWorkers hstFuel : Nat}
+    {res : UnsatExplanation} (h : findAllUnsatJustificationsParReal o maxJusts numWorkers hstFuel = some res) :
+    (res.inconsistent = false → Satisfiable realDatatypeMap o) ∧
+    (res.inconsistent = true →
+      ¬ Satisfiable realDatatypeMap o ∧
+      ∀ J ∈ res.justifications, IsMinimalUnsatJustification realDatatypeMap o J) :=
+  findAllUnsatJustificationsParWith_sound decideRealOntology_iff h
+
+def findAllJustificationsParReal (o : Ontology) (qAx : Axiom) (maxJusts : Nat := 5)
+    (numWorkers : Nat := 8) (hstFuel : Nat := 128) : Option EntailmentExplanation :=
+  findAllJustificationsParWith decideRealOntology? o qAx maxJusts numWorkers hstFuel
+
+theorem findAllJustificationsParReal_sound {o : Ontology} {qAx : Axiom}
+    {maxJusts numWorkers hstFuel : Nat} {res : EntailmentExplanation}
+    (h : findAllJustificationsParReal o qAx maxJusts numWorkers hstFuel = some res) :
+    (res.entailed = false → ¬ Entails realDatatypeMap o [qAx]) ∧
+    (res.entailed = true →
+      Entails realDatatypeMap o [qAx] ∧
+      ∀ J ∈ res.justifications, IsMinimalJustification realDatatypeMap o qAx J) :=
+  findAllJustificationsParWith_sound decideRealOntology_iff h
+
+/-- Fast hybrid runtime inconsistency explainer (backed by `FastLocality` + parallel HST + `fastConsistencyCheck`). -/
+def explainInconsistencyRuntime (o : Ontology) (maxJusts : Nat := 5) (numWorkers : Nat := 8) :
+    Option UnsatExplanation :=
   if maxJusts ≤ 1 then
     findOneUnsatJustificationWith fastConsistencyCheck o
   else
-    findAllUnsatJustificationsWith fastConsistencyCheck o maxJusts
+    findAllUnsatJustificationsParWith fastConsistencyCheck o maxJusts numWorkers
 
-/-- Fast hybrid runtime entailment explainer (backed by `FastLocality` + `fastConsistencyCheck`). -/
-def explainEntailmentRuntime (o : Ontology) (qAx : Axiom) (maxJusts : Nat := 5) :
-    Option EntailmentExplanation :=
+/-- Fast hybrid runtime entailment explainer (backed by `FastLocality` + parallel HST + `fastConsistencyCheck`). -/
+def explainEntailmentRuntime (o : Ontology) (qAx : Axiom) (maxJusts : Nat := 5)
+    (numWorkers : Nat := 8) : Option EntailmentExplanation :=
   if maxJusts ≤ 1 then
     findOneJustificationWith fastConsistencyCheck o qAx
   else
-    findAllJustificationsWith fastConsistencyCheck o qAx maxJusts
+    findAllJustificationsParWith fastConsistencyCheck o qAx maxJusts numWorkers
+
+#print axioms findAllUnsatJustificationsParWith_workers_eq
+#print axioms findAllJustificationsParWith_workers_eq
+#print axioms findAllUnsatJustificationsParReal_sound
+#print axioms findAllJustificationsParReal_sound
 
 end Sabrina.OWL2.Justification

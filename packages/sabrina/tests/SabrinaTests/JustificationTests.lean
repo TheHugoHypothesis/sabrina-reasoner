@@ -88,4 +88,42 @@ private def twoClashOnt : Ontology := [
   | some res => !res.inconsistent && res.justifications.isEmpty
   | none => false
 
+-- 6. Parallel HST (4 workers vs 1 worker) finds all 4 distinct minimal justifications on a 4-way diamond
+private def quadDiamondOnt : Ontology := [
+  .subClassOf (.named "ex:Noise1") (.named "ex:Noise2"),
+  .subClassOf (.named "ex:A") (.named "ex:M1"), .subClassOf (.named "ex:M1") (.named "ex:C"),
+  .subClassOf (.named "ex:A") (.named "ex:M2"), .subClassOf (.named "ex:M2") (.named "ex:C"),
+  .subClassOf (.named "ex:A") (.named "ex:M3"), .subClassOf (.named "ex:M3") (.named "ex:C"),
+  .subClassOf (.named "ex:A") (.named "ex:M4"), .subClassOf (.named "ex:M4") (.named "ex:C")
+]
+
+#guard
+  let q := Axiom.subClassOf (.named "ex:A") (.named "ex:C")
+  match explainEntailmentRuntime quadDiamondOnt q 5 1,
+        explainEntailmentRuntime quadDiamondOnt q 5 4 with
+  | some r1, some r4 =>
+    r1.entailed && r4.entailed &&
+    r1.justifications.length == 4 &&
+    r1.justifications == r4.justifications &&
+    r4.justifications.all fun J => J.length == 2 && checkStrictMinimalEntails J q
+  | _, _ => false
+
+-- 7. Parallel HST inconsistency enumeration matches 1-worker output on 3 independent clashes
+private def threeClashOnt : Ontology :=
+  twoClashOnt ++ [
+    .disjointClasses [.named "ex:Hot", .named "ex:Cold"],
+    .classAssertion (.named "ex:Hot") (.named "ex:water"),
+    .classAssertion (.named "ex:Cold") (.named "ex:water")
+  ]
+
+#guard
+  match explainInconsistencyRuntime threeClashOnt 5 1,
+        explainInconsistencyRuntime threeClashOnt 5 4 with
+  | some r1, some r4 =>
+    r1.inconsistent && r4.inconsistent &&
+    r1.justifications.length == 3 &&
+    r1.justifications == r4.justifications &&
+    r4.justifications.all checkStrictMinimalUnsat
+  | _, _ => false
+
 end SabrinaTests.JustificationTests
