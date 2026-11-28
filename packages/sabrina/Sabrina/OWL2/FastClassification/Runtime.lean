@@ -786,7 +786,7 @@ private def orderLeavesFirst (namedClasses : List IRI) (st : KPState) : List IRI
 private def seedKPFromBatchModels (o : Ontology) (namedClasses : List IRI)
     (namedClassSet : Std.HashSet IRI) (numWorkers : Nat) (order : List IRI)
     (baseModel? : Option SROIQDModel) (st : KPState) : KPState :=
-  if o.length > 10000 && baseModel?.isNone then st
+  if o.length > 10000 then st
   else
   let gaps := (order.filter fun c => !st.satSet.contains c && !st.unsatSet.contains c).toArray
   let batchSize := 64
@@ -838,6 +838,27 @@ private def collectKPCandidates (namedClasses : List IRI) (st : KPState) : List 
           out := out.push (a, b)
   return out.toList
 
+/-- Try a separate singleton for each declaration-only class. Harvest the witnesses only
+    if this model satisfies the whole ontology, including any constraints on its domain. -/
+private def seedDeclarationWitnesses (o : Ontology) (idx : LocalityIndex)
+    (namedClasses : List IRI) (numWorkers : Nat) (st : KPState) : KPState := Id.run do
+  let fresh := namedClasses.filter fun c => c != thing && c != nothing && !idx.clsIdx.contains c
+  if fresh.isEmpty then return st
+  let classes := fresh.toArray
+  let mut clsNodes : Std.HashMap IRI (Array Nat) := {}
+  for i in [:classes.size] do
+    clsNodes := clsNodes.insert classes[i]! #[i]
+  let model : FastCB.CBCanonicalModel := {
+    numNodes := classes.size
+    nodeClasses := classes.map fun c => ({} : Std.HashSet IRI).insert c
+    outAdj := Array.replicate classes.size {}
+    inAdj := Array.replicate classes.size {}
+    clsNodes := clsNodes
+  }
+  if FastCB.checkCBCanonicalModel o model numWorkers then
+    return st.mergeSummary (fresh.map fun c => (c, [c]))
+  return st
+
 private def classifyEnhancedRuntimeCore (o : Ontology) (namedClasses : List IRI)
     (numWorkers : Nat) (initModel? : Option SROIQDModel) : Option ClassHierarchy :=
   let idx := LocalityIndex.build o
@@ -858,7 +879,8 @@ private def classifyEnhancedRuntimeCore (o : Ontology) (namedClasses : List IRI)
       let namedClassSet : Std.HashSet IRI := namedClasses.foldl (fun s c => s.insert c) {}
       let (cb, cbPartialSummary) :=
         FastCB.runFastCBWithPartialModel o idx namedClasses namedClassSet numWorkers
-      let st0 := (KPState.init o namedClasses namedClassSet cb.subs cb.unsats).mergeSummary cbPartialSummary
+      let st0 := seedDeclarationWitnesses o idx namedClasses numWorkers
+        ((KPState.init o namedClasses namedClassSet cb.subs cb.unsats).mergeSummary cbPartialSummary)
       let stInit := match initModel? with
         | some m0 => st0.mergeSummary (summarizeModel m0 namedClasses namedClassSet)
         | none => st0
@@ -901,7 +923,7 @@ def classifyOntologyFastWithModelRuntime (o : Ontology)
     let m0? := match initModel? with
       | some m => some m
       | none =>
-        if o.length > 10000 && !o.any isABoxAxiomFast then none
+        if o.length > 10000 then none
         else (proposeVerifiedModel o).map Prod.fst
     classifyEnhancedRuntimeCore o namedClasses numWorkers m0?
   if fp.leastFragment == .el then
@@ -938,6 +960,7 @@ theorem classifyOntologyFastRuntime_nonEL_workers_eq (o : Ontology)
     classifyEnhancedRuntimeCore, beq_iff_eq, h, ↓reduceIte,
     FastCB.classifyFastCB_workers_eq,
     FastCB.runFastCBWithPartialModel_workers_eq,
+    seedDeclarationWitnesses, FastCB.checkCBCanonicalModel_workers_eq,
     seedKPFromBatchModels, checkComponentBatches, mapIndependent_eq,
     sweepKPSatParallel_eq, verifyKPPairsParallel_eq]
 

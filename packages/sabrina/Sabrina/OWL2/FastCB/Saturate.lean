@@ -975,6 +975,47 @@ def saturateHornSHI (norm : NormResult)
       for (allAxIdx, d) in globalAllByRole[s]! do
         globalReflD := globalReflD.push (reflAxIdx, rfIdx, allAxIdx, d)
 
+  -- Precompute reverse role hierarchy `roleSubs[s]` (`r ⊑* s`) and `usefulChainTarget`
+  -- (roles that can actually trigger `existL`/`allR`/`maxOne` directly or via another chain).
+  let mut roleSubs : Array (Array (Nat × Nat)) := Array.replicate nRoles #[]
+  for r in [0:nRoles] do
+    for (s, rfIdx) in roleSups[r]! do
+      if s < nRoles then
+        roleSubs := roleSubs.modify s (·.push (r, rfIdx))
+
+  let mut directlyConsumed : Array Bool := Array.replicate nRoles false
+  for ax in norm.axioms do
+    match ax with
+    | .existL r _ _ => if r < nRoles then directlyConsumed := directlyConsumed.set! r true
+    | .allR _ r _ =>
+      if r < nRoles then directlyConsumed := directlyConsumed.set! r true
+      let ri := invRole r
+      if ri < nRoles then directlyConsumed := directlyConsumed.set! ri true
+    | .maxOne _ r _ =>
+      if r < nRoles then directlyConsumed := directlyConsumed.set! r true
+      let ri := invRole r
+      if ri < nRoles then directlyConsumed := directlyConsumed.set! ri true
+    | _ => pure ()
+  let mut usefulRole : Array Bool := Array.replicate nRoles false
+  for r in [0:nRoles] do
+    if (roleSups[r]!).any (fun (s, _) => s < nRoles && directlyConsumed[s]!) then
+      usefulRole := usefulRole.set! r true
+  let mut uChanged := true
+  while uChanged do
+    uChanged := false
+    for s1 in [0:nRoles] do
+      for (_, s2, s) in chainsByS1[s1]! do
+        if s < nRoles && usefulRole[s]! then
+          for (r1, _) in roleSubs[s1]! do
+            if !usefulRole[r1]! then
+              usefulRole := usefulRole.set! r1 true
+              uChanged := true
+          if s2 < nRoles then
+            for (r2, _) in roleSubs[s2]! do
+              if !usefulRole[r2]! then
+                usefulRole := usefulRole.set! r2 true
+                uChanged := true
+
   -- 3. Context table and worklist state
   let mut contexts : Array (Array Nat) := #[]
   let mut ctxMap : Std.HashMap (Array Nat) Nat := {}
@@ -989,18 +1030,23 @@ def saturateHornSHI (norm : NormResult)
   let mut ctxAlls : Array (Std.HashMap Nat (Array (Nat × Nat × Nat))) := #[]
   -- Per-context active non-`Thing` `maxOne` axioms indexed by role `s`: `(maxAxIdx, sfIdx, b)`
   let mut ctxMaxOnes : Array (Std.HashMap Nat (Array (Nat × Nat × Nat))) := #[]
-  -- Outgoing/incoming links: `(r, k, linkIdx)` / `(h, r, linkIdx)` and dedup set `(h, r, k)`
+  -- Outgoing/incoming links: `(r, k, linkIdx)` / `(h, r, linkIdx)` and subsuming-role dedup
   let mut outLinks : Array (Array (Nat × Nat × Nat)) := #[]
   let mut inLinks : Array (Array (Nat × Nat × Nat)) := #[]
+  let mut outLinksByR : Array (Std.HashMap Nat (Array (Nat × Nat))) := #[]
+  let mut inLinksByR : Array (Std.HashMap Nat (Array (Nat × Nat))) := #[]
   let mut linkSet : Std.HashSet (Nat × Nat × Nat) := {}
+  let mut linkRolesHK : Std.HashMap (Nat × Nat) (Array Nat) := {}
 
-  -- Two sub-queues: `subQueue` drains pure class subsumptions before `exQueue` creates links
+  -- Separate queues: `subQueue` -> `linkQueue` -> `exQueue` -> `chainHead` so `chainComp`
+  -- never starves `exIntro` of the `maxLinks` budget.
   let mut subQueue : Array Nat := #[]
   let mut subHead : Nat := 0
   let mut exQueue : Array Nat := #[]
   let mut exHead : Nat := 0
   let mut linkQueue : Array Nat := #[]
   let mut linkHead : Nat := 0
+  let mut chainHead : Nat := 0
 
   let addSub := fun (h c rank : Nat) (just : SubJust)
       (subFacts : Array SubFact) (ctxSubIdx : Array (Std.HashMap Nat Nat))
@@ -1018,17 +1064,27 @@ def saturateHornSHI (norm : NormResult)
 
   let addLink := fun (h r k rank : Nat) (just : LinkJust)
       (linkFacts : Array LinkFact) (outLinks inLinks : Array (Array (Nat × Nat × Nat)))
-      (linkSet : Std.HashSet (Nat × Nat × Nat)) (linkQueue : Array Nat) =>
+      (outLinksByR inLinksByR : Array (Std.HashMap Nat (Array (Nat × Nat))))
+      (linkSet : Std.HashSet (Nat × Nat × Nat))
+      (linkRolesHK : Std.HashMap (Nat × Nat) (Array Nat))
+      (linkQueue : Array Nat) =>
     if linkFacts.size >= maxLinks || linkSet.contains (h, r, k) then
-      (linkFacts, outLinks, inLinks, linkSet, linkQueue)
+      (linkFacts, outLinks, inLinks, outLinksByR, inLinksByR, linkSet, linkRolesHK, linkQueue)
     else
-      let lIdx := linkFacts.size
-      let linkFacts' := linkFacts.push { h := h, r := r, k := k, rank := rank, just := just }
-      let outLinks' := outLinks.modify h (·.push (r, k, lIdx))
-      let inLinks' := inLinks.modify k (·.push (h, r, lIdx))
-      let linkSet' := linkSet.insert (h, r, k)
-      let linkQueue' := linkQueue.push lIdx
-      (linkFacts', outLinks', inLinks', linkSet', linkQueue')
+      let existing := linkRolesHK.getD (h, k) #[]
+      if existing.any (fun r0 => roleFactMap.contains (r0, r)) then
+        (linkFacts, outLinks, inLinks, outLinksByR, inLinksByR, linkSet, linkRolesHK, linkQueue)
+      else
+        let lIdx := linkFacts.size
+        let linkFacts' := linkFacts.push { h := h, r := r, k := k, rank := rank, just := just }
+        let outLinks' := outLinks.modify h (·.push (r, k, lIdx))
+        let inLinks' := inLinks.modify k (·.push (h, r, lIdx))
+        let outLinksByR' := outLinksByR.modify h fun m => m.insert r ((m.getD r #[]).push (k, lIdx))
+        let inLinksByR' := inLinksByR.modify k fun m => m.insert r ((m.getD r #[]).push (h, lIdx))
+        let linkSet' := linkSet.insert (h, r, k)
+        let linkRolesHK' := linkRolesHK.insert (h, k) (existing.push r)
+        let linkQueue' := linkQueue.push lIdx
+        (linkFacts', outLinks', inLinks', outLinksByR', inLinksByR', linkSet', linkRolesHK', linkQueue')
 
   let getOrCreateCtx := fun (elems : Array Nat)
       (contexts : Array (Array Nat)) (ctxMap : Std.HashMap (Array Nat) Nat)
@@ -1037,16 +1093,18 @@ def saturateHornSHI (norm : NormResult)
       (ctxAlls : Array (Std.HashMap Nat (Array (Nat × Nat × Nat))))
       (ctxMaxOnes : Array (Std.HashMap Nat (Array (Nat × Nat × Nat))))
       (outLinks inLinks : Array (Array (Nat × Nat × Nat)))
+      (outLinksByR inLinksByR : Array (Std.HashMap Nat (Array (Nat × Nat))))
       (linkFacts : Array LinkFact) (linkSet : Std.HashSet (Nat × Nat × Nat))
+      (linkRolesHK : Std.HashMap (Nat × Nat) (Array Nat))
       (subQueue exQueue linkQueue : Array Nat) =>
     match ctxMap[elems]? with
     | some cid =>
       (some cid, contexts, ctxMap, subFacts, ctxSubIdx, ctxSubList, ctxTopIdx, ctxAlls, ctxMaxOnes,
-       outLinks, inLinks, linkFacts, linkSet, subQueue, exQueue, linkQueue)
+       outLinks, inLinks, outLinksByR, inLinksByR, linkFacts, linkSet, linkRolesHK, subQueue, exQueue, linkQueue)
     | none =>
       if contexts.size >= maxContexts || elems.size > maxCtxSize then
         (none, contexts, ctxMap, subFacts, ctxSubIdx, ctxSubList, ctxTopIdx, ctxAlls, ctxMaxOnes,
-         outLinks, inLinks, linkFacts, linkSet, subQueue, exQueue, linkQueue)
+         outLinks, inLinks, outLinksByR, inLinksByR, linkFacts, linkSet, linkRolesHK, subQueue, exQueue, linkQueue)
       else Id.run do
         let cid := contexts.size
         let mut contexts' := contexts.push elems
@@ -1058,8 +1116,11 @@ def saturateHornSHI (norm : NormResult)
         let mut ctxMaxOnes' := ctxMaxOnes.push {}
         let mut outLinks' := outLinks.push #[]
         let mut inLinks' := inLinks.push #[]
+        let mut outLinksByR' := outLinksByR.push {}
+        let mut inLinksByR' := inLinksByR.push {}
         let mut linkFacts' := linkFacts
         let mut linkSet' := linkSet
+        let mut linkRolesHK' := linkRolesHK
         let mut subQueue' := subQueue
         let mut exQueue' := exQueue
         let mut linkQueue' := linkQueue
@@ -1081,21 +1142,23 @@ def saturateHornSHI (norm : NormResult)
               subFacts' ctxSubIdx' ctxSubList' subQueue' exQueue'
         for (reflAxIdx, r0) in reflRoleAxs do
           let rfIdx := roleFactMap.getD (r0, r0) 0
-          (linkFacts', outLinks', inLinks', linkSet', linkQueue') :=
+          (linkFacts', outLinks', inLinks', outLinksByR', inLinksByR', linkSet', linkRolesHK', linkQueue') :=
             addLink cid r0 cid 0 (.reflLink reflAxIdx rfIdx)
-              linkFacts' outLinks' inLinks' linkSet' linkQueue'
+              linkFacts' outLinks' inLinks' outLinksByR' inLinksByR' linkSet' linkRolesHK' linkQueue'
         return (some cid, contexts', ctxMap', subFacts', ctxSubIdx', ctxSubList', ctxTopIdx',
-                ctxAlls', ctxMaxOnes', outLinks', inLinks', linkFacts', linkSet', subQueue', exQueue', linkQueue')
+                ctxAlls', ctxMaxOnes', outLinks', inLinks', outLinksByR', inLinksByR',
+                linkFacts', linkSet', linkRolesHK', subQueue', exQueue', linkQueue')
 
   -- Seed one singleton context for every named class (except `owl:Nothing`)
   for (_, id) in norm.namedClassIds do
     if id != 1 then
-      let (_, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, lf1, ls1, sq1, eq1, lq1) :=
+      let (_, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, obr1, ibr1, lf1, ls1, lrhk1, sq1, eq1, lq1) :=
         getOrCreateCtx #[id] contexts ctxMap subFacts ctxSubIdx ctxSubList ctxTopIdx ctxAlls ctxMaxOnes
-          outLinks inLinks linkFacts linkSet subQueue exQueue linkQueue
+          outLinks inLinks outLinksByR inLinksByR linkFacts linkSet linkRolesHK subQueue exQueue linkQueue
       contexts := c1; ctxMap := cm1; subFacts := sf1; ctxSubIdx := csi1
       ctxSubList := csl1; ctxTopIdx := cti1; ctxAlls := ca1; ctxMaxOnes := cmo1
-      outLinks := ol1; inLinks := il1; linkFacts := lf1; linkSet := ls1
+      outLinks := ol1; inLinks := il1; outLinksByR := obr1; inLinksByR := ibr1
+      linkFacts := lf1; linkSet := ls1; linkRolesHK := lrhk1
       subQueue := sq1; exQueue := eq1; linkQueue := lq1
 
   -- Helper: collect all active `maxOne` constraints `(maxAxIdx, sfAIdx, b)` at `(h, s)`
@@ -1106,9 +1169,8 @@ def saturateHornSHI (norm : NormResult)
     let l := (ctxMaxOnes[h]!).getD s #[]
     if g.isEmpty then l else if l.isEmpty then g else g ++ l
 
-  -- 4. Main worklist fixpoint (draining `subQueue` before `exQueue` so base subsumptions
-  --    are already known when existential successor contexts are created)
-  while subHead < subQueue.size || exHead < exQueue.size || linkHead < linkQueue.size do
+  -- 4. Main worklist fixpoint: `subQueue` -> `linkQueue` -> `exQueue` -> `chainHead`
+  while subHead < subQueue.size || linkHead < linkQueue.size || exHead < exQueue.size || chainHead < linkFacts.size do
     while subHead < subQueue.size do
       let sfIdx := subQueue[subHead]!
       subHead := subHead + 1
@@ -1169,17 +1231,18 @@ def saturateHornSHI (norm : NormResult)
                 let elems0 := contexts[k0]!
                 let newElems := insertSortedUnique elems0 d
                 let lRk := linkFacts[lIdx]!.rank
-                let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, lf1, ls1, sq1, eq1, lq1) :=
+                let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, obr1, ibr1, lf1, ls1, lrhk1, sq1, eq1, lq1) :=
                   getOrCreateCtx newElems contexts ctxMap subFacts ctxSubIdx ctxSubList ctxTopIdx ctxAlls ctxMaxOnes
-                    outLinks inLinks linkFacts linkSet subQueue exQueue linkQueue
+                    outLinks inLinks outLinksByR inLinksByR linkFacts linkSet linkRolesHK subQueue exQueue linkQueue
                 contexts := c1; ctxMap := cm1; subFacts := sf1; ctxSubIdx := csi1
                 ctxSubList := csl1; ctxTopIdx := cti1; ctxAlls := ca1; ctxMaxOnes := cmo1
-                outLinks := ol1; inLinks := il1; linkFacts := lf1; linkSet := ls1
+                outLinks := ol1; inLinks := il1; outLinksByR := obr1; inLinksByR := ibr1
+                linkFacts := lf1; linkSet := ls1; linkRolesHK := lrhk1
                 subQueue := sq1; exQueue := eq1; linkQueue := lq1
                 if let some kNew := k? then
-                  (linkFacts, outLinks, inLinks, linkSet, linkQueue) :=
+                  (linkFacts, outLinks, inLinks, outLinksByR, inLinksByR, linkSet, linkRolesHK, linkQueue) :=
                     addLink h r kNew (max rk lRk + 1) (.allProp lIdx #[(axIdx, sfIdx, rfIdx)])
-                      linkFacts outLinks inLinks linkSet linkQueue
+                      linkFacts outLinks inLinks outLinksByR inLinksByR linkSet linkRolesHK linkQueue
           -- Backward inverse-universal propagation along incoming links into `h`
           let sInv := invRole s
           for (hPrev, rPrev, lIdx) in inLinks[h]! do
@@ -1217,18 +1280,19 @@ def saturateHornSHI (norm : NormResult)
                               let merged := mergeSortedUnique contexts[k1]! contexts[k2]!
                               let mRk := max (max rk (max linkFacts[l1Idx]!.rank linkFacts[l2Idx]!.rank))
                                              (max subFacts[sfK1B]!.rank subFacts[sfK2B]!.rank)
-                              let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, lf1, ls1, sq1, eq1, lq1) :=
+                              let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, obr1, ibr1, lf1, ls1, lrhk1, sq1, eq1, lq1) :=
                                 getOrCreateCtx merged contexts ctxMap subFacts ctxSubIdx ctxSubList ctxTopIdx ctxAlls ctxMaxOnes
-                                  outLinks inLinks linkFacts linkSet subQueue exQueue linkQueue
+                                  outLinks inLinks outLinksByR inLinksByR linkFacts linkSet linkRolesHK subQueue exQueue linkQueue
                               contexts := c1; ctxMap := cm1; subFacts := sf1; ctxSubIdx := csi1
                               ctxSubList := csl1; ctxTopIdx := cti1; ctxAlls := ca1; ctxMaxOnes := cmo1
-                              outLinks := ol1; inLinks := il1; linkFacts := lf1; linkSet := ls1
+                              outLinks := ol1; inLinks := il1; outLinksByR := obr1; inLinksByR := ibr1
+                              linkFacts := lf1; linkSet := ls1; linkRolesHK := lrhk1
                               subQueue := sq1; exQueue := eq1; linkQueue := lq1
                               if let some kNew := k? then
-                                (linkFacts, outLinks, inLinks, linkSet, linkQueue) :=
+                                (linkFacts, outLinks, inLinks, outLinksByR, inLinksByR, linkSet, linkRolesHK, linkQueue) :=
                                   addLink h r1 kNew (mRk + 1)
                                     (.siblingMerge maxAxIdx sfIdx l1Idx rf1Idx sfK1B l2Idx rf2Idx sfK2B)
-                                    linkFacts outLinks inLinks linkSet linkQueue
+                                    linkFacts outLinks inLinks outLinksByR inLinksByR linkSet linkRolesHK linkQueue
             -- Parent merges between `inLinks[h]` and `outLinks[h]`
             let sInv := invRole s
             for (hPrev, r1, l1Idx) in inLinks[h]! do
@@ -1262,18 +1326,19 @@ def saturateHornSHI (norm : NormResult)
                                 let merged := mergeSortedUnique contexts[h]! contexts[k2]!
                                 let mRk := max (max subFacts[sfAIdx]!.rank (max linkFacts[l1Idx]!.rank linkFacts[l2Idx]!.rank))
                                                (max rk subFacts[sfK2B]!.rank)
-                                let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, lf1, ls1, sq1, eq1, lq1) :=
+                                let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, obr1, ibr1, lf1, ls1, lrhk1, sq1, eq1, lq1) :=
                                   getOrCreateCtx merged contexts ctxMap subFacts ctxSubIdx ctxSubList ctxTopIdx ctxAlls ctxMaxOnes
-                                    outLinks inLinks linkFacts linkSet subQueue exQueue linkQueue
+                                    outLinks inLinks outLinksByR inLinksByR linkFacts linkSet linkRolesHK subQueue exQueue linkQueue
                                 contexts := c1; ctxMap := cm1; subFacts := sf1; ctxSubIdx := csi1
                                 ctxSubList := csl1; ctxTopIdx := cti1; ctxAlls := ca1; ctxMaxOnes := cmo1
-                                outLinks := ol1; inLinks := il1; linkFacts := lf1; linkSet := ls1
+                                outLinks := ol1; inLinks := il1; outLinksByR := obr1; inLinksByR := ibr1
+                                linkFacts := lf1; linkSet := ls1; linkRolesHK := lrhk1
                                 subQueue := sq1; exQueue := eq1; linkQueue := lq1
                                 if let some kNew := k? then
-                                  (linkFacts, outLinks, inLinks, linkSet, linkQueue) :=
+                                  (linkFacts, outLinks, inLinks, outLinksByR, inLinksByR, linkSet, linkRolesHK, linkQueue) :=
                                     addLink hPar r1 kNew (mRk + 1)
                                       (.siblingMerge maxAxIdx sfAIdx l1Idx rf1Idx sfIdx l2Idx rf2Idx sfK2B)
-                                      linkFacts outLinks inLinks linkSet linkQueue
+                                      linkFacts outLinks inLinks outLinksByR inLinksByR linkSet linkRolesHK linkQueue
                       -- Parent merge with `h` as `k2` through `hPar`
                       let sInv := invRole s
                       for (hGrand, r0, l0Idx) in inLinks[hPar]! do
@@ -1355,19 +1420,20 @@ def saturateHornSHI (norm : NormResult)
                 allPrems := allPrems.push (allAxIdx, sfAllIdx, rfIdx)
                 let aRk := subFacts[sfAllIdx]!.rank
                 if aRk > maxRk then maxRk := aRk
-          let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, lf1, ls1, sq1, eq1, lq1) :=
+          let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, obr1, ibr1, lf1, ls1, lrhk1, sq1, eq1, lq1) :=
             getOrCreateCtx targetElems contexts ctxMap subFacts ctxSubIdx ctxSubList ctxTopIdx ctxAlls ctxMaxOnes
-              outLinks inLinks linkFacts linkSet subQueue exQueue linkQueue
+              outLinks inLinks outLinksByR inLinksByR linkFacts linkSet linkRolesHK subQueue exQueue linkQueue
           contexts := c1; ctxMap := cm1; subFacts := sf1; ctxSubIdx := csi1
           ctxSubList := csl1; ctxTopIdx := cti1; ctxAlls := ca1; ctxMaxOnes := cmo1
-          outLinks := ol1; inLinks := il1; linkFacts := lf1; linkSet := ls1
+          outLinks := ol1; inLinks := il1; outLinksByR := obr1; inLinksByR := ibr1
+          linkFacts := lf1; linkSet := ls1; linkRolesHK := lrhk1
           subQueue := sq1; exQueue := eq1; linkQueue := lq1
           if let some kId := k? then
-            (linkFacts, outLinks, inLinks, linkSet, linkQueue) :=
+            (linkFacts, outLinks, inLinks, outLinksByR, inLinksByR, linkSet, linkRolesHK, linkQueue) :=
               addLink h r kId (maxRk + 1) (.exIntro axIdx sfIdx allPrems)
-                linkFacts outLinks inLinks linkSet linkQueue
+                linkFacts outLinks inLinks outLinksByR inLinksByR linkSet linkRolesHK linkQueue
 
-    -- Process newly derived links
+    -- Process newly derived links (non-chain rules first)
     while linkHead < linkQueue.size do
       let lIdx := linkQueue[linkHead]!
       linkHead := linkHead + 1
@@ -1406,17 +1472,18 @@ def saturateHornSHI (norm : NormResult)
               if aRk > maxAllRk then maxAllRk := aRk
         if !extraDs.isEmpty then
           let newElems := mergeSortedUnique elems0 extraDs
-          let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, lf1, ls1, sq1, eq1, lq1) :=
+          let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, obr1, ibr1, lf1, ls1, lrhk1, sq1, eq1, lq1) :=
             getOrCreateCtx newElems contexts ctxMap subFacts ctxSubIdx ctxSubList ctxTopIdx ctxAlls ctxMaxOnes
-              outLinks inLinks linkFacts linkSet subQueue exQueue linkQueue
+              outLinks inLinks outLinksByR inLinksByR linkFacts linkSet linkRolesHK subQueue exQueue linkQueue
           contexts := c1; ctxMap := cm1; subFacts := sf1; ctxSubIdx := csi1
           ctxSubList := csl1; ctxTopIdx := cti1; ctxAlls := ca1; ctxMaxOnes := cmo1
-          outLinks := ol1; inLinks := il1; linkFacts := lf1; linkSet := ls1
+          outLinks := ol1; inLinks := il1; outLinksByR := obr1; inLinksByR := ibr1
+          linkFacts := lf1; linkSet := ls1; linkRolesHK := lrhk1
           subQueue := sq1; exQueue := eq1; linkQueue := lq1
           if let some kNew := k? then
-            (linkFacts, outLinks, inLinks, linkSet, linkQueue) :=
+            (linkFacts, outLinks, inLinks, outLinksByR, inLinksByR, linkSet, linkRolesHK, linkQueue) :=
               addLink h r kNew (maxAllRk + 1) (.allProp lIdx allPrems)
-                linkFacts outLinks inLinks linkSet linkQueue
+                linkFacts outLinks inLinks outLinksByR inLinksByR linkSet linkRolesHK linkQueue
 
       -- (i) Existential elimination & inverse-universal firing (global `0` + known facts in `k`)
       if r < nRoles then
@@ -1442,27 +1509,6 @@ def saturateHornSHI (norm : NormResult)
                 addSub h b (max lRk aRk + 1) (.invAll axIdx lIdx rfIdx sfKIdx)
                   subFacts ctxSubIdx ctxSubList subQueue exQueue
 
-      -- (j) Bidirectional role-chain link composition (`h -r1-> k1 -r2-> k2` ⇒ `h -s-> k2`)
-      if r < nRoles && h != k && linkFacts.size < maxLinks then
-        for (s1, rf1Idx) in roleSups[r]! do
-          for (axIdx, s2, s) in chainsByS1[s1]! do
-            for (r2, k2, l2Idx) in outLinks[k]! do
-              if k != k2 then
-                if let some rf2Idx := roleFactMap[(r2, s2)]? then
-                  let r2Rk := linkFacts[l2Idx]!.rank
-                  (linkFacts, outLinks, inLinks, linkSet, linkQueue) :=
-                    addLink h s k2 (max lRk r2Rk + 1) (.chainComp axIdx lIdx rf1Idx l2Idx rf2Idx)
-                      linkFacts outLinks inLinks linkSet linkQueue
-        for (s2, rf2Idx) in roleSups[r]! do
-          for (axIdx, s1, s) in chainsByS2[s2]! do
-            for (hPrev, r1, l1Idx) in inLinks[h]! do
-              if hPrev != h then
-                if let some rf1Idx := roleFactMap[(r1, s1)]? then
-                  let r1Rk := linkFacts[l1Idx]!.rank
-                  (linkFacts, outLinks, inLinks, linkSet, linkQueue) :=
-                    addLink hPrev s k (max lRk r1Rk + 1) (.chainComp axIdx l1Idx rf1Idx lIdx rf2Idx)
-                      linkFacts outLinks inLinks linkSet linkQueue
-
       -- (k) Horn-SHIQ `maxOne` siblingMerge & parentMerge triggered by new link `(h, r, k)`
       if hasMaxOne && r < nRoles then
         for (s, rf1Idx) in roleSups[r]! do
@@ -1480,24 +1526,25 @@ def saturateHornSHI (norm : NormResult)
                       let need1 := !(contexts[k2]!.all fun e => (ctxSubIdx[k]!).contains e)
                       let need2 := !(contexts[k]!.all fun e => (ctxSubIdx[k2]!).contains e)
                       if need1 || need2 then
-                        let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, lf1, ls1, sq1, eq1, lq1) :=
+                        let (k?, c1, cm1, sf1, csi1, csl1, cti1, ca1, cmo1, ol1, il1, obr1, ibr1, lf1, ls1, lrhk1, sq1, eq1, lq1) :=
                           getOrCreateCtx merged contexts ctxMap subFacts ctxSubIdx ctxSubList ctxTopIdx ctxAlls ctxMaxOnes
-                            outLinks inLinks linkFacts linkSet subQueue exQueue linkQueue
+                            outLinks inLinks outLinksByR inLinksByR linkFacts linkSet linkRolesHK subQueue exQueue linkQueue
                         contexts := c1; ctxMap := cm1; subFacts := sf1; ctxSubIdx := csi1
                         ctxSubList := csl1; ctxTopIdx := cti1; ctxAlls := ca1; ctxMaxOnes := cmo1
-                        outLinks := ol1; inLinks := il1; linkFacts := lf1; linkSet := ls1
+                        outLinks := ol1; inLinks := il1; outLinksByR := obr1; inLinksByR := ibr1
+                        linkFacts := lf1; linkSet := ls1; linkRolesHK := lrhk1
                         subQueue := sq1; exQueue := eq1; linkQueue := lq1
                         if let some kNew := k? then
                           if need1 then
-                            (linkFacts, outLinks, inLinks, linkSet, linkQueue) :=
+                            (linkFacts, outLinks, inLinks, outLinksByR, inLinksByR, linkSet, linkRolesHK, linkQueue) :=
                               addLink h r kNew (mRk + 1)
                                 (.siblingMerge maxAxIdx sfAIdx lIdx rf1Idx sfKB l2Idx rf2Idx sfK2B)
-                                linkFacts outLinks inLinks linkSet linkQueue
+                                linkFacts outLinks inLinks outLinksByR inLinksByR linkSet linkRolesHK linkQueue
                           if need2 then
-                            (linkFacts, outLinks, inLinks, linkSet, linkQueue) :=
+                            (linkFacts, outLinks, inLinks, outLinksByR, inLinksByR, linkSet, linkRolesHK, linkQueue) :=
                               addLink h r2 kNew (mRk + 1)
                                 (.siblingMerge maxAxIdx sfAIdx l2Idx rf2Idx sfK2B lIdx rf1Idx sfKB)
-                                linkFacts outLinks inLinks linkSet linkQueue
+                                linkFacts outLinks inLinks outLinksByR inLinksByR linkSet linkRolesHK linkQueue
               -- Parent merge with `(h, r, k)` as `l2` (`hPrev -r1-> h -r-> k`)
               let sInv := invRole s
               for (hPrev, r1, l1Idx) in inLinks[h]! do
@@ -1527,6 +1574,42 @@ def saturateHornSHI (norm : NormResult)
                           addSub h c2 (max baseRk2 subFacts[sfK2C]!.rank + 1)
                             (.parentMerge maxAxIdx lIdx rf1Idx sfHB sfAIdx l2Idx rf2Idx sfK2B sfK2C)
                             subFacts ctxSubIdx ctxSubList subQueue exQueue
+
+    -- (j) Deferred role-indexed chain composition (`h -r1-> k1 -r2-> k2` ⇒ `h -s-> k2`),
+    --     only for roles `s` that can actually feed downstream rules (`usefulRole[s]`),
+    --     and only after `subQueue`, `linkQueue`, and `exQueue` are drained.
+    if subHead >= subQueue.size && linkHead >= linkQueue.size && exHead >= exQueue.size &&
+        chainHead < linkFacts.size then
+      let lIdx := chainHead
+      chainHead := chainHead + 1
+      let lf := linkFacts[lIdx]!
+      let h := lf.h
+      let r := lf.r
+      let k := lf.k
+      let lRk := lf.rank
+      if r < nRoles && h != k && linkFacts.size < maxLinks then
+        for (s1, rf1Idx) in roleSups[r]! do
+          for (axIdx, s2, s) in chainsByS1[s1]! do
+            if s < nRoles && usefulRole[s]! && s2 < nRoles then
+              let kOut := outLinksByR[k]!
+              for (r2, rf2Idx) in roleSubs[s2]! do
+                for (k2, l2Idx) in kOut.getD r2 #[] do
+                  if k != k2 && linkFacts.size < maxLinks then
+                    let r2Rk := linkFacts[l2Idx]!.rank
+                    (linkFacts, outLinks, inLinks, outLinksByR, inLinksByR, linkSet, linkRolesHK, linkQueue) :=
+                      addLink h s k2 (max lRk r2Rk + 1) (.chainComp axIdx lIdx rf1Idx l2Idx rf2Idx)
+                        linkFacts outLinks inLinks outLinksByR inLinksByR linkSet linkRolesHK linkQueue
+        for (s2, rf2Idx) in roleSups[r]! do
+          for (axIdx, s1, s) in chainsByS2[s2]! do
+            if s < nRoles && usefulRole[s]! && s1 < nRoles then
+              let hIn := inLinksByR[h]!
+              for (r1, rf1Idx) in roleSubs[s1]! do
+                for (hPrev, l1Idx) in hIn.getD r1 #[] do
+                  if hPrev != h && linkFacts.size < maxLinks then
+                    let r1Rk := linkFacts[l1Idx]!.rank
+                    (linkFacts, outLinks, inLinks, outLinksByR, inLinksByR, linkSet, linkRolesHK, linkQueue) :=
+                      addLink hPrev s k (max lRk r1Rk + 1) (.chainComp axIdx l1Idx rf1Idx lIdx rf2Idx)
+                        linkFacts outLinks inLinks outLinksByR inLinksByR linkSet linkRolesHK linkQueue
 
   return {
     contexts := contexts

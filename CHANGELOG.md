@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.2.3 (2026-11-27)
+
+### Added
+
+- Kernel-verified consequence-based partial models for nearly-Horn ontologies. `checkCBPartialModel` verifies a model on a bottom-locality signature. `checkCBDisjointPartialModel` verifies a disjoint component that can be joined to a model of a consistent ontology, including mixed TBox and ABox inputs with nominals, keys, and datatype axioms.
+- Canonical model checks for irreflexive, asymmetric, and pairwise disjoint object properties.
+- Checked canonical-model repair for positive unions, qualified minimum and exact cardinalities, self restrictions, and equivalence definitions. Countermodel harvesting intersects class memberships across verified witnesses. A separate checked model can cover declaration-only classes.
+
+### Changed
+
+- Memoized shared RDF blank nodes during OWL mapping and retained the kernel-reducible mapping path.
+- Improved non-Horn tableau search with nominal target reuse, cardinality and data-value GCI triggers, complex-premise propagation, nested-disjunction unit propagation, and more precise clash blame.
+- Prioritized existential expansion over role-chain composition, pruned unused chain results, and deduplicated subsumed links. Large classifications skip expensive full-ontology tableau model seeding.
+
+### Verification
+
+- `SabrinaTests` and both CLI executables built successfully with Lean 4.35.0. W3C conformance passed 42/42 cases. The foundational-axiom audit passed for all 100 headline theorems and found zero `sorry`, `admit`, or custom axioms in the packages.
+
+### Benchmarks
+
+Classification used eight workers in the same Lean 4.35.0 container. The FPSO-BS run used the import catalog. The Horn-SHIQ scale benchmark used summary output.
+
+| Input | Handover build wall time | Release wall time | Classes | Unsatisfiable | Subsumptions | Lean verified |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `fpeo.ttl` | 2.399 s | 2.398 s | 1,759 | 0 | 12,055 | Yes |
+| `cl-base.owl` | 5.784 s | 5.779 s | 5,639 | 0 | 50,796 | Yes |
+| `hp-base.owl` | 42.654 s | 42.226 s | 22,670 | 0 | 226,126 | Yes |
+| 50k Horn-SHIQ | 2.04 s | 2.01 s | 50,008 | 1 | 147,516 | Yes |
+| `uberon-base.owl` | 90 s timeout | 180.104 s timeout | — | — | — | No result |
+
+The experimental witness-cloning pass violated qualified exact-cardinality and disjointness axioms and sent classification through expensive Horn strengthening. With that pass removed, the checked consequence-based models cover all 15,756 classes used in Uberon axioms and reduce the unresolved candidates to 718 pairs across 194 classes. Exact tableau classification of the remaining candidates still exceeds the benchmark limit.
+
 ## 1.2.2 (2026-11-27)
 
 ### Added

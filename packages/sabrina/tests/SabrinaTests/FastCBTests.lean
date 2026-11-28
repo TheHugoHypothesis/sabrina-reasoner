@@ -243,4 +243,29 @@ private def checkPartialNom : Bool :=
 
 #guard checkPartialNom
 
+--     (c) Disjoint-union TBox+ABox partial model (`checkCBDisjointPartialModel`):
+--         an ontology with `ClassAssertion` ABox individuals, `EquivalentClasses(_, ObjectOneOf _)`,
+--         `IrreflexiveObjectProperty`, and Horn-SHI axioms harvests ALL clean TBox classes
+--         while keeping ABox/nominal axioms intact on the base component!
+private def ontMixedABoxOneOf : Ontology := [
+  .classAssertion (.named "A") (.named "orcid_1"),
+  .equivalentClasses [.named "MetaEnum", .oneOf [.named "tag1", .named "tag2"]],
+  .irreflexiveObjectProperty (.named "r"),
+  .subClassOf (.named "A") (.objectSome (.named "r") (.named "B")),
+  .subClassOf (.named "B") (.objectAll (.inverse "r") (.named "C"))
+]
+
+private def checkDisjointPartialABox : Bool :=
+  let cls := ["A", "B", "C", "MetaEnum"]
+  let clsSet : Std.HashSet IRI := cls.foldl (fun s c => s.insert c) {}
+  let idx := Sabrina.OWL2.FastLocality.LocalityIndex.build ontMixedABoxOneOf
+  let (res, summary) := runFastCBWithPartialModel ontMixedABoxOneOf idx cls clsSet 1
+  res.verified &&
+  (summary.lookup "A").isSome &&
+  (summary.lookup "B").isSome &&
+  (summary.lookup "C").isSome &&
+  (summary.lookup "MetaEnum").isNone
+
+#guard checkDisjointPartialABox
+
 end SabrinaTests.FastCBTests

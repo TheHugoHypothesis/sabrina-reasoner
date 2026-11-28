@@ -1538,6 +1538,15 @@ private theorem candidateNodes?_complete {dm : DatatypeMap} {m : CBCanonicalMode
   | .dataMax _ _ _, _, h, _, _ => by cases h
   | .dataExact _ _ _, _, h, _, _ => by cases h
 
+/-- Helper for pairwise `DisjointObjectProperties` checking in `checkCBAxiom`. -/
+def checkDisjointObjProps (m : CBCanonicalModel) : List ObjectProperty → Bool
+  | [] => true
+  | r :: rest =>
+    rest.all (fun s =>
+      checkNodes m (roleSourceNodes? m r) fun x =>
+        allNeighborsCheck m r x (fun y => !m.hasObjEdge s x y)) &&
+    checkDisjointObjProps m rest
+
 /-- Check a single `Axiom` on `m` in $O(\text{support})$ using inverted indices
     (assuming `checkAdjConsistent m`). -/
 def checkCBAxiom (m : CBCanonicalModel) : Axiom → Bool
@@ -1612,6 +1621,12 @@ def checkCBAxiom (m : CBCanonicalModel) : Axiom → Bool
         allNeighborsCheck m r y (fun z => m.hasObjEdge r x z))
   | .reflexiveObjectProperty r =>
     allRangeSeq (fun x => m.hasObjEdge r x x) 0 m.numNodes
+  | .irreflexiveObjectProperty r =>
+    checkNodes m (roleSourceNodes? m r) fun x => !m.hasObjEdge r x x
+  | .asymmetricObjectProperty r =>
+    checkNodes m (roleSourceNodes? m r) fun x =>
+      allNeighborsCheck m r x (fun y => !m.hasObjEdge r y x)
+  | .disjointObjectProperties rs => checkDisjointObjProps m rs
   | .objectPropertyDomain r dom =>
     checkNodes m (roleSourceNodes? m r) fun x =>
       match m.neighbors? r x with
@@ -1990,6 +2005,31 @@ private theorem checkCBAxiom_sound {dm : DatatypeMap} {m : CBCanonicalModel} {w 
     simp only [checkCBAxiom, allRangeSeq_iff] at hchk
     intro x
     exact (hasObjEdge_iff r x x).mp (hchk x.val (Nat.zero_le _) x.isLt)
+  | irreflexiveObjectProperty r =>
+    simp only [checkCBAxiom] at hchk
+    intro x hxx
+    have hx := checkNodes_sound hchk x (fun xs hc => roleSourceNodes?_complete hadj hne r hc x x hxx)
+    have htrue := (hasObjEdge_iff r x x).mpr hxx
+    rw [htrue] at hx; cases hx
+  | asymmetricObjectProperty r =>
+    simp only [checkCBAxiom] at hchk
+    intro x y hxy hyx
+    have hx := checkNodes_sound hchk x (fun xs hc => roleSourceNodes?_complete hadj hne r hc x y hxy)
+    have hy := (allNeighborsCheck_iff hadj hne r x _).mp hx y hxy
+    have htrue := (hasObjEdge_iff r y x).mpr hyx
+    rw [htrue] at hy; cases hy
+  | disjointObjectProperties rs =>
+    simp only [checkCBAxiom] at hchk
+    induction rs with
+    | nil => exact List.Pairwise.nil
+    | cons r rest ih =>
+      simp only [checkDisjointObjProps, Bool.and_eq_true, List.all_eq_true] at hchk
+      refine List.pairwise_cons.mpr ⟨fun s hs x y ⟨hxy, hsxy⟩ => ?_, ih hchk.2⟩
+      have hrs := hchk.1 s hs
+      have hx := checkNodes_sound hrs x (fun xs hc => roleSourceNodes?_complete hadj hne r hc x y hxy)
+      have hy := (allNeighborsCheck_iff hadj hne r x _).mp hx y hxy
+      have htrue := (hasObjEdge_iff s x y).mpr hsxy
+      rw [htrue] at hy; cases hy
   | objectPropertyDomain r dom =>
     simp only [checkCBAxiom] at hchk
     intro x y hxy
@@ -2203,22 +2243,43 @@ def buildCBCanonicalModel (o : Ontology) (norm : NormResult) (cert : CBCert) :
       let ai' := if hadIn then activeIn else activeIn.insert p ((activeIn.getD p #[]).push v)
       (es', oa', ia', ao', ai')
 
+  -- Identify roles constrained by `Functional` / `InverseFunctional` / `objectMax` / `objectExact`
+  -- so the O(|ks|^2) `maximalKs` filter only runs where cardinality requires merging witnesses.
+  let mut cardRoles : Std.HashSet IRI := {}
+  let rec collectCardExpr (e : ClassExpr) (acc : Std.HashSet IRI) : Std.HashSet IRI :=
+    match e with
+    | .objectMax _ r c | .objectExact _ r c =>
+      collectCardExpr c (acc.insert (Profile.objPropIRI r))
+    | .complement c | .objectSome _ c | .objectAll _ c | .objectMin _ _ c =>
+      collectCardExpr c acc
+    | .intersection a b | .union a b => collectCardExpr b (collectCardExpr a acc)
+    | _ => acc
+  for ax in o do
+    match ax with
+    | .functionalObjectProperty r | .inverseFunctionalObjectProperty r =>
+      cardRoles := cardRoles.insert (Profile.objPropIRI r)
+    | .subClassOf a b => cardRoles := collectCardExpr b (collectCardExpr a cardRoles)
+    | .equivalentClasses cs | .disjointClasses cs | .disjointUnion _ cs =>
+      for c in cs do cardRoles := collectCardExpr c cardRoles
+    | _ => pure ()
+
   for ((h, r), ks) in linksByHR.toList do
     if let some u := oldToNew[h]! then
-      -- Filter out target contexts `k` already witnessed by an incoming inverse parent edge `p --r^- --> h`
-      -- (avoids duplicate neighbors after `parentMerge` under `InverseFunctional` / `maxOne`),
-      -- and non-maximal target contexts `k` strictly subsumed by another `k'`
-      let invR := invRole r
-      let incomingParents := inParentsByKR.getD (h, invR) #[]
-      let maximalKs := ks.filter fun k =>
-        !(incomingParents.any fun p =>
-          cert.contexts[k]!.all fun e => (ctxDerived[p]!).contains e) &&
-        !(ks.any fun k' =>
-          k' != k &&
-          (cert.contexts[k]!.all fun e => (ctxDerived[k']!).contains e) &&
-          (!(cert.contexts[k']!.all fun e => (ctxDerived[k]!).contains e) || k < k'))
       if let some [op] := norm.table.roles[r]? then
-        for k in maximalKs do
+        let opIri := Profile.objPropIRI op
+        let chosenKs :=
+          if cardRoles.contains opIri && ks.size ≤ 64 then
+            let invR := invRole r
+            let incomingParents := inParentsByKR.getD (h, invR) #[]
+            ks.filter fun k =>
+              !(incomingParents.any fun p =>
+                cert.contexts[k]!.all fun e => (ctxDerived[p]!).contains e) &&
+              !(ks.any fun k' =>
+                k' != k &&
+                (cert.contexts[k]!.all fun e => (ctxDerived[k']!).contains e) &&
+                (!(cert.contexts[k']!.all fun e => (ctxDerived[k]!).contains e) || k < k'))
+          else ks
+        for k in chosenKs do
           if let some v := oldToNew[k]! then
             match op with
             | .named p =>
@@ -2228,7 +2289,21 @@ def buildCBCanonicalModel (o : Ontology) (norm : NormResult) (cert : CBCert) :
               (edgeSet, outAdj, inAdj, activeOut, activeIn) :=
                 addEdge p v u edgeSet outAdj inAdj activeOut activeIn
 
-  -- Close edges under RBox axioms of `o` (iterating only active role nodes)
+  -- Add self-loops for `SubClassOf(C, ObjectHasSelf r)` / `EquivalentClasses([C, ObjectHasSelf r])`
+  for ax in o do
+    let selfPairs : List (IRI × ObjectProperty) := match ax with
+      | .subClassOf (.named c) (.objectSelf r) => [(c, r)]
+      | .equivalentClasses [.named c, .objectSelf r]
+      | .equivalentClasses [.objectSelf r, .named c] => [(c, r)]
+      | _ => []
+    for (c, r) in selfPairs do
+      let p := Profile.objPropIRI r
+      for u in clsNodes.getD c #[] do
+        (edgeSet, outAdj, inAdj, activeOut, activeIn) :=
+          addEdge p u u edgeSet outAdj inAdj activeOut activeIn
+
+  -- Close edges under RBox axioms of `o` (iterating only active role nodes, with per-role cap
+  -- so dense symmetric/chain cliques never blow up the untrusted canonical model builder)
   let mut rSub : List (ObjectProperty × ObjectProperty) := []
   let mut rChains : List (List ObjectProperty × ObjectProperty) := []
   let mut rRefl : List ObjectProperty := []
@@ -2262,35 +2337,65 @@ def buildCBCanonicalModel (o : Ontology) (norm : NormResult) (cert : CBCert) :
         (edgeSet, outAdj, inAdj, activeOut, activeIn) :=
           addEdge p u u edgeSet outAdj inAdj activeOut activeIn
 
+  let maxEdgesPerRole : Nat := 250000
+  let maxTotalEdges : Nat := 1500000
+  let mut roleEdgeCnt : Std.HashMap IRI Nat := {}
+  let mut cappedRoles : Std.HashSet IRI := {}
+  for (p, _, _) in edgeSet do
+    roleEdgeCnt := roleEdgeCnt.insert p (roleEdgeCnt.getD p 0 + 1)
+
+  let addEdgeCapped := fun (p : IRI) (u v : Nat)
+      (edgeSet : Std.HashSet (IRI × Nat × Nat))
+      (roleEdgeCnt : Std.HashMap IRI Nat)
+      (cappedRoles : Std.HashSet IRI)
+      (outAdj inAdj : Array (Std.HashMap IRI (Array Nat)))
+      (activeOut activeIn : Std.HashMap IRI (Array Nat)) =>
+    if edgeSet.size >= maxTotalEdges || cappedRoles.contains p ||
+        p == topObjectProperty || p == bottomObjectProperty || edgeSet.contains (p, u, v) then
+      (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn)
+    else
+      let cnt := roleEdgeCnt.getD p 0 + 1
+      if cnt > maxEdgesPerRole then
+        (edgeSet, roleEdgeCnt, cappedRoles.insert p, outAdj, inAdj, activeOut, activeIn)
+      else
+        let (es', oa', ia', ao', ai') := addEdge p u v edgeSet outAdj inAdj activeOut activeIn
+        (es', roleEdgeCnt.insert p cnt, cappedRoles, oa', ia', ao', ai')
+
   let mut changed := !rSub.isEmpty || !rChains.isEmpty
   let mut rounds : Nat := 0
-  while changed && rounds < 16 do
+  while changed && rounds < 16 && edgeSet.size < maxTotalEdges do
     changed := false
     rounds := rounds + 1
     let beforeSz := edgeSet.size
     for (r, s) in rSub do
+      let sp := Profile.objPropIRI s
+      if cappedRoles.contains sp || edgeSet.size >= maxTotalEdges then continue
       match r with
       | .named pr =>
         for u in activeOut.getD pr #[] do
+          if cappedRoles.contains sp || edgeSet.size >= maxTotalEdges then break
           for v in (outAdj[u]!).getD pr #[] do
             match s with
             | .named ps =>
-              (edgeSet, outAdj, inAdj, activeOut, activeIn) :=
-                addEdge ps u v edgeSet outAdj inAdj activeOut activeIn
+              (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                addEdgeCapped ps u v edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
             | .inverse ps =>
-              (edgeSet, outAdj, inAdj, activeOut, activeIn) :=
-                addEdge ps v u edgeSet outAdj inAdj activeOut activeIn
+              (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                addEdgeCapped ps v u edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
       | .inverse pr =>
         for u in activeIn.getD pr #[] do
+          if cappedRoles.contains sp || edgeSet.size >= maxTotalEdges then break
           for v in (inAdj[u]!).getD pr #[] do
             match s with
             | .named ps =>
-              (edgeSet, outAdj, inAdj, activeOut, activeIn) :=
-                addEdge ps u v edgeSet outAdj inAdj activeOut activeIn
+              (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                addEdgeCapped ps u v edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
             | .inverse ps =>
-              (edgeSet, outAdj, inAdj, activeOut, activeIn) :=
-                addEdge ps v u edgeSet outAdj inAdj activeOut activeIn
+              (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                addEdgeCapped ps v u edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
     for (rs, s) in rChains do
+      let sp := Profile.objPropIRI s
+      if cappedRoles.contains sp || edgeSet.size >= maxTotalEdges then continue
       match rs with
       | [] => pure ()
       | r0 :: _ =>
@@ -2298,6 +2403,7 @@ def buildCBCanonicalModel (o : Ontology) (norm : NormResult) (cert : CBCert) :
           | .named p0 => activeOut.getD p0 #[]
           | .inverse p0 => activeIn.getD p0 #[]
         for u in startNodes do
+          if cappedRoles.contains sp || edgeSet.size >= maxTotalEdges then break
           let mut frontier : Array Nat := #[u]
           for step in rs do
             let mut nextF : Array Nat := #[]
@@ -2315,11 +2421,11 @@ def buildCBCanonicalModel (o : Ontology) (norm : NormResult) (cert : CBCert) :
           for v in frontier do
             match s with
             | .named ps =>
-              (edgeSet, outAdj, inAdj, activeOut, activeIn) :=
-                addEdge ps u v edgeSet outAdj inAdj activeOut activeIn
+              (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                addEdgeCapped ps u v edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
             | .inverse ps =>
-              (edgeSet, outAdj, inAdj, activeOut, activeIn) :=
-                addEdge ps v u edgeSet outAdj inAdj activeOut activeIn
+              (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                addEdgeCapped ps v u edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
     if edgeSet.size > beforeSz then changed := true
 
   -- Strictly sort and deduplicate all adjacency lists and role source indices
@@ -2858,6 +2964,1555 @@ private def hasUnsupportedAlwaysNonLocal (idx : FastLocality.LocalityIndex) : Bo
     | some (.datatypeDefinition ..) => true
     | _ => false
 
+/-! ### 8. Disjoint-Union TBox+ABox Partial-Model Verification (`checkCBDisjointPartialModel`)
+
+Extends `checkCBPartialModel` to arbitrary consistent ontologies containing ABox assertions,
+`ObjectOneOf`/`ObjectHasValue` nominals, `HasKey`, and datatype axioms (as long as the ontology
+does not mention `owl:topObjectProperty` or `owl:topDataProperty`): given any model `I_base ⊨ o`
+(certified by consistency of `o`), the disjoint union `I_base ⊕ restrictToSig(m, fs)` with all
+named/anonymous individuals placed in `I_base` satisfies EVERY axiom of `o`. -/
+
+def objPropNotTop (r : ObjectProperty) : Bool :=
+  Profile.objPropIRI r != topObjectProperty
+
+def exprNoTopProp : ClassExpr → Bool
+  | .named _ | .oneOf _ => true
+  | .complement c => exprNoTopProp c
+  | .intersection a b | .union a b => exprNoTopProp a && exprNoTopProp b
+  | .objectSome r c | .objectAll r c | .objectMin _ r c | .objectMax _ r c | .objectExact _ r c =>
+    objPropNotTop r && exprNoTopProp c
+  | .objectValue r _ | .objectSelf r => objPropNotTop r
+  | .dataSome p _ | .dataAll p _ | .dataValue p _ | .dataMin _ p _ | .dataMax _ p _ | .dataExact _ p _ =>
+    p != topDataProperty
+
+def axiomNoTopProp : Axiom → Bool
+  | .subClassOf a b => exprNoTopProp a && exprNoTopProp b
+  | .equivalentClasses cs | .disjointClasses cs => cs.all exprNoTopProp
+  | .disjointUnion _ cs => cs.all exprNoTopProp
+  | .subObjectProperty r s => objPropNotTop r && objPropNotTop s
+  | .subObjectPropertyChain rs s => rs.all objPropNotTop && objPropNotTop s
+  | .equivalentObjectProperties rs | .disjointObjectProperties rs => rs.all objPropNotTop
+  | .inverseObjectProperties r s => objPropNotTop r && objPropNotTop s
+  | .objectPropertyDomain r c | .objectPropertyRange r c => objPropNotTop r && exprNoTopProp c
+  | .functionalObjectProperty r | .inverseFunctionalObjectProperty r
+  | .reflexiveObjectProperty r | .irreflexiveObjectProperty r
+  | .symmetricObjectProperty r | .asymmetricObjectProperty r
+  | .transitiveObjectProperty r => objPropNotTop r
+  | .subDataProperty r s => r != topDataProperty && s != topDataProperty
+  | .equivalentDataProperties rs | .disjointDataProperties rs => rs.all (· != topDataProperty)
+  | .dataPropertyDomain p c => p != topDataProperty && exprNoTopProp c
+  | .dataPropertyRange p _ | .functionalDataProperty p => p != topDataProperty
+  | .datatypeDefinition _ _ => true
+  | .hasKey c rs ds => exprNoTopProp c && rs.all objPropNotTop && ds.all (· != topDataProperty)
+  | .sameIndividuals _ | .differentIndividuals _ => true
+  | .classAssertion c _ => exprNoTopProp c
+  | .objectAssertion r _ _ | .negativeObjectAssertion r _ _ => objPropNotTop r
+  | .dataAssertion p _ _ | .negativeDataAssertion p _ _ => p != topDataProperty
+
+def exprNoIndivData : ClassExpr → Bool
+  | .named _ => true
+  | .complement c => exprNoIndivData c
+  | .intersection a b | .union a b => exprNoIndivData a && exprNoIndivData b
+  | .objectSome _ c | .objectAll _ c | .objectMin _ _ c | .objectMax _ _ c | .objectExact _ _ c =>
+    exprNoIndivData c
+  | .objectSelf _ => true
+  | .oneOf _ | .objectValue _ _ | .dataSome _ _ | .dataAll _ _ | .dataValue _ _
+  | .dataMin _ _ _ | .dataMax _ _ _ | .dataExact _ _ _ => false
+
+def axiomNoIndivData : Axiom → Bool
+  | .subClassOf a b => exprNoIndivData a && exprNoIndivData b
+  | .equivalentClasses cs | .disjointClasses cs | .disjointUnion _ cs => cs.all exprNoIndivData
+  | .objectPropertyDomain _ c | .objectPropertyRange _ c => exprNoIndivData c
+  | .subObjectProperty .. | .subObjectPropertyChain .. | .equivalentObjectProperties ..
+  | .disjointObjectProperties .. | .inverseObjectProperties ..
+  | .functionalObjectProperty .. | .inverseFunctionalObjectProperty ..
+  | .reflexiveObjectProperty .. | .irreflexiveObjectProperty ..
+  | .symmetricObjectProperty .. | .asymmetricObjectProperty ..
+  | .transitiveObjectProperty .. => true
+  | _ => false
+
+mutual
+  def isZeroOnRightFast (fs : FastLocality.FastSig) : ClassExpr → Bool
+    | .named c => c == nothing || (c != thing && !fs.hasCls c)
+    | .complement c => isTopOnRightFast fs c
+    | .intersection a b => isZeroOnRightFast fs a || isZeroOnRightFast fs b
+    | .union a b => isZeroOnRightFast fs a && isZeroOnRightFast fs b
+    | .oneOf _ => true
+    | .objectSome r c => FastLocality.isBotObjPropFast fs r || isZeroOnRightFast fs c
+    | .objectAll _ _ => false
+    | .objectValue r _ => objPropNotTop r
+    | .objectSelf r => FastLocality.isBotObjPropFast fs r
+    | .objectMin n r c => decide (n > 0) && (FastLocality.isBotObjPropFast fs r || isZeroOnRightFast fs c)
+    | .objectMax _ _ _ => false
+    | .objectExact n r c => decide (n > 0) && (FastLocality.isBotObjPropFast fs r || isZeroOnRightFast fs c)
+    | .dataSome p _ => p != topDataProperty
+    | .dataAll _ _ => false
+    | .dataValue p _ => p != topDataProperty
+    | .dataMin n p _ => decide (n > 0) && (p != topDataProperty)
+    | .dataMax _ _ _ => false
+    | .dataExact n p _ => decide (n > 0) && (p != topDataProperty)
+
+  def isTopOnRightFast (fs : FastLocality.FastSig) : ClassExpr → Bool
+    | .named c => c == thing
+    | .complement c => isZeroOnRightFast fs c
+    | .intersection a b => isTopOnRightFast fs a && isTopOnRightFast fs b
+    | .union a b => isTopOnRightFast fs a || isTopOnRightFast fs b
+    | .oneOf _ | .objectSome _ _ | .objectValue _ _ | .objectSelf _ | .objectExact _ _ _
+    | .dataSome _ _ | .dataValue _ _ | .dataExact _ _ _ => false
+    | .objectAll r c => FastLocality.isBotObjPropFast fs r || isTopOnRightFast fs c
+    | .objectMin n _ _ => n == 0
+    | .objectMax _ r c => FastLocality.isBotObjPropFast fs r || isZeroOnRightFast fs c
+    | .dataAll p _ => p != topDataProperty
+    | .dataMin n _ _ => n == 0
+    | .dataMax _ p _ => p != topDataProperty
+end
+
+def isRightLocalAxiomFast (fs : FastLocality.FastSig) : Axiom → Bool
+  | .subClassOf a b => isZeroOnRightFast fs a || isTopOnRightFast fs b
+  | .equivalentClasses cs => cs.all (isZeroOnRightFast fs) || cs.all (isTopOnRightFast fs)
+  | .disjointClasses cs => Profile.atMostOne (fun c => !isZeroOnRightFast fs c) cs
+  | .disjointUnion h cs => isZeroOnRightFast fs (.named h) && cs.all (isZeroOnRightFast fs)
+  | .subObjectProperty r _ => FastLocality.isBotObjPropFast fs r
+  | .subObjectPropertyChain rs _ => !rs.isEmpty && rs.any (FastLocality.isBotObjPropFast fs)
+  | .equivalentObjectProperties rs => rs.all (FastLocality.isBotObjPropFast fs)
+  | .disjointObjectProperties rs => Profile.atMostOne (fun r => !FastLocality.isBotObjPropFast fs r) rs
+  | .inverseObjectProperties r s => FastLocality.isBotObjPropFast fs r && FastLocality.isBotObjPropFast fs s
+  | .objectPropertyDomain r c | .objectPropertyRange r c =>
+    FastLocality.isBotObjPropFast fs r || isTopOnRightFast fs c
+  | .functionalObjectProperty r | .inverseFunctionalObjectProperty r
+  | .irreflexiveObjectProperty r | .symmetricObjectProperty r
+  | .asymmetricObjectProperty r | .transitiveObjectProperty r => FastLocality.isBotObjPropFast fs r
+  | .reflexiveObjectProperty _ => false
+  | .subDataProperty _ _ | .equivalentDataProperties _ | .disjointDataProperties _
+  | .dataPropertyDomain _ _ | .dataPropertyRange _ _ | .functionalDataProperty _
+  | .datatypeDefinition _ _ | .hasKey _ _ _ | .sameIndividuals _ | .differentIndividuals _
+  | .classAssertion _ _ | .objectAssertion _ _ _ | .negativeObjectAssertion _ _ _
+  | .dataAssertion _ _ _ | .negativeDataAssertion _ _ _ => true
+
+/-- Parallel kernel-verified disjoint-union TBox+ABox partial-model checker:
+    every axiom of `o` must avoid `owl:topObjectProperty`/`owl:topDataProperty`, and
+    must either hold trivially on the right component (`isRightLocalAxiomFast fs ax`),
+    or be an individual/data-free TBox/RBox axiom covered by `fs` and verified on `m`. -/
+def checkCBDisjointPartialModel (o : Ontology) (m : CBCanonicalModel) (fs : FastLocality.FastSig)
+    (numWorkers : Nat := 8) : Bool :=
+  let axArr := o.toArray
+  checkAdjConsistent m numWorkers &&
+  allRangePar axArr.size (fun idx =>
+    match axArr[idx]? with
+    | some ax =>
+      axiomNoTopProp ax &&
+      (isRightLocalAxiomFast fs ax ||
+       (axiomNoIndivData ax && fs.coversSig (Profile.axiomSig ax) && checkCBAxiom m ax))
+    | none => false) numWorkers
+
+/-- Disjoint union `base ⊕ restrictToSig(m, fs)` placing all named/anonymous individuals
+    in the `Sum.inl` (`base`) component and zero cross-component edges for non-top roles. -/
+def disjointUnionInterp {dm : DatatypeMap} (base : Interpretation dm) (m : CBCanonicalModel)
+    (hne : 0 < m.numNodes) (fs : FastLocality.FastSig) : Interpretation dm where
+  Object := Sum base.Object (Fin m.numNodes)
+  objectNonempty := ⟨Sum.inr ⟨0, hne⟩⟩
+  Data := base.Data
+  dataNonempty := base.dataNonempty
+  embedValue := base.embedValue
+  embedValue_injective := base.embedValue_injective
+  classes c
+    | Sum.inl x => base.classes c x
+    | Sum.inr y => (Profile.restrictToSig (m.toInterpretation dm hne) fs.toSig).classes c y
+  objectProperties r
+    | Sum.inl x, Sum.inl y => base.objectProperties r x y
+    | Sum.inr x, Sum.inr y =>
+      (Profile.restrictToSig (m.toInterpretation dm hne) fs.toSig).objectProperties r x y
+    | Sum.inl _, Sum.inr _ | Sum.inr _, Sum.inl _ => r = topObjectProperty
+  dataProperties p
+    | Sum.inl x, d => base.dataProperties p x d
+    | Sum.inr _, _ => p = topDataProperty
+  individuals a := Sum.inl (base.individuals a)
+  datatypes := base.datatypes
+  literalValue := base.literalValue
+  lexicalAgreement := base.lexicalAgreement
+  named
+    | Sum.inl x => base.named x
+    | Sum.inr _ => False
+  namedIndividual a := base.namedIndividual a
+  thingExt := by
+    intro z; cases z with
+    | inl x => exact base.thingExt x
+    | inr y => exact (Profile.restrictToSig (m.toInterpretation dm hne) fs.toSig).thingExt y
+  nothingExt := by
+    intro z; cases z with
+    | inl x => exact base.nothingExt x
+    | inr y => exact (Profile.restrictToSig (m.toInterpretation dm hne) fs.toSig).nothingExt y
+  topObjectExt := by
+    intro z1 z2; cases z1 with
+    | inl x => cases z2 with
+      | inl y => exact base.topObjectExt x y
+      | inr _ => rfl
+    | inr x => cases z2 with
+      | inl _ => rfl
+      | inr y => exact (Profile.restrictToSig (m.toInterpretation dm hne) fs.toSig).topObjectExt x y
+  bottomObjectExt := by
+    intro z1 z2; cases z1 with
+    | inl x => cases z2 with
+      | inl y => exact base.bottomObjectExt x y
+      | inr _ => simp [topObjectProperty, bottomObjectProperty]
+    | inr x => cases z2 with
+      | inl _ => simp [topObjectProperty, bottomObjectProperty]
+      | inr y => exact (Profile.restrictToSig (m.toInterpretation dm hne) fs.toSig).bottomObjectExt x y
+  topDataExt := by
+    intro z d; cases z with
+    | inl x => exact base.topDataExt x d
+    | inr _ => rfl
+  bottomDataExt := by
+    intro z d; cases z with
+    | inl x => exact base.bottomDataExt x d
+    | inr _ => simp [topDataProperty, bottomDataProperty]
+  literalDatatypeExt := base.literalDatatypeExt
+  datatypeAgreement := base.datatypeAgreement
+
+private theorem disjointUnion_dataHolds {dm : DatatypeMap} (base : Interpretation dm)
+    (m : CBCanonicalModel) (hne : 0 < m.numNodes) (fs : FastLocality.FastSig)
+    (d : base.Data) (dr : DataRange) :
+    dataHolds (disjointUnionInterp base m hne fs) d dr ↔ dataHolds base d dr := by
+  induction dr with
+  | datatype _ | oneOf _ | restriction _ _ => rfl
+  | complement _ ih => exact not_congr ih
+  | intersection _ _ ha hb => exact and_congr ha hb
+  | union _ _ ha hb => exact or_congr ha hb
+
+private theorem disjointUnion_obj_inl {dm : DatatypeMap} (base : Interpretation dm)
+    (m : CBCanonicalModel) (hne : 0 < m.numNodes) (fs : FastLocality.FastSig)
+    {r : ObjectProperty} (hr : objPropNotTop r = true) (x : base.Object) :
+    ∀ (z : Sum base.Object (Fin m.numNodes)),
+      objectHolds (disjointUnionInterp base m hne fs) r (Sum.inl x) z ↔
+        ∃ y, z = Sum.inl y ∧ objectHolds base r x y := by
+  have hnt : Profile.objPropIRI r ≠ topObjectProperty := by
+    simpa [objPropNotTop, bne_iff_ne] using hr
+  intro z
+  cases r with
+  | named p | inverse p =>
+    simp only [Profile.objPropIRI] at hnt
+    cases z with
+    | inl y => exact ⟨fun h => ⟨y, rfl, h⟩, fun ⟨_, he, h⟩ => Sum.inl.inj he ▸ h⟩
+    | inr y => simp [objectHolds, disjointUnionInterp, hnt]
+
+private theorem disjointUnion_obj_inr {dm : DatatypeMap} (base : Interpretation dm)
+    (m : CBCanonicalModel) (hne : 0 < m.numNodes) (fs : FastLocality.FastSig)
+    {r : ObjectProperty} (hr : objPropNotTop r = true) (x : Fin m.numNodes) :
+    ∀ (z : Sum base.Object (Fin m.numNodes)),
+      objectHolds (disjointUnionInterp base m hne fs) r (Sum.inr x) z ↔
+        ∃ y, z = Sum.inr y ∧
+          objectHolds (Profile.restrictToSig (m.toInterpretation dm hne) fs.toSig) r x y := by
+  have hnt : Profile.objPropIRI r ≠ topObjectProperty := by
+    simpa [objPropNotTop, bne_iff_ne] using hr
+  intro z
+  cases r with
+  | named p | inverse p =>
+    simp only [Profile.objPropIRI] at hnt
+    cases z with
+    | inl y => simp [objectHolds, disjointUnionInterp, hnt]
+    | inr y => exact ⟨fun h => ⟨y, rfl, h⟩, fun ⟨_, he, h⟩ => Sum.inr.inj he ▸ h⟩
+
+private theorem atLeast_of_inj {α β : Type} {f : α → β} (hf : ∀ a b, f a = f b → a = b)
+    {n : Nat} {P : β → Prop} {Q : α → Prop}
+    (h1 : ∀ z, P z → ∃ y, z = f y ∧ Q y) (h2 : ∀ y, Q y → P (f y)) :
+    AtLeast n P ↔ AtLeast n Q := by
+  constructor
+  · rintro ⟨zs, hlen, hnd, hp⟩
+    have hex : ∀ z ∈ zs, ∃ y, z = f y ∧ Q y := fun z hz => h1 z (hp z hz)
+    let g : {z // z ∈ zs} → α := fun z => Classical.choose (hex z.1 z.2)
+    have hg : ∀ z : {z // z ∈ zs}, z.1 = f (g z) ∧ Q (g z) := fun z => Classical.choose_spec (hex z.1 z.2)
+    let ys := zs.attach.map g
+    refine ⟨ys, by simp [ys, hlen], ?_, ?_⟩
+    · have hmap : ys.map f = zs := by
+        simp only [ys, List.map_map]
+        have hfg : f ∘ g = Subtype.val := by
+          funext x; exact (hg x).1.symm
+        rw [hfg]; simp
+      have : (ys.map f).Nodup := hmap ▸ hnd
+      exact nodup_of_map' f this
+    · intro y hy
+      obtain ⟨z, _, rfl⟩ := List.mem_map.mp hy
+      exact (hg z).2
+  · rintro ⟨ys, hlen, hnd, hq⟩
+    refine ⟨ys.map f, by simp [hlen], nodup_map_inj' hf hnd, ?_⟩
+    intro z hz
+    obtain ⟨y, hy, rfl⟩ := List.mem_map.mp hz
+    exact h2 y (hq y hy)
+
+private theorem atLeast_congr' {α : Type} {n : Nat} {P Q : α → Prop} (h : ∀ x, P x ↔ Q x) :
+    AtLeast n P ↔ AtLeast n Q :=
+  ⟨fun ⟨xs, hl, hn, hp⟩ => ⟨xs, hl, hn, fun x hx => (h x).mp (hp x hx)⟩,
+   fun ⟨xs, hl, hn, hp⟩ => ⟨xs, hl, hn, fun x hx => (h x).mpr (hp x hx)⟩⟩
+
+private theorem disjointUnion_classHolds_inl {dm : DatatypeMap} (base : Interpretation dm)
+    (m : CBCanonicalModel) (hne : 0 < m.numNodes) (fs : FastLocality.FastSig) :
+    ∀ (c : ClassExpr), exprNoTopProp c = true →
+      ∀ (x : base.Object),
+        classHolds (disjointUnionInterp base m hne fs) (Sum.inl x) c ↔ classHolds base x c
+  | .named _, _, _ => Iff.rfl
+  | .complement c, h, x => not_congr (disjointUnion_classHolds_inl base m hne fs c h x)
+  | .intersection a b, h, x => by
+    simp only [exprNoTopProp, Bool.and_eq_true] at h
+    exact and_congr (disjointUnion_classHolds_inl base m hne fs a h.1 x)
+                    (disjointUnion_classHolds_inl base m hne fs b h.2 x)
+  | .union a b, h, x => by
+    simp only [exprNoTopProp, Bool.and_eq_true] at h
+    exact or_congr (disjointUnion_classHolds_inl base m hne fs a h.1 x)
+                   (disjointUnion_classHolds_inl base m hne fs b h.2 x)
+  | .oneOf inds, _, x => by
+    simp only [classHolds, disjointUnionInterp]
+    exact exists_congr fun a => and_congr_right fun _ => ⟨Sum.inl.inj, congrArg Sum.inl⟩
+  | .objectSome r c, h, x => by
+    simp only [exprNoTopProp, Bool.and_eq_true] at h
+    simp only [classHolds]
+    constructor
+    · rintro ⟨z, hz, hc⟩
+      obtain ⟨y, rfl, hry⟩ := (disjointUnion_obj_inl base m hne fs h.1 x z).mp hz
+      exact ⟨y, hry, (disjointUnion_classHolds_inl base m hne fs c h.2 y).mp hc⟩
+    · rintro ⟨y, hry, hc⟩
+      exact ⟨Sum.inl y, (disjointUnion_obj_inl base m hne fs h.1 x (Sum.inl y)).mpr ⟨y, rfl, hry⟩,
+        (disjointUnion_classHolds_inl base m hne fs c h.2 y).mpr hc⟩
+  | .objectAll r c, h, x => by
+    simp only [exprNoTopProp, Bool.and_eq_true] at h
+    simp only [classHolds]
+    constructor
+    · intro hall y hry
+      exact (disjointUnion_classHolds_inl base m hne fs c h.2 y).mp
+        (hall (Sum.inl y) ((disjointUnion_obj_inl base m hne fs h.1 x (Sum.inl y)).mpr ⟨y, rfl, hry⟩))
+    · intro hall z hz
+      obtain ⟨y, rfl, hry⟩ := (disjointUnion_obj_inl base m hne fs h.1 x z).mp hz
+      exact (disjointUnion_classHolds_inl base m hne fs c h.2 y).mpr (hall y hry)
+  | .objectValue r a, h, x => by
+    simp only [exprNoTopProp] at h
+    change objectHolds (disjointUnionInterp base m hne fs) r (Sum.inl x) (Sum.inl (base.individuals a)) ↔
+      objectHolds base r x (base.individuals a)
+    rw [disjointUnion_obj_inl base m hne fs h x (Sum.inl (base.individuals a))]
+    exact ⟨fun ⟨y, hy, hry⟩ => Sum.inl.inj hy ▸ hry, fun h' => ⟨base.individuals a, rfl, h'⟩⟩
+  | .objectSelf r, h, x => by
+    simp only [exprNoTopProp] at h
+    simp only [classHolds, disjointUnion_obj_inl base m hne fs h x]
+    exact ⟨fun ⟨y, hy, hry⟩ => Sum.inl.inj hy ▸ hry, fun h' => ⟨x, rfl, h'⟩⟩
+  | .objectMin n r c, h, x => by
+    simp only [exprNoTopProp, Bool.and_eq_true] at h
+    exact atLeast_of_inj (fun _ _ e => Sum.inl.inj e)
+      (fun z ⟨hz, hc⟩ => by
+        obtain ⟨y, rfl, hry⟩ := (disjointUnion_obj_inl base m hne fs h.1 x z).mp hz
+        exact ⟨y, rfl, hry, (disjointUnion_classHolds_inl base m hne fs c h.2 y).mp hc⟩)
+      (fun y ⟨hry, hc⟩ =>
+        ⟨(disjointUnion_obj_inl base m hne fs h.1 x (Sum.inl y)).mpr ⟨y, rfl, hry⟩,
+         (disjointUnion_classHolds_inl base m hne fs c h.2 y).mpr hc⟩)
+  | .objectMax n r c, h, x => by
+    simp only [exprNoTopProp, Bool.and_eq_true] at h
+    exact not_congr (atLeast_of_inj (fun _ _ e => Sum.inl.inj e)
+      (fun z ⟨hz, hc⟩ => by
+        obtain ⟨y, rfl, hry⟩ := (disjointUnion_obj_inl base m hne fs h.1 x z).mp hz
+        exact ⟨y, rfl, hry, (disjointUnion_classHolds_inl base m hne fs c h.2 y).mp hc⟩)
+      (fun y ⟨hry, hc⟩ =>
+        ⟨(disjointUnion_obj_inl base m hne fs h.1 x (Sum.inl y)).mpr ⟨y, rfl, hry⟩,
+         (disjointUnion_classHolds_inl base m hne fs c h.2 y).mpr hc⟩))
+  | .objectExact n r c, h, x => by
+    simp only [exprNoTopProp, Bool.and_eq_true] at h
+    have h1 : ∀ k, AtLeast k (fun z => objectHolds (disjointUnionInterp base m hne fs) r (Sum.inl x) z ∧
+        classHolds (disjointUnionInterp base m hne fs) z c) ↔
+        AtLeast k (fun y => objectHolds base r x y ∧ classHolds base y c) :=
+      fun k => atLeast_of_inj (n := k) (fun _ _ e => Sum.inl.inj e)
+        (fun z ⟨hz, hc⟩ => by
+          obtain ⟨y, rfl, hry⟩ := (disjointUnion_obj_inl base m hne fs h.1 x z).mp hz
+          exact ⟨y, rfl, hry, (disjointUnion_classHolds_inl base m hne fs c h.2 y).mp hc⟩)
+        (fun y ⟨hry, hc⟩ =>
+          ⟨(disjointUnion_obj_inl base m hne fs h.1 x (Sum.inl y)).mpr ⟨y, rfl, hry⟩,
+           (disjointUnion_classHolds_inl base m hne fs c h.2 y).mpr hc⟩)
+    exact and_congr (h1 n) (not_congr (h1 (n + 1)))
+  | .dataSome p dr, _, x =>
+    exists_congr fun d => and_congr_right fun _ => disjointUnion_dataHolds base m hne fs d dr
+  | .dataAll p dr, _, x =>
+    forall_congr' fun d => imp_congr_right fun _ => disjointUnion_dataHolds base m hne fs d dr
+  | .dataValue _ _, _, _ => Iff.rfl
+  | .dataMin _ p dr, _, x =>
+    atLeast_congr' fun d => and_congr_right fun _ => disjointUnion_dataHolds base m hne fs d dr
+  | .dataMax _ p dr, _, x =>
+    not_congr (atLeast_congr' fun d => and_congr_right fun _ => disjointUnion_dataHolds base m hne fs d dr)
+  | .dataExact _ p dr, _, x =>
+    and_congr
+      (atLeast_congr' fun d => and_congr_right fun _ => disjointUnion_dataHolds base m hne fs d dr)
+      (not_congr (atLeast_congr' fun d => and_congr_right fun _ => disjointUnion_dataHolds base m hne fs d dr))
+
+private theorem disjointUnion_classHolds_inr {dm : DatatypeMap} (base : Interpretation dm)
+    (m : CBCanonicalModel) (hne : 0 < m.numNodes) (fs : FastLocality.FastSig) :
+    ∀ (c : ClassExpr), exprNoTopProp c = true → exprNoIndivData c = true →
+      ∀ (x : Fin m.numNodes),
+        classHolds (disjointUnionInterp base m hne fs) (Sum.inr x) c ↔
+          classHolds (Profile.restrictToSig (m.toInterpretation dm hne) fs.toSig) x c
+  | .named _, _, _, _ => Iff.rfl
+  | .complement c, ht, hi, x => not_congr (disjointUnion_classHolds_inr base m hne fs c ht hi x)
+  | .intersection a b, ht, hi, x => by
+    simp only [exprNoTopProp, exprNoIndivData, Bool.and_eq_true] at ht hi
+    exact and_congr (disjointUnion_classHolds_inr base m hne fs a ht.1 hi.1 x)
+                    (disjointUnion_classHolds_inr base m hne fs b ht.2 hi.2 x)
+  | .union a b, ht, hi, x => by
+    simp only [exprNoTopProp, exprNoIndivData, Bool.and_eq_true] at ht hi
+    exact or_congr (disjointUnion_classHolds_inr base m hne fs a ht.1 hi.1 x)
+                   (disjointUnion_classHolds_inr base m hne fs b ht.2 hi.2 x)
+  | .objectSome r c, ht, hi, x => by
+    simp only [exprNoTopProp, exprNoIndivData, Bool.and_eq_true] at ht hi
+    simp only [classHolds]
+    constructor
+    · rintro ⟨z, hz, hc⟩
+      obtain ⟨y, rfl, hry⟩ := (disjointUnion_obj_inr base m hne fs ht.1 x z).mp hz
+      exact ⟨y, hry, (disjointUnion_classHolds_inr base m hne fs c ht.2 hi y).mp hc⟩
+    · rintro ⟨y, hry, hc⟩
+      exact ⟨Sum.inr y, (disjointUnion_obj_inr base m hne fs ht.1 x (Sum.inr y)).mpr ⟨y, rfl, hry⟩,
+        (disjointUnion_classHolds_inr base m hne fs c ht.2 hi y).mpr hc⟩
+  | .objectAll r c, ht, hi, x => by
+    simp only [exprNoTopProp, exprNoIndivData, Bool.and_eq_true] at ht hi
+    simp only [classHolds]
+    constructor
+    · intro hall y hry
+      exact (disjointUnion_classHolds_inr base m hne fs c ht.2 hi y).mp
+        (hall (Sum.inr y) ((disjointUnion_obj_inr base m hne fs ht.1 x (Sum.inr y)).mpr ⟨y, rfl, hry⟩))
+    · intro hall z hz
+      obtain ⟨y, rfl, hry⟩ := (disjointUnion_obj_inr base m hne fs ht.1 x z).mp hz
+      exact (disjointUnion_classHolds_inr base m hne fs c ht.2 hi y).mpr (hall y hry)
+  | .objectSelf r, ht, _, x => by
+    simp only [exprNoTopProp] at ht
+    simp only [classHolds, disjointUnion_obj_inr base m hne fs ht x]
+    exact ⟨fun ⟨y, hy, hry⟩ => Sum.inr.inj hy ▸ hry, fun h' => ⟨x, rfl, h'⟩⟩
+  | .objectMin n r c, ht, hi, x => by
+    simp only [exprNoTopProp, exprNoIndivData, Bool.and_eq_true] at ht hi
+    exact atLeast_of_inj (fun _ _ e => Sum.inr.inj e)
+      (fun z ⟨hz, hc⟩ => by
+        obtain ⟨y, rfl, hry⟩ := (disjointUnion_obj_inr base m hne fs ht.1 x z).mp hz
+        exact ⟨y, rfl, hry, (disjointUnion_classHolds_inr base m hne fs c ht.2 hi y).mp hc⟩)
+      (fun y ⟨hry, hc⟩ =>
+        ⟨(disjointUnion_obj_inr base m hne fs ht.1 x (Sum.inr y)).mpr ⟨y, rfl, hry⟩,
+         (disjointUnion_classHolds_inr base m hne fs c ht.2 hi y).mpr hc⟩)
+  | .objectMax n r c, ht, hi, x => by
+    simp only [exprNoTopProp, exprNoIndivData, Bool.and_eq_true] at ht hi
+    exact not_congr (atLeast_of_inj (fun _ _ e => Sum.inr.inj e)
+      (fun z ⟨hz, hc⟩ => by
+        obtain ⟨y, rfl, hry⟩ := (disjointUnion_obj_inr base m hne fs ht.1 x z).mp hz
+        exact ⟨y, rfl, hry, (disjointUnion_classHolds_inr base m hne fs c ht.2 hi y).mp hc⟩)
+      (fun y ⟨hry, hc⟩ =>
+        ⟨(disjointUnion_obj_inr base m hne fs ht.1 x (Sum.inr y)).mpr ⟨y, rfl, hry⟩,
+         (disjointUnion_classHolds_inr base m hne fs c ht.2 hi y).mpr hc⟩))
+  | .objectExact n r c, ht, hi, x => by
+    simp only [exprNoTopProp, exprNoIndivData, Bool.and_eq_true] at ht hi
+    have h1 : ∀ k, AtLeast k (fun z => objectHolds (disjointUnionInterp base m hne fs) r (Sum.inr x) z ∧
+        classHolds (disjointUnionInterp base m hne fs) z c) ↔
+        AtLeast k (fun y =>
+          objectHolds (Profile.restrictToSig (m.toInterpretation dm hne) fs.toSig) r x y ∧
+          classHolds (Profile.restrictToSig (m.toInterpretation dm hne) fs.toSig) y c) :=
+      fun k => atLeast_of_inj (n := k) (fun _ _ e => Sum.inr.inj e)
+        (fun z ⟨hz, hc⟩ => by
+          obtain ⟨y, rfl, hry⟩ := (disjointUnion_obj_inr base m hne fs ht.1 x z).mp hz
+          exact ⟨y, rfl, hry, (disjointUnion_classHolds_inr base m hne fs c ht.2 hi y).mp hc⟩)
+        (fun y ⟨hry, hc⟩ =>
+          ⟨(disjointUnion_obj_inr base m hne fs ht.1 x (Sum.inr y)).mpr ⟨y, rfl, hry⟩,
+           (disjointUnion_classHolds_inr base m hne fs c ht.2 hi y).mpr hc⟩)
+    exact and_congr (h1 n) (not_congr (h1 (n + 1)))
+  | .oneOf _, _, hi, _ | .objectValue _ _, _, hi, _ | .dataSome _ _, _, hi, _
+  | .dataAll _ _, _, hi, _ | .dataValue _ _, _, hi, _ | .dataMin _ _ _, _, hi, _
+  | .dataMax _ _ _, _, hi, _ | .dataExact _ _ _, _, hi, _ => by cases hi
+
+private theorem disjointUnion_botObj_inr {dm : DatatypeMap} (base : Interpretation dm)
+    (m : CBCanonicalModel) (hne : 0 < m.numNodes) (fs : FastLocality.FastSig)
+    {r : ObjectProperty} (hb : FastLocality.isBotObjPropFast fs r = true)
+    (x : Fin m.numNodes) (z : Sum base.Object (Fin m.numNodes)) :
+    ¬ objectHolds (disjointUnionInterp base m hne fs) r (Sum.inr x) z := by
+  have hb' : Profile.objPropIRI r = bottomObjectProperty ∨
+      (Profile.objPropIRI r ≠ topObjectProperty ∧ fs.toSig.hasObj (Profile.objPropIRI r) = false) := by
+    simp only [FastLocality.isBotObjPropFast, Bool.or_eq_true, Bool.and_eq_true,
+      beq_iff_eq, bne_iff_ne, Bool.not_eq_true', FastLocality.FastSig.hasObj_eq] at hb
+    exact hb
+  have hnt : objPropNotTop r = true := by
+    simp only [objPropNotTop, bne_iff_ne]
+    rcases hb' with hbot | ⟨hnt', _⟩
+    · rw [hbot]; decide
+    · exact hnt'
+  intro hxy
+  obtain ⟨y, rfl, hry⟩ := (disjointUnion_obj_inr base m hne fs hnt x z).mp hxy
+  cases r with
+  | named p | inverse p =>
+    simp only [Profile.objPropIRI] at hb'
+    simp only [objectHolds, Profile.restrictToSig] at hry
+    rcases hb' with rfl | ⟨hnt', hnf⟩
+    · simp [topObjectProperty, bottomObjectProperty] at hry
+    · by_cases hbot : p = bottomObjectProperty
+      · simp [hbot, topObjectProperty, bottomObjectProperty] at hry
+      · simp [hnt', hbot, hnf] at hry
+
+private theorem isZeroTopOnRight_sound {dm : DatatypeMap} (base : Interpretation dm)
+    (m : CBCanonicalModel) (hne : 0 < m.numNodes) (fs : FastLocality.FastSig) :
+    ∀ (c : ClassExpr), exprNoTopProp c = true →
+      (∀ y : Fin m.numNodes, isZeroOnRightFast fs c = true →
+        ¬ classHolds (disjointUnionInterp base m hne fs) (Sum.inr y) c) ∧
+      (∀ y : Fin m.numNodes, isTopOnRightFast fs c = true →
+        classHolds (disjointUnionInterp base m hne fs) (Sum.inr y) c)
+  | .named cn, _ => by
+    constructor
+    · intro y hz hc
+      simp only [isZeroOnRightFast, Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq,
+        bne_iff_ne, Bool.not_eq_true'] at hz
+      simp only [classHolds, disjointUnionInterp, Profile.restrictToSig] at hc
+      rcases hz with rfl | ⟨hnt, hnf⟩
+      · simp [thing, nothing] at hc
+      · rw [FastLocality.FastSig.hasCls_eq] at hnf
+        by_cases hcn : cn = nothing
+        · simp [hcn, thing, nothing] at hc
+        · simp [hnt, hcn, hnf] at hc
+    · intro y ht
+      simp only [isTopOnRightFast, beq_iff_eq] at ht
+      subst ht; simp [classHolds, disjointUnionInterp, Profile.restrictToSig]
+  | .complement c, h => by
+    have ih := isZeroTopOnRight_sound base m hne fs c h
+    exact ⟨fun y hz hc => hc (ih.2 y hz), fun y ht => ih.1 y ht⟩
+  | .intersection a b, h => by
+    simp only [exprNoTopProp, Bool.and_eq_true] at h
+    have iha := isZeroTopOnRight_sound base m hne fs a h.1
+    have ihb := isZeroTopOnRight_sound base m hne fs b h.2
+    refine ⟨fun y hz ⟨ha, hb⟩ => ?_, fun y ht => ?_⟩
+    · simp only [isZeroOnRightFast, Bool.or_eq_true] at hz
+      exact hz.elim (fun h1 => iha.1 y h1 ha) (fun h2 => ihb.1 y h2 hb)
+    · simp only [isTopOnRightFast, Bool.and_eq_true] at ht
+      exact ⟨iha.2 y ht.1, ihb.2 y ht.2⟩
+  | .union a b, h => by
+    simp only [exprNoTopProp, Bool.and_eq_true] at h
+    have iha := isZeroTopOnRight_sound base m hne fs a h.1
+    have ihb := isZeroTopOnRight_sound base m hne fs b h.2
+    refine ⟨fun y hz hdisj => ?_, fun y ht => ?_⟩
+    · simp only [isZeroOnRightFast, Bool.and_eq_true] at hz
+      exact hdisj.elim (iha.1 y hz.1) (ihb.1 y hz.2)
+    · simp only [isTopOnRightFast, Bool.or_eq_true] at ht
+      exact ht.elim (Or.inl ∘ iha.2 y) (Or.inr ∘ ihb.2 y)
+  | .oneOf inds, _ =>
+    ⟨fun y _ ⟨a, _, heq⟩ => by simp [disjointUnionInterp] at heq, fun _ ht => by cases ht⟩
+  | .objectSome r c, h => by
+    simp only [exprNoTopProp, Bool.and_eq_true] at h
+    have ih := isZeroTopOnRight_sound base m hne fs c h.2
+    refine ⟨fun y hz ⟨z, hrz, hcz⟩ => ?_, fun _ ht => by cases ht⟩
+    simp only [isZeroOnRightFast, Bool.or_eq_true] at hz
+    rcases hz with hrb | hcb
+    · exact disjointUnion_botObj_inr base m hne fs hrb y z hrz
+    · obtain ⟨w, rfl, _⟩ := (disjointUnion_obj_inr base m hne fs h.1 y z).mp hrz
+      exact ih.1 w hcb hcz
+  | .objectAll r c, h => by
+    simp only [exprNoTopProp, Bool.and_eq_true] at h
+    have ih := isZeroTopOnRight_sound base m hne fs c h.2
+    refine ⟨fun _ hz => (by cases hz), fun y ht z hrz => ?_⟩
+    simp only [isTopOnRightFast, Bool.or_eq_true] at ht
+    rcases ht with hrb | hct
+    · exact absurd hrz (disjointUnion_botObj_inr base m hne fs hrb y z)
+    · obtain ⟨w, rfl, _⟩ := (disjointUnion_obj_inr base m hne fs h.1 y z).mp hrz
+      exact ih.2 w hct
+  | .objectValue r a, h => by
+    refine ⟨fun y _ hrv => ?_, fun _ ht => by cases ht⟩
+    obtain ⟨w, heq, _⟩ := (disjointUnion_obj_inr base m hne fs h y (Sum.inl (base.individuals a))).mp hrv
+    cases heq
+  | .objectSelf r, h =>
+    ⟨fun y hz hrr => disjointUnion_botObj_inr base m hne fs hz y (Sum.inr y) hrr, fun _ ht => by cases ht⟩
+  | .objectMin n r c, h => by
+    simp only [exprNoTopProp, Bool.and_eq_true] at h
+    have ih := isZeroTopOnRight_sound base m hne fs c h.2
+    refine ⟨fun y hz ⟨zs, hlen, _, hp⟩ => ?_, fun y ht => ?_⟩
+    · simp only [isZeroOnRightFast, Bool.and_eq_true, decide_eq_true_eq, Bool.or_eq_true] at hz
+      cases zs with
+      | nil => simp at hlen; omega
+      | cons z _ =>
+        have ⟨hrz, hcz⟩ := hp z (List.mem_cons_self ..)
+        rcases hz.2 with hrb | hcb
+        · exact disjointUnion_botObj_inr base m hne fs hrb y z hrz
+        · obtain ⟨w, rfl, _⟩ := (disjointUnion_obj_inr base m hne fs h.1 y z).mp hrz
+          exact ih.1 w hcb hcz
+    · simp only [isTopOnRightFast, beq_iff_eq] at ht; subst ht
+      exact ⟨[], rfl, List.Pairwise.nil, fun _ hm => nomatch hm⟩
+  | .objectMax n r c, h => by
+    simp only [exprNoTopProp, Bool.and_eq_true] at h
+    have ih := isZeroTopOnRight_sound base m hne fs c h.2
+    refine ⟨fun _ hz => (by cases hz), fun y ht ⟨zs, hlen, _, hp⟩ => ?_⟩
+    simp only [isTopOnRightFast, Bool.or_eq_true] at ht
+    cases zs with
+    | nil => simp at hlen
+    | cons z _ =>
+      have ⟨hrz, hcz⟩ := hp z (List.mem_cons_self ..)
+      rcases ht with hrb | hcb
+      · exact disjointUnion_botObj_inr base m hne fs hrb y z hrz
+      · obtain ⟨w, rfl, _⟩ := (disjointUnion_obj_inr base m hne fs h.1 y z).mp hrz
+        exact ih.1 w hcb hcz
+  | .objectExact n r c, h => by
+    simp only [exprNoTopProp, Bool.and_eq_true] at h
+    have ih := isZeroTopOnRight_sound base m hne fs c h.2
+    refine ⟨fun y hz ⟨⟨zs, hlen, _, hp⟩, _⟩ => ?_, fun _ ht => by cases ht⟩
+    simp only [isZeroOnRightFast, Bool.and_eq_true, decide_eq_true_eq, Bool.or_eq_true] at hz
+    cases zs with
+    | nil => simp at hlen; omega
+    | cons z _ =>
+      have ⟨hrz, hcz⟩ := hp z (List.mem_cons_self ..)
+      rcases hz.2 with hrb | hcb
+      · exact disjointUnion_botObj_inr base m hne fs hrb y z hrz
+      · obtain ⟨w, rfl, _⟩ := (disjointUnion_obj_inr base m hne fs h.1 y z).mp hrz
+        exact ih.1 w hcb hcz
+  | .dataSome p _, h => by
+    have hnt : p ≠ topDataProperty := by simpa [exprNoTopProp, bne_iff_ne] using h
+    exact ⟨fun y _ ⟨_, hd, _⟩ => hnt hd, fun _ ht => by cases ht⟩
+  | .dataAll p _, h => by
+    have hnt : p ≠ topDataProperty := by simpa [exprNoTopProp, bne_iff_ne] using h
+    exact ⟨fun _ hz => (by cases hz), fun y _ _ hd => absurd hd hnt⟩
+  | .dataValue p _, h => by
+    have hnt : p ≠ topDataProperty := by simpa [exprNoTopProp, bne_iff_ne] using h
+    exact ⟨fun y _ hd => hnt hd, fun _ ht => by cases ht⟩
+  | .dataMin n p _, h => by
+    have hnt : p ≠ topDataProperty := by simpa [exprNoTopProp, bne_iff_ne] using h
+    refine ⟨fun y hz ⟨ds, hlen, _, hp⟩ => ?_, fun y ht => ?_⟩
+    · simp only [isZeroOnRightFast, Bool.and_eq_true, decide_eq_true_eq] at hz
+      cases ds with
+      | nil => simp at hlen; omega
+      | cons d _ => exact hnt (hp d (List.mem_cons_self ..)).1
+    · simp only [isTopOnRightFast, beq_iff_eq] at ht; subst ht
+      exact ⟨[], rfl, List.Pairwise.nil, fun _ hm => nomatch hm⟩
+  | .dataMax _ p _, h => by
+    have hnt : p ≠ topDataProperty := by simpa [exprNoTopProp, bne_iff_ne] using h
+    refine ⟨fun _ hz => (by cases hz), fun y _ ⟨ds, hlen, _, hp⟩ => ?_⟩
+    cases ds with
+    | nil => simp at hlen
+    | cons d _ => exact hnt (hp d (List.mem_cons_self ..)).1
+  | .dataExact n p _, h => by
+    have hnt : p ≠ topDataProperty := by simpa [exprNoTopProp, bne_iff_ne] using h
+    refine ⟨fun y hz ⟨⟨ds, hlen, _, hp⟩, _⟩ => ?_, fun _ ht => by cases ht⟩
+    simp only [isZeroOnRightFast, Bool.and_eq_true, decide_eq_true_eq] at hz
+    cases ds with
+    | nil => simp at hlen; omega
+    | cons d _ => exact hnt (hp d (List.mem_cons_self ..)).1
+
+private theorem disjointUnion_rolePath_inl {dm : DatatypeMap} (base : Interpretation dm)
+    (m : CBCanonicalModel) (hne : 0 < m.numNodes) (fs : FastLocality.FastSig) :
+    ∀ (rs : List ObjectProperty), rs.all objPropNotTop = true →
+      ∀ (x : base.Object) (z : Sum base.Object (Fin m.numNodes)),
+        rolePath (disjointUnionInterp base m hne fs) rs (Sum.inl x) z ↔
+          ∃ y, z = Sum.inl y ∧ rolePath base rs x y
+  | [], _, x, z => by
+    cases z with
+    | inl y => exact ⟨fun h => ⟨y, rfl, Sum.inl.inj h⟩, fun ⟨_, he, h⟩ => Sum.inl.inj he ▸ congrArg Sum.inl h⟩
+    | inr y => simp [rolePath]
+  | r :: rs, h, x, z => by
+    simp only [List.all_cons, Bool.and_eq_true] at h
+    constructor
+    · rintro ⟨mid, hr, hrest⟩
+      obtain ⟨m0, rfl, hrm⟩ := (disjointUnion_obj_inl base m hne fs h.1 x mid).mp hr
+      obtain ⟨y, rfl, hy⟩ := (disjointUnion_rolePath_inl base m hne fs rs h.2 m0 z).mp hrest
+      exact ⟨y, rfl, m0, hrm, hy⟩
+    · rintro ⟨y, rfl, m0, hrm, hy⟩
+      exact ⟨Sum.inl m0, (disjointUnion_obj_inl base m hne fs h.1 x (Sum.inl m0)).mpr ⟨m0, rfl, hrm⟩,
+        (disjointUnion_rolePath_inl base m hne fs rs h.2 m0 (Sum.inl y)).mpr ⟨y, rfl, hy⟩⟩
+
+private theorem disjointUnion_rolePath_inr {dm : DatatypeMap} (base : Interpretation dm)
+    (m : CBCanonicalModel) (hne : 0 < m.numNodes) (fs : FastLocality.FastSig) :
+    ∀ (rs : List ObjectProperty), rs.all objPropNotTop = true →
+      ∀ (x : Fin m.numNodes) (z : Sum base.Object (Fin m.numNodes)),
+        rolePath (disjointUnionInterp base m hne fs) rs (Sum.inr x) z ↔
+          ∃ y, z = Sum.inr y ∧
+            rolePath (Profile.restrictToSig (m.toInterpretation dm hne) fs.toSig) rs x y
+  | [], _, x, z => by
+    cases z with
+    | inl y => simp [rolePath]
+    | inr y => exact ⟨fun h => ⟨y, rfl, Sum.inr.inj h⟩, fun ⟨_, he, h⟩ => Sum.inr.inj he ▸ congrArg Sum.inr h⟩
+  | r :: rs, h, x, z => by
+    simp only [List.all_cons, Bool.and_eq_true] at h
+    constructor
+    · rintro ⟨mid, hr, hrest⟩
+      obtain ⟨m0, rfl, hrm⟩ := (disjointUnion_obj_inr base m hne fs h.1 x mid).mp hr
+      obtain ⟨y, rfl, hy⟩ := (disjointUnion_rolePath_inr base m hne fs rs h.2 m0 z).mp hrest
+      exact ⟨y, rfl, m0, hrm, hy⟩
+    · rintro ⟨y, rfl, m0, hrm, hy⟩
+      exact ⟨Sum.inr m0, (disjointUnion_obj_inr base m hne fs h.1 x (Sum.inr m0)).mpr ⟨m0, rfl, hrm⟩,
+        (disjointUnion_rolePath_inr base m hne fs rs h.2 m0 (Sum.inr y)).mpr ⟨y, rfl, hy⟩⟩
+
+private theorem disjointUnion_rolePath_bot_inr {dm : DatatypeMap} (base : Interpretation dm)
+    (m : CBCanonicalModel) (hne : 0 < m.numNodes) (fs : FastLocality.FastSig) :
+    ∀ (rs : List ObjectProperty), rs.all objPropNotTop = true →
+      rs.any (FastLocality.isBotObjPropFast fs) = true →
+      ∀ (x : Fin m.numNodes) (z : Sum base.Object (Fin m.numNodes)),
+        ¬ rolePath (disjointUnionInterp base m hne fs) rs (Sum.inr x) z
+  | [], _, hany, _, _ => by simp at hany
+  | r :: rs, hnt, hany, x, z => by
+    simp only [List.all_cons, Bool.and_eq_true] at hnt
+    simp only [List.any_cons, Bool.or_eq_true] at hany
+    rintro ⟨mid, hrm, hrest⟩
+    rcases hany with hrb | hrestb
+    · exact disjointUnion_botObj_inr base m hne fs hrb x mid hrm
+    · obtain ⟨m0, rfl, _⟩ := (disjointUnion_obj_inr base m hne fs hnt.1 x mid).mp hrm
+      exact disjointUnion_rolePath_bot_inr base m hne fs rs hnt.2 hrestb m0 z hrest
+
+private theorem disjointUnion_pairwise_atMostOne {α : Type} {P : α → Prop} {f : α → Bool}
+    (hf : ∀ x, f x = true → ¬ P x) :
+    ∀ {xs : List α}, Profile.atMostOne (fun x => !f x) xs = true →
+      xs.Pairwise (fun a b => ¬ (P a ∧ P b))
+  | [], _ => List.Pairwise.nil
+  | x :: tl, h => by
+    simp only [Profile.atMostOne] at h
+    cases hfx : f x with
+    | true =>
+      simp only [hfx, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at h
+      exact List.pairwise_cons.mpr ⟨fun _ _ ⟨hx, _⟩ => hf x hfx hx,
+        disjointUnion_pairwise_atMostOne hf h⟩
+    | false =>
+      simp only [hfx, Bool.not_false, ↓reduceIte, List.all_eq_true, Bool.not_not] at h
+      refine List.pairwise_cons.mpr ⟨fun y hy ⟨_, hyP⟩ => hf y (h y hy) hyP, ?_⟩
+      exact pairwise_of_all_not (fun y hy => hf y (h y hy))
+
+private theorem disjointUnion_axiom_rightLocal {dm : DatatypeMap} (base : Interpretation dm)
+    (m : CBCanonicalModel) (hne : 0 < m.numNodes) (fs : FastLocality.FastSig)
+    {ax : Axiom} (hnt : axiomNoTopProp ax = true) (hloc : isRightLocalAxiomFast fs ax = true)
+    (hbase : axiomHolds base ax) :
+    axiomHolds (disjointUnionInterp base m hne fs) ax := by
+  let U := disjointUnionInterp base m hne fs
+  cases ax with
+  | subClassOf a b =>
+    simp only [axiomNoTopProp, Bool.and_eq_true] at hnt
+    simp only [isRightLocalAxiomFast, Bool.or_eq_true] at hloc
+    intro z hz
+    cases z with
+    | inl x =>
+      exact (disjointUnion_classHolds_inl base m hne fs b hnt.2 x).mpr
+        (hbase x ((disjointUnion_classHolds_inl base m hne fs a hnt.1 x).mp hz))
+    | inr y =>
+      rcases hloc with hza | htb
+      · exact absurd hz ((isZeroTopOnRight_sound base m hne fs a hnt.1).1 y hza)
+      · exact (isZeroTopOnRight_sound base m hne fs b hnt.2).2 y htb
+  | equivalentClasses cs =>
+    simp only [axiomNoTopProp, List.all_eq_true] at hnt
+    simp only [isRightLocalAxiomFast, Bool.or_eq_true, List.all_eq_true] at hloc
+    intro a ha b hb z
+    cases z with
+    | inl x =>
+      exact (disjointUnion_classHolds_inl base m hne fs a (hnt a ha) x).trans
+        ((hbase a ha b hb x).trans (disjointUnion_classHolds_inl base m hne fs b (hnt b hb) x).symm)
+    | inr y =>
+      rcases hloc with hzero | htop
+      · exact ⟨fun h => absurd h ((isZeroTopOnRight_sound base m hne fs a (hnt a ha)).1 y (hzero a ha)),
+               fun h => absurd h ((isZeroTopOnRight_sound base m hne fs b (hnt b hb)).1 y (hzero b hb))⟩
+      · exact ⟨fun _ => (isZeroTopOnRight_sound base m hne fs b (hnt b hb)).2 y (htop b hb),
+               fun _ => (isZeroTopOnRight_sound base m hne fs a (hnt a ha)).2 y (htop a ha)⟩
+  | disjointClasses cs =>
+    simp only [axiomNoTopProp, List.all_eq_true] at hnt
+    simp only [isRightLocalAxiomFast] at hloc
+    have hpwR : ∀ y : Fin m.numNodes,
+        cs.Pairwise (fun a b => ¬ (classHolds U (Sum.inr y) a ∧ classHolds U (Sum.inr y) b)) := by
+      intro y
+      have : ∀ (ls : List ClassExpr), (∀ c ∈ ls, exprNoTopProp c = true) →
+          Profile.atMostOne (fun c => !isZeroOnRightFast fs c) ls = true →
+          ls.Pairwise (fun a b => ¬ (classHolds U (Sum.inr y) a ∧ classHolds U (Sum.inr y) b)) := by
+        intro ls hls hat
+        induction ls with
+        | nil => exact List.Pairwise.nil
+        | cons c tl ih =>
+          simp only [Profile.atMostOne] at hat
+          cases hc : isZeroOnRightFast fs c with
+          | true =>
+            simp only [hc, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hat
+            exact List.pairwise_cons.mpr
+              ⟨fun _ _ ⟨hcy, _⟩ => (isZeroTopOnRight_sound base m hne fs c (hls c (List.mem_cons_self ..))).1 y hc hcy,
+               ih (fun d hd => hls d (List.mem_cons_of_mem _ hd)) hat⟩
+          | false =>
+            simp only [hc, Bool.not_false, ↓reduceIte, List.all_eq_true, Bool.not_not] at hat
+            have hnone : ∀ d ∈ tl, ¬ classHolds U (Sum.inr y) d := fun d hd =>
+              (isZeroTopOnRight_sound base m hne fs d (hls d (List.mem_cons_of_mem _ hd))).1 y (hat d hd)
+            exact List.pairwise_cons.mpr ⟨fun d hd ⟨_, hdy⟩ => hnone d hd hdy, pairwise_of_all_not hnone⟩
+      exact this cs hnt hloc
+    clear hloc
+    revert hbase hnt hpwR
+    induction cs with
+    | nil => intro _ _ _; exact List.Pairwise.nil
+    | cons a tl ih =>
+      intro hbase hnt hpwR
+      refine List.pairwise_cons.mpr ⟨fun b hb z ⟨hza, hzb⟩ => ?_,
+        ih (List.pairwise_cons.mp hbase).2 (fun c hc => hnt c (List.mem_cons_of_mem _ hc))
+           (fun y => (List.pairwise_cons.mp (hpwR y)).2)⟩
+      cases z with
+      | inl x =>
+        exact (List.pairwise_cons.mp hbase).1 b hb x
+          ⟨(disjointUnion_classHolds_inl base m hne fs a (hnt a (List.mem_cons_self ..)) x).mp hza,
+           (disjointUnion_classHolds_inl base m hne fs b (hnt b (List.mem_cons_of_mem _ hb)) x).mp hzb⟩
+      | inr y =>
+        exact (List.pairwise_cons.mp (hpwR y)).1 b hb ⟨hza, hzb⟩
+  | disjointUnion h cs =>
+    simp only [axiomNoTopProp, List.all_eq_true] at hnt
+    simp only [isRightLocalAxiomFast, Bool.and_eq_true, List.all_eq_true] at hloc
+    refine ⟨fun z => ?_, ?_⟩
+    · cases z with
+      | inl x =>
+        have h1 := hbase.1 x
+        exact h1.trans (exists_congr fun c => and_congr_right fun hc =>
+          (disjointUnion_classHolds_inl base m hne fs c (hnt c hc) x).symm)
+      | inr y =>
+        constructor
+        · intro hh
+          exact absurd hh ((isZeroTopOnRight_sound base m hne fs (.named h) rfl).1 y hloc.1)
+        · rintro ⟨c, hc, hcy⟩
+          exact absurd hcy ((isZeroTopOnRight_sound base m hne fs c (hnt c hc)).1 y (hloc.2 c hc))
+    · have hpwBase := hbase.2
+      have hlocCs := hloc.2
+      clear hbase hloc
+      revert hnt hpwBase hlocCs
+      induction cs with
+      | nil => intro _ _ _; exact List.Pairwise.nil
+      | cons a tl ih =>
+        intro hnt hpwBase hlocCs
+        refine List.pairwise_cons.mpr ⟨fun b hb z ⟨hza, hzb⟩ => ?_,
+          ih (fun c hc => hnt c (List.mem_cons_of_mem _ hc))
+             (List.pairwise_cons.mp hpwBase).2 (fun c hc => hlocCs c (List.mem_cons_of_mem _ hc))⟩
+        cases z with
+        | inl x =>
+          exact (List.pairwise_cons.mp hpwBase).1 b hb x
+            ⟨(disjointUnion_classHolds_inl base m hne fs a (hnt a (List.mem_cons_self ..)) x).mp hza,
+             (disjointUnion_classHolds_inl base m hne fs b (hnt b (List.mem_cons_of_mem _ hb)) x).mp hzb⟩
+        | inr y =>
+          exact (isZeroTopOnRight_sound base m hne fs a (hnt a (List.mem_cons_self ..))).1 y
+            (hlocCs a (List.mem_cons_self ..)) hza
+  | subObjectProperty r s =>
+    simp only [axiomNoTopProp, Bool.and_eq_true] at hnt
+    simp only [isRightLocalAxiomFast] at hloc
+    intro z1 z2 hr
+    cases z1 with
+    | inl x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inl base m hne fs hnt.1 x z2).mp hr
+      exact (disjointUnion_obj_inl base m hne fs hnt.2 x (Sum.inl y)).mpr ⟨y, rfl, hbase x y hxy⟩
+    | inr x => exact absurd hr (disjointUnion_botObj_inr base m hne fs hloc x z2)
+  | subObjectPropertyChain rs s =>
+    simp only [axiomNoTopProp, Bool.and_eq_true] at hnt
+    simp only [isRightLocalAxiomFast, Bool.and_eq_true] at hloc
+    intro z1 z2 hpath
+    cases z1 with
+    | inl x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_rolePath_inl base m hne fs rs hnt.1 x z2).mp hpath
+      exact (disjointUnion_obj_inl base m hne fs hnt.2 x (Sum.inl y)).mpr ⟨y, rfl, hbase x y hxy⟩
+    | inr x => exact absurd hpath (disjointUnion_rolePath_bot_inr base m hne fs rs hnt.1 hloc.2 x z2)
+  | equivalentObjectProperties rs =>
+    simp only [axiomNoTopProp, List.all_eq_true] at hnt
+    simp only [isRightLocalAxiomFast, List.all_eq_true] at hloc
+    intro r hr s hs z1 z2
+    cases z1 with
+    | inl x =>
+      rw [disjointUnion_obj_inl base m hne fs (hnt r hr) x z2,
+          disjointUnion_obj_inl base m hne fs (hnt s hs) x z2]
+      exact exists_congr fun y => and_congr_right fun _ => hbase r hr s hs x y
+    | inr x =>
+      exact ⟨fun h => absurd h (disjointUnion_botObj_inr base m hne fs (hloc r hr) x z2),
+             fun h => absurd h (disjointUnion_botObj_inr base m hne fs (hloc s hs) x z2)⟩
+  | disjointObjectProperties rs =>
+    simp only [axiomNoTopProp, List.all_eq_true] at hnt
+    simp only [isRightLocalAxiomFast] at hloc
+    have hpwR : ∀ (x : Fin m.numNodes) (z : Sum base.Object (Fin m.numNodes)),
+        rs.Pairwise (fun r s => ¬ (objectHolds U r (Sum.inr x) z ∧ objectHolds U s (Sum.inr x) z)) :=
+      fun x z => disjointUnion_pairwise_atMostOne
+        (fun r hrb => disjointUnion_botObj_inr base m hne fs hrb x z) hloc
+    clear hloc
+    revert hbase hnt hpwR
+    induction rs with
+    | nil => intro _ _ _; exact List.Pairwise.nil
+    | cons r tl ih =>
+      intro hbase hnt hpwR
+      refine List.pairwise_cons.mpr ⟨fun s hs z1 z2 ⟨hr, hs'⟩ => ?_,
+        ih (List.pairwise_cons.mp hbase).2 (fun q hq => hnt q (List.mem_cons_of_mem _ hq))
+           (fun x z => (List.pairwise_cons.mp (hpwR x z)).2)⟩
+      cases z1 with
+      | inl x =>
+        obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inl base m hne fs (hnt r (List.mem_cons_self ..)) x z2).mp hr
+        obtain ⟨y2, heq, hxy2⟩ := (disjointUnion_obj_inl base m hne fs (hnt s (List.mem_cons_of_mem _ hs)) x (Sum.inl y)).mp hs'
+        cases Sum.inl.inj heq
+        exact (List.pairwise_cons.mp hbase).1 s hs x y ⟨hxy, hxy2⟩
+      | inr x =>
+        exact (List.pairwise_cons.mp (hpwR x z2)).1 s hs ⟨hr, hs'⟩
+  | inverseObjectProperties r s =>
+    simp only [axiomNoTopProp, Bool.and_eq_true] at hnt
+    simp only [isRightLocalAxiomFast, Bool.and_eq_true] at hloc
+    intro z1 z2
+    cases z1 with
+    | inl x =>
+      cases z2 with
+      | inl y =>
+        rw [disjointUnion_obj_inl base m hne fs hnt.1 x (Sum.inl y),
+            disjointUnion_obj_inl base m hne fs hnt.2 y (Sum.inl x)]
+        simp only [Sum.inl.injEq, exists_eq_left']
+        exact hbase x y
+      | inr y =>
+        exact ⟨fun h => (by obtain ⟨_, heq, _⟩ := (disjointUnion_obj_inl base m hne fs hnt.1 x (Sum.inr y)).mp h; cases heq),
+               fun h => absurd h (disjointUnion_botObj_inr base m hne fs hloc.2 y (Sum.inl x))⟩
+    | inr x =>
+      cases z2 with
+      | inl y =>
+        exact ⟨fun h => absurd h (disjointUnion_botObj_inr base m hne fs hloc.1 x (Sum.inl y)),
+               fun h => (by obtain ⟨_, heq, _⟩ := (disjointUnion_obj_inl base m hne fs hnt.2 y (Sum.inr x)).mp h; cases heq)⟩
+      | inr y =>
+        exact ⟨fun h => absurd h (disjointUnion_botObj_inr base m hne fs hloc.1 x (Sum.inr y)),
+               fun h => absurd h (disjointUnion_botObj_inr base m hne fs hloc.2 y (Sum.inr x))⟩
+  | objectPropertyDomain r c =>
+    simp only [axiomNoTopProp, Bool.and_eq_true] at hnt
+    simp only [isRightLocalAxiomFast, Bool.or_eq_true] at hloc
+    intro z1 z2 hr
+    cases z1 with
+    | inl x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inl base m hne fs hnt.1 x z2).mp hr
+      exact (disjointUnion_classHolds_inl base m hne fs c hnt.2 x).mpr (hbase x y hxy)
+    | inr x =>
+      rcases hloc with hrb | hct
+      · exact absurd hr (disjointUnion_botObj_inr base m hne fs hrb x z2)
+      · exact (isZeroTopOnRight_sound base m hne fs c hnt.2).2 x hct
+  | objectPropertyRange r c =>
+    simp only [axiomNoTopProp, Bool.and_eq_true] at hnt
+    simp only [isRightLocalAxiomFast, Bool.or_eq_true] at hloc
+    intro z1 z2 hr
+    cases z1 with
+    | inl x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inl base m hne fs hnt.1 x z2).mp hr
+      exact (disjointUnion_classHolds_inl base m hne fs c hnt.2 y).mpr (hbase x y hxy)
+    | inr x =>
+      rcases hloc with hrb | hct
+      · exact absurd hr (disjointUnion_botObj_inr base m hne fs hrb x z2)
+      · obtain ⟨y, rfl, _⟩ := (disjointUnion_obj_inr base m hne fs hnt.1 x z2).mp hr
+        exact (isZeroTopOnRight_sound base m hne fs c hnt.2).2 y hct
+  | functionalObjectProperty r =>
+    simp only [axiomNoTopProp] at hnt
+    simp only [isRightLocalAxiomFast] at hloc
+    intro z1 z2 z3 h1 h2
+    cases z1 with
+    | inl x =>
+      obtain ⟨y2, rfl, hxy2⟩ := (disjointUnion_obj_inl base m hne fs hnt x z2).mp h1
+      obtain ⟨y3, rfl, hxy3⟩ := (disjointUnion_obj_inl base m hne fs hnt x z3).mp h2
+      exact congrArg Sum.inl (hbase x y2 y3 hxy2 hxy3)
+    | inr x => exact absurd h1 (disjointUnion_botObj_inr base m hne fs hloc x z2)
+  | inverseFunctionalObjectProperty r =>
+    simp only [axiomNoTopProp] at hnt
+    simp only [isRightLocalAxiomFast] at hloc
+    intro z1 z2 z3 h1 h2
+    cases z2 with
+    | inl x2 =>
+      obtain ⟨y1, rfl, h1'⟩ := (disjointUnion_obj_inl base m hne fs hnt x2 z1).mp h1
+      cases z3 with
+      | inl x3 =>
+        obtain ⟨y1', heq, h2'⟩ := (disjointUnion_obj_inl base m hne fs hnt x3 (Sum.inl y1)).mp h2
+        cases Sum.inl.inj heq
+        exact congrArg Sum.inl (hbase y1 x2 x3 h1' h2')
+      | inr x3 => exact absurd h2 (disjointUnion_botObj_inr base m hne fs hloc x3 (Sum.inl y1))
+    | inr x2 => exact absurd h1 (disjointUnion_botObj_inr base m hne fs hloc x2 z1)
+  | reflexiveObjectProperty _ => cases hloc
+  | irreflexiveObjectProperty r =>
+    simp only [axiomNoTopProp] at hnt
+    simp only [isRightLocalAxiomFast] at hloc
+    intro z hz
+    cases z with
+    | inl x =>
+      obtain ⟨y, heq, hxy⟩ := (disjointUnion_obj_inl base m hne fs hnt x (Sum.inl x)).mp hz
+      cases Sum.inl.inj heq
+      exact hbase x hxy
+    | inr x => exact disjointUnion_botObj_inr base m hne fs hloc x (Sum.inr x) hz
+  | symmetricObjectProperty r =>
+    simp only [axiomNoTopProp] at hnt
+    simp only [isRightLocalAxiomFast] at hloc
+    intro z1 z2 hz
+    cases z1 with
+    | inl x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inl base m hne fs hnt x z2).mp hz
+      exact (disjointUnion_obj_inl base m hne fs hnt y (Sum.inl x)).mpr ⟨x, rfl, hbase x y hxy⟩
+    | inr x => exact absurd hz (disjointUnion_botObj_inr base m hne fs hloc x z2)
+  | asymmetricObjectProperty r =>
+    simp only [axiomNoTopProp] at hnt
+    simp only [isRightLocalAxiomFast] at hloc
+    intro z1 z2 h1 h2
+    cases z1 with
+    | inl x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inl base m hne fs hnt x z2).mp h1
+      obtain ⟨x', heq, hyx⟩ := (disjointUnion_obj_inl base m hne fs hnt y (Sum.inl x)).mp h2
+      cases Sum.inl.inj heq
+      exact hbase x y hxy hyx
+    | inr x => exact disjointUnion_botObj_inr base m hne fs hloc x z2 h1
+  | transitiveObjectProperty r =>
+    simp only [axiomNoTopProp] at hnt
+    simp only [isRightLocalAxiomFast] at hloc
+    intro z1 z2 z3 h1 h2
+    cases z1 with
+    | inl x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inl base m hne fs hnt x z2).mp h1
+      obtain ⟨w, rfl, hyw⟩ := (disjointUnion_obj_inl base m hne fs hnt y z3).mp h2
+      exact (disjointUnion_obj_inl base m hne fs hnt x (Sum.inl w)).mpr ⟨w, rfl, hbase x y w hxy hyw⟩
+    | inr x => exact absurd h1 (disjointUnion_botObj_inr base m hne fs hloc x z2)
+  | subDataProperty r s =>
+    simp only [axiomNoTopProp, Bool.and_eq_true, bne_iff_ne] at hnt
+    intro z d hd
+    cases z with
+    | inl x => exact hbase x d hd
+    | inr _ => exact absurd hd hnt.1
+  | equivalentDataProperties rs =>
+    simp only [axiomNoTopProp, List.all_eq_true, bne_iff_ne] at hnt
+    intro r hr s hs z d
+    cases z with
+    | inl x => exact hbase r hr s hs x d
+    | inr _ => exact ⟨fun h => absurd h (hnt r hr), fun h => absurd h (hnt s hs)⟩
+  | disjointDataProperties rs =>
+    simp only [axiomNoTopProp, List.all_eq_true, bne_iff_ne] at hnt
+    clear hloc
+    revert hbase hnt
+    induction rs with
+    | nil => intro _ _; exact List.Pairwise.nil
+    | cons p tl ih =>
+      intro hbase hnt
+      refine List.pairwise_cons.mpr ⟨fun q hq z d ⟨hp, hq'⟩ => ?_,
+        ih (List.pairwise_cons.mp hbase).2 (fun r hr => hnt r (List.mem_cons_of_mem _ hr))⟩
+      cases z with
+      | inl x => exact (List.pairwise_cons.mp hbase).1 q hq x d ⟨hp, hq'⟩
+      | inr _ => exact hnt p (List.mem_cons_self ..) hp
+  | dataPropertyDomain p c =>
+    simp only [axiomNoTopProp, Bool.and_eq_true, bne_iff_ne] at hnt
+    intro z d hd
+    cases z with
+    | inl x => exact (disjointUnion_classHolds_inl base m hne fs c hnt.2 x).mpr (hbase x d hd)
+    | inr _ => exact absurd hd hnt.1
+  | dataPropertyRange p dr =>
+    simp only [axiomNoTopProp, bne_iff_ne] at hnt
+    intro z d hd
+    cases z with
+    | inl x => exact (disjointUnion_dataHolds base m hne fs d dr).mpr (hbase x d hd)
+    | inr _ => exact absurd hd hnt
+  | functionalDataProperty p =>
+    simp only [axiomNoTopProp, bne_iff_ne] at hnt
+    intro z d1 d2 h1 h2
+    cases z with
+    | inl x => exact hbase x d1 d2 h1 h2
+    | inr _ => exact absurd h1 hnt
+  | datatypeDefinition d dr =>
+    intro v
+    exact (hbase v).trans (disjointUnion_dataHolds base m hne fs v dr).symm
+  | hasKey c rs ds =>
+    simp only [axiomNoTopProp, Bool.and_eq_true, List.all_eq_true, bne_iff_ne] at hnt
+    intro z1 z2 hc1 hc2 hn1 hn2 hrs hds
+    cases z1 with
+    | inr _ => exact hn1.elim
+    | inl x1 =>
+      cases z2 with
+      | inr _ => exact hn2.elim
+      | inl x2 =>
+        apply congrArg Sum.inl
+        refine hbase x1 x2
+          ((disjointUnion_classHolds_inl base m hne fs c hnt.1.1 x1).mp hc1)
+          ((disjointUnion_classHolds_inl base m hne fs c hnt.1.1 x2).mp hc2)
+          hn1 hn2 (fun r hr => ?_) (fun p hp => hds p hp)
+        obtain ⟨z, hnz, hz1, hz2⟩ := hrs r hr
+        obtain ⟨w, rfl, h1'⟩ := (disjointUnion_obj_inl base m hne fs (hnt.1.2 r hr) x1 z).mp hz1
+        obtain ⟨w2, heq, h2'⟩ := (disjointUnion_obj_inl base m hne fs (hnt.1.2 r hr) x2 (Sum.inl w)).mp hz2
+        cases Sum.inl.inj heq
+        exact ⟨w, hnz, h1', h2'⟩
+  | sameIndividuals inds =>
+    intro a ha b hb
+    exact congrArg Sum.inl (hbase a ha b hb)
+  | differentIndividuals inds =>
+    clear hloc hnt
+    revert hbase
+    induction inds with
+    | nil => intro _; exact List.Pairwise.nil
+    | cons a tl ih =>
+      intro hbase
+      refine List.pairwise_cons.mpr ⟨fun b hb heq => (List.pairwise_cons.mp hbase).1 b hb (Sum.inl.inj heq),
+        ih (List.pairwise_cons.mp hbase).2⟩
+  | classAssertion c a =>
+    exact (disjointUnion_classHolds_inl base m hne fs c hnt (base.individuals a)).mpr hbase
+  | objectAssertion r a b =>
+    exact (disjointUnion_obj_inl base m hne fs hnt (base.individuals a) (Sum.inl (base.individuals b))).mpr
+      ⟨base.individuals b, rfl, hbase⟩
+  | negativeObjectAssertion r a b =>
+    intro hr
+    obtain ⟨y, heq, hxy⟩ := (disjointUnion_obj_inl base m hne fs hnt (base.individuals a) (Sum.inl (base.individuals b))).mp hr
+    exact hbase (Sum.inl.inj heq ▸ hxy)
+  | dataAssertion p a l => exact hbase
+  | negativeDataAssertion p a l => exact hbase
+
+private theorem disjointUnion_axiom_checked {dm : DatatypeMap} (base : Interpretation dm)
+    (m : CBCanonicalModel) (hne : 0 < m.numNodes) (fs : FastLocality.FastSig)
+    {ax : Axiom} (hnt : axiomNoTopProp ax = true) (hi : axiomNoIndivData ax = true)
+    (hbase : axiomHolds base ax)
+    (hright : axiomHolds (Profile.restrictToSig (m.toInterpretation dm hne) fs.toSig) ax) :
+    axiomHolds (disjointUnionInterp base m hne fs) ax := by
+  let U := disjointUnionInterp base m hne fs
+  let R := Profile.restrictToSig (m.toInterpretation dm hne) fs.toSig
+  cases ax with
+  | subClassOf a b =>
+    simp only [axiomNoTopProp, axiomNoIndivData, Bool.and_eq_true] at hnt hi
+    intro z hz
+    cases z with
+    | inl x =>
+      exact (disjointUnion_classHolds_inl base m hne fs b hnt.2 x).mpr
+        (hbase x ((disjointUnion_classHolds_inl base m hne fs a hnt.1 x).mp hz))
+    | inr y =>
+      exact (disjointUnion_classHolds_inr base m hne fs b hnt.2 hi.2 y).mpr
+        (hright y ((disjointUnion_classHolds_inr base m hne fs a hnt.1 hi.1 y).mp hz))
+  | equivalentClasses cs =>
+    simp only [axiomNoTopProp, axiomNoIndivData, List.all_eq_true] at hnt hi
+    intro a ha b hb z
+    cases z with
+    | inl x =>
+      exact (disjointUnion_classHolds_inl base m hne fs a (hnt a ha) x).trans
+        ((hbase a ha b hb x).trans (disjointUnion_classHolds_inl base m hne fs b (hnt b hb) x).symm)
+    | inr y =>
+      exact (disjointUnion_classHolds_inr base m hne fs a (hnt a ha) (hi a ha) y).trans
+        ((hright a ha b hb y).trans (disjointUnion_classHolds_inr base m hne fs b (hnt b hb) (hi b hb) y).symm)
+  | disjointClasses cs =>
+    simp only [axiomNoTopProp, axiomNoIndivData, List.all_eq_true] at hnt hi
+    revert hbase hright hnt hi
+    induction cs with
+    | nil => intro _ _ _ _; exact List.Pairwise.nil
+    | cons a tl ih =>
+      intro hbase hright hnt hi
+      refine List.pairwise_cons.mpr ⟨fun b hb z ⟨hza, hzb⟩ => ?_,
+        ih (List.pairwise_cons.mp hbase).2 (List.pairwise_cons.mp hright).2
+           (fun c hc => hnt c (List.mem_cons_of_mem _ hc)) (fun c hc => hi c (List.mem_cons_of_mem _ hc))⟩
+      cases z with
+      | inl x =>
+        exact (List.pairwise_cons.mp hbase).1 b hb x
+          ⟨(disjointUnion_classHolds_inl base m hne fs a (hnt a (List.mem_cons_self ..)) x).mp hza,
+           (disjointUnion_classHolds_inl base m hne fs b (hnt b (List.mem_cons_of_mem _ hb)) x).mp hzb⟩
+      | inr y =>
+        exact (List.pairwise_cons.mp hright).1 b hb y
+          ⟨(disjointUnion_classHolds_inr base m hne fs a (hnt a (List.mem_cons_self ..)) (hi a (List.mem_cons_self ..)) y).mp hza,
+           (disjointUnion_classHolds_inr base m hne fs b (hnt b (List.mem_cons_of_mem _ hb)) (hi b (List.mem_cons_of_mem _ hb)) y).mp hzb⟩
+  | disjointUnion h cs =>
+    simp only [axiomNoTopProp, axiomNoIndivData, List.all_eq_true] at hnt hi
+    refine ⟨fun z => ?_, ?_⟩
+    · cases z with
+      | inl x =>
+        exact (hbase.1 x).trans (exists_congr fun c => and_congr_right fun hc =>
+          (disjointUnion_classHolds_inl base m hne fs c (hnt c hc) x).symm)
+      | inr y =>
+        exact (hright.1 y).trans (exists_congr fun c => and_congr_right fun hc =>
+          (disjointUnion_classHolds_inr base m hne fs c (hnt c hc) (hi c hc) y).symm)
+    · have hpwB := hbase.2; have hpwR := hright.2
+      clear hbase hright
+      revert hnt hi hpwB hpwR
+      induction cs with
+      | nil => intro _ _ _ _; exact List.Pairwise.nil
+      | cons a tl ih =>
+        intro hnt hi hpwB hpwR
+        refine List.pairwise_cons.mpr ⟨fun b hb z ⟨hza, hzb⟩ => ?_,
+          ih (fun c hc => hnt c (List.mem_cons_of_mem _ hc)) (fun c hc => hi c (List.mem_cons_of_mem _ hc))
+             (List.pairwise_cons.mp hpwB).2 (List.pairwise_cons.mp hpwR).2⟩
+        cases z with
+        | inl x =>
+          exact (List.pairwise_cons.mp hpwB).1 b hb x
+            ⟨(disjointUnion_classHolds_inl base m hne fs a (hnt a (List.mem_cons_self ..)) x).mp hza,
+             (disjointUnion_classHolds_inl base m hne fs b (hnt b (List.mem_cons_of_mem _ hb)) x).mp hzb⟩
+        | inr y =>
+          exact (List.pairwise_cons.mp hpwR).1 b hb y
+            ⟨(disjointUnion_classHolds_inr base m hne fs a (hnt a (List.mem_cons_self ..)) (hi a (List.mem_cons_self ..)) y).mp hza,
+             (disjointUnion_classHolds_inr base m hne fs b (hnt b (List.mem_cons_of_mem _ hb)) (hi b (List.mem_cons_of_mem _ hb)) y).mp hzb⟩
+  | subObjectProperty r s =>
+    simp only [axiomNoTopProp, Bool.and_eq_true] at hnt
+    intro z1 z2 hr
+    cases z1 with
+    | inl x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inl base m hne fs hnt.1 x z2).mp hr
+      exact (disjointUnion_obj_inl base m hne fs hnt.2 x (Sum.inl y)).mpr ⟨y, rfl, hbase x y hxy⟩
+    | inr x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inr base m hne fs hnt.1 x z2).mp hr
+      exact (disjointUnion_obj_inr base m hne fs hnt.2 x (Sum.inr y)).mpr ⟨y, rfl, hright x y hxy⟩
+  | subObjectPropertyChain rs s =>
+    simp only [axiomNoTopProp, Bool.and_eq_true] at hnt
+    intro z1 z2 hpath
+    cases z1 with
+    | inl x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_rolePath_inl base m hne fs rs hnt.1 x z2).mp hpath
+      exact (disjointUnion_obj_inl base m hne fs hnt.2 x (Sum.inl y)).mpr ⟨y, rfl, hbase x y hxy⟩
+    | inr x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_rolePath_inr base m hne fs rs hnt.1 x z2).mp hpath
+      exact (disjointUnion_obj_inr base m hne fs hnt.2 x (Sum.inr y)).mpr ⟨y, rfl, hright x y hxy⟩
+  | equivalentObjectProperties rs =>
+    simp only [axiomNoTopProp, List.all_eq_true] at hnt
+    intro r hr s hs z1 z2
+    cases z1 with
+    | inl x =>
+      rw [disjointUnion_obj_inl base m hne fs (hnt r hr) x z2,
+          disjointUnion_obj_inl base m hne fs (hnt s hs) x z2]
+      exact exists_congr fun y => and_congr_right fun _ => hbase r hr s hs x y
+    | inr x =>
+      rw [disjointUnion_obj_inr base m hne fs (hnt r hr) x z2,
+          disjointUnion_obj_inr base m hne fs (hnt s hs) x z2]
+      exact exists_congr fun y => and_congr_right fun _ => hright r hr s hs x y
+  | disjointObjectProperties rs =>
+    simp only [axiomNoTopProp, List.all_eq_true] at hnt
+    clear hi
+    revert hbase hright hnt
+    induction rs with
+    | nil => intro _ _ _; exact List.Pairwise.nil
+    | cons r tl ih =>
+      intro hbase hright hnt
+      refine List.pairwise_cons.mpr ⟨fun s hs z1 z2 ⟨hr, hs'⟩ => ?_,
+        ih (List.pairwise_cons.mp hbase).2 (List.pairwise_cons.mp hright).2
+           (fun q hq => hnt q (List.mem_cons_of_mem _ hq))⟩
+      cases z1 with
+      | inl x =>
+        obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inl base m hne fs (hnt r (List.mem_cons_self ..)) x z2).mp hr
+        obtain ⟨y2, heq, hxy2⟩ := (disjointUnion_obj_inl base m hne fs (hnt s (List.mem_cons_of_mem _ hs)) x (Sum.inl y)).mp hs'
+        cases Sum.inl.inj heq
+        exact (List.pairwise_cons.mp hbase).1 s hs x y ⟨hxy, hxy2⟩
+      | inr x =>
+        obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inr base m hne fs (hnt r (List.mem_cons_self ..)) x z2).mp hr
+        obtain ⟨y2, heq, hxy2⟩ := (disjointUnion_obj_inr base m hne fs (hnt s (List.mem_cons_of_mem _ hs)) x (Sum.inr y)).mp hs'
+        cases Sum.inr.inj heq
+        exact (List.pairwise_cons.mp hright).1 s hs x y ⟨hxy, hxy2⟩
+  | inverseObjectProperties r s =>
+    simp only [axiomNoTopProp, Bool.and_eq_true] at hnt
+    intro z1 z2
+    cases z1 with
+    | inl x =>
+      cases z2 with
+      | inl y =>
+        rw [disjointUnion_obj_inl base m hne fs hnt.1 x (Sum.inl y),
+            disjointUnion_obj_inl base m hne fs hnt.2 y (Sum.inl x)]
+        simp only [Sum.inl.injEq, exists_eq_left']
+        exact hbase x y
+      | inr y =>
+        exact ⟨fun h => (by obtain ⟨_, heq, _⟩ := (disjointUnion_obj_inl base m hne fs hnt.1 x (Sum.inr y)).mp h; cases heq),
+               fun h => (by obtain ⟨_, heq, _⟩ := (disjointUnion_obj_inr base m hne fs hnt.2 y (Sum.inl x)).mp h; cases heq)⟩
+    | inr x =>
+      cases z2 with
+      | inl y =>
+        exact ⟨fun h => (by obtain ⟨_, heq, _⟩ := (disjointUnion_obj_inr base m hne fs hnt.1 x (Sum.inl y)).mp h; cases heq),
+               fun h => (by obtain ⟨_, heq, _⟩ := (disjointUnion_obj_inl base m hne fs hnt.2 y (Sum.inr x)).mp h; cases heq)⟩
+      | inr y =>
+        rw [disjointUnion_obj_inr base m hne fs hnt.1 x (Sum.inr y),
+            disjointUnion_obj_inr base m hne fs hnt.2 y (Sum.inr x)]
+        exact ⟨fun ⟨_, he, h⟩ => ⟨x, rfl, (hright x y).mp (Sum.inr.inj he ▸ h)⟩,
+               fun ⟨_, he, h⟩ => ⟨y, rfl, (hright x y).mpr (Sum.inr.inj he ▸ h)⟩⟩
+  | objectPropertyDomain r c =>
+    simp only [axiomNoTopProp, axiomNoIndivData, Bool.and_eq_true] at hnt hi
+    intro z1 z2 hr
+    cases z1 with
+    | inl x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inl base m hne fs hnt.1 x z2).mp hr
+      exact (disjointUnion_classHolds_inl base m hne fs c hnt.2 x).mpr (hbase x y hxy)
+    | inr x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inr base m hne fs hnt.1 x z2).mp hr
+      exact (disjointUnion_classHolds_inr base m hne fs c hnt.2 hi x).mpr (hright x y hxy)
+  | objectPropertyRange r c =>
+    simp only [axiomNoTopProp, axiomNoIndivData, Bool.and_eq_true] at hnt hi
+    intro z1 z2 hr
+    cases z1 with
+    | inl x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inl base m hne fs hnt.1 x z2).mp hr
+      exact (disjointUnion_classHolds_inl base m hne fs c hnt.2 y).mpr (hbase x y hxy)
+    | inr x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inr base m hne fs hnt.1 x z2).mp hr
+      exact (disjointUnion_classHolds_inr base m hne fs c hnt.2 hi y).mpr (hright x y hxy)
+  | functionalObjectProperty r =>
+    simp only [axiomNoTopProp] at hnt
+    intro z1 z2 z3 h1 h2
+    cases z1 with
+    | inl x =>
+      obtain ⟨y2, rfl, hxy2⟩ := (disjointUnion_obj_inl base m hne fs hnt x z2).mp h1
+      obtain ⟨y3, rfl, hxy3⟩ := (disjointUnion_obj_inl base m hne fs hnt x z3).mp h2
+      exact congrArg Sum.inl (hbase x y2 y3 hxy2 hxy3)
+    | inr x =>
+      obtain ⟨y2, rfl, hxy2⟩ := (disjointUnion_obj_inr base m hne fs hnt x z2).mp h1
+      obtain ⟨y3, rfl, hxy3⟩ := (disjointUnion_obj_inr base m hne fs hnt x z3).mp h2
+      exact congrArg Sum.inr (hright x y2 y3 hxy2 hxy3)
+  | inverseFunctionalObjectProperty r =>
+    simp only [axiomNoTopProp] at hnt
+    intro z1 z2 z3 h1 h2
+    cases z2 with
+    | inl x2 =>
+      obtain ⟨y1, rfl, h1'⟩ := (disjointUnion_obj_inl base m hne fs hnt x2 z1).mp h1
+      cases z3 with
+      | inl x3 =>
+        obtain ⟨y1', heq, h2'⟩ := (disjointUnion_obj_inl base m hne fs hnt x3 (Sum.inl y1)).mp h2
+        cases Sum.inl.inj heq
+        exact congrArg Sum.inl (hbase y1 x2 x3 h1' h2')
+      | inr x3 =>
+        obtain ⟨_, heq, _⟩ := (disjointUnion_obj_inr base m hne fs hnt x3 (Sum.inl y1)).mp h2
+        cases heq
+    | inr x2 =>
+      obtain ⟨y1, rfl, h1'⟩ := (disjointUnion_obj_inr base m hne fs hnt x2 z1).mp h1
+      cases z3 with
+      | inl x3 =>
+        obtain ⟨_, heq, _⟩ := (disjointUnion_obj_inl base m hne fs hnt x3 (Sum.inr y1)).mp h2
+        cases heq
+      | inr x3 =>
+        obtain ⟨y1', heq, h2'⟩ := (disjointUnion_obj_inr base m hne fs hnt x3 (Sum.inr y1)).mp h2
+        cases Sum.inr.inj heq
+        exact congrArg Sum.inr (hright y1 x2 x3 h1' h2')
+  | reflexiveObjectProperty r =>
+    simp only [axiomNoTopProp] at hnt
+    intro z
+    cases z with
+    | inl x => exact (disjointUnion_obj_inl base m hne fs hnt x (Sum.inl x)).mpr ⟨x, rfl, hbase x⟩
+    | inr x => exact (disjointUnion_obj_inr base m hne fs hnt x (Sum.inr x)).mpr ⟨x, rfl, hright x⟩
+  | irreflexiveObjectProperty r =>
+    simp only [axiomNoTopProp] at hnt
+    intro z hz
+    cases z with
+    | inl x =>
+      obtain ⟨y, heq, hxy⟩ := (disjointUnion_obj_inl base m hne fs hnt x (Sum.inl x)).mp hz
+      cases Sum.inl.inj heq; exact hbase x hxy
+    | inr x =>
+      obtain ⟨y, heq, hxy⟩ := (disjointUnion_obj_inr base m hne fs hnt x (Sum.inr x)).mp hz
+      cases Sum.inr.inj heq; exact hright x hxy
+  | symmetricObjectProperty r =>
+    simp only [axiomNoTopProp] at hnt
+    intro z1 z2 hz
+    cases z1 with
+    | inl x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inl base m hne fs hnt x z2).mp hz
+      exact (disjointUnion_obj_inl base m hne fs hnt y (Sum.inl x)).mpr ⟨x, rfl, hbase x y hxy⟩
+    | inr x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inr base m hne fs hnt x z2).mp hz
+      exact (disjointUnion_obj_inr base m hne fs hnt y (Sum.inr x)).mpr ⟨x, rfl, hright x y hxy⟩
+  | asymmetricObjectProperty r =>
+    simp only [axiomNoTopProp] at hnt
+    intro z1 z2 h1 h2
+    cases z1 with
+    | inl x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inl base m hne fs hnt x z2).mp h1
+      obtain ⟨x', heq, hyx⟩ := (disjointUnion_obj_inl base m hne fs hnt y (Sum.inl x)).mp h2
+      cases Sum.inl.inj heq; exact hbase x y hxy hyx
+    | inr x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inr base m hne fs hnt x z2).mp h1
+      obtain ⟨x', heq, hyx⟩ := (disjointUnion_obj_inr base m hne fs hnt y (Sum.inr x)).mp h2
+      cases Sum.inr.inj heq; exact hright x y hxy hyx
+  | transitiveObjectProperty r =>
+    simp only [axiomNoTopProp] at hnt
+    intro z1 z2 z3 h1 h2
+    cases z1 with
+    | inl x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inl base m hne fs hnt x z2).mp h1
+      obtain ⟨w, rfl, hyw⟩ := (disjointUnion_obj_inl base m hne fs hnt y z3).mp h2
+      exact (disjointUnion_obj_inl base m hne fs hnt x (Sum.inl w)).mpr ⟨w, rfl, hbase x y w hxy hyw⟩
+    | inr x =>
+      obtain ⟨y, rfl, hxy⟩ := (disjointUnion_obj_inr base m hne fs hnt x z2).mp h1
+      obtain ⟨w, rfl, hyw⟩ := (disjointUnion_obj_inr base m hne fs hnt y z3).mp h2
+      exact (disjointUnion_obj_inr base m hne fs hnt x (Sum.inr w)).mpr ⟨w, rfl, hright x y w hxy hyw⟩
+  | _ => cases hi
+
+/-- Headline soundness theorem for `checkCBDisjointPartialModel`:
+    given ANY base model `base ⊨ o` (certified by consistency `Satisfiable dm o`),
+    the disjoint union `base ⊕ restrictToSig(m, fs)` satisfies EVERY axiom of `o`
+    (including ABox assertions, nominals, `HasKey`, and datatype axioms). -/
+theorem checkCBDisjointPartialModel_sound {dm : DatatypeMap} {o : Ontology}
+    {m : CBCanonicalModel} {fs : FastLocality.FastSig} {numWorkers : Nat}
+    (hcheck : checkCBDisjointPartialModel o m fs numWorkers = true)
+    (base : Interpretation dm) (hbase : satisfies base o) :
+    ∃ hne : 0 < m.numNodes, satisfies (disjointUnionInterp base m hne fs) o := by
+  unfold checkCBDisjointPartialModel at hcheck
+  simp only [Bool.and_eq_true, allRangePar_iff] at hcheck
+  obtain ⟨hadj, haxs⟩ := hcheck
+  have hne : 0 < m.numNodes := by
+    unfold checkAdjConsistent at hadj
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hadj
+    exact hadj.1.1.1
+  refine ⟨hne, fun ax hax => ?_⟩
+  obtain ⟨idx, hidx, rfl⟩ := List.getElem_of_mem hax
+  have hidx' : idx < o.toArray.size := by simpa using hidx
+  have hchk := haxs idx hidx'
+  have hget : o.toArray[idx]? = some o[idx] := by
+    rw [Array.getElem?_eq_getElem hidx']; rfl
+  rw [hget] at hchk
+  simp only [Bool.and_eq_true, Bool.or_eq_true] at hchk
+  obtain ⟨hnt, hrest⟩ := hchk
+  rcases hrest with hloc | ⟨⟨hi, hcov⟩, haxm⟩
+  · exact disjointUnion_axiom_rightLocal base m hne fs hnt hloc (hbase o[idx] hax)
+  · have hsub := (FastLocality.FastSig.coversSig_iff fs (Profile.axiomSig o[idx])).mp hcov
+    have hr := (Profile.restrictToSig_axiomHolds (m.toInterpretation dm hne) hsub).mpr
+      (checkCBAxiom_sound hadj hne haxm)
+    exact disjointUnion_axiom_checked base m hne fs hnt hi (hbase o[idx] hax) hr
+
+/-- Counterexample refutation theorem for disjoint-union TBox+ABox CB partial models:
+    for any consistent ontology `o` passing `checkCBDisjointPartialModel o m fs w`,
+    a witness node `x < m.numNodes` separating `a` (in `fs`) from `b` soundly refutes
+    `o ⊨ a ⊑ b`. -/
+theorem checkCBDisjointPartialModel_counter_sub {dm : DatatypeMap} {o : Ontology}
+    {m : CBCanonicalModel} {fs : FastLocality.FastSig} {numWorkers : Nat}
+    (hcheck : checkCBDisjointPartialModel o m fs numWorkers = true)
+    (hsat : Satisfiable dm o)
+    {a b : IRI} {x : Nat} (hx : x < m.numNodes)
+    (haSig : a = thing ∨ (a ≠ nothing ∧ fs.hasCls a = true))
+    (ha : m.hasCls a x = true)
+    (hb : b ≠ thing ∧ (b = nothing ∨ fs.hasCls b = false ∨ m.hasCls b x = false)) :
+    ¬ Entails dm o [.subClassOf (.named a) (.named b)] := by
+  obtain ⟨i0, assign0, hsat0⟩ := hsat
+  obtain ⟨hne, hsatU⟩ := checkCBDisjointPartialModel_sound hcheck (i0.withAnonymous assign0) hsat0
+  intro hent
+  obtain ⟨assign, hq⟩ := hent (disjointUnionInterp (i0.withAnonymous assign0) m hne fs)
+    (satisfies_models hsatU)
+  have haHolds : classHolds ((disjointUnionInterp (i0.withAnonymous assign0) m hne fs).withAnonymous assign)
+      (Sum.inr ⟨x, hx⟩) (.named a) := by
+    simp only [classHolds, Interpretation.withAnonymous, disjointUnionInterp, Profile.restrictToSig]
+    rcases haSig with rfl | ⟨han, has⟩
+    · simp
+    · by_cases hat : a = thing
+      · simp [hat]
+      · rw [FastLocality.FastSig.hasCls_eq] at has
+        simp [hat, han, has]
+        exact ha
+  have hbHolds := hq _ (List.mem_singleton.mpr rfl) (Sum.inr ⟨x, hx⟩) haHolds
+  simp only [classHolds, Interpretation.withAnonymous, disjointUnionInterp, Profile.restrictToSig] at hbHolds
+  obtain ⟨hbt, hbRest⟩ := hb
+  simp only [hbt, ↓reduceIte] at hbRest hbHolds
+  rcases hbRest with rfl | hbf | hbm
+  · simp at hbHolds
+  · rw [FastLocality.FastSig.hasCls_eq] at hbf
+    by_cases hbn : b = nothing
+    · simp [hbn] at hbHolds
+    · simp [hbn, hbf] at hbHolds
+  · by_cases hbn : b = nothing
+    · simp [hbn] at hbHolds
+    · simp only [hbn, ↓reduceIte] at hbHolds
+      split at hbHolds
+      · change m.hasCls b x = true at hbHolds
+        rw [hbm] at hbHolds
+        cases hbHolds
+      · exact hbHolds
+
+/-- Satisfiability witness theorem for disjoint-union TBox+ABox CB partial models. -/
+theorem checkCBDisjointPartialModel_witness_sat {dm : DatatypeMap} {o : Ontology}
+    {m : CBCanonicalModel} {fs : FastLocality.FastSig} {numWorkers : Nat}
+    (hcheck : checkCBDisjointPartialModel o m fs numWorkers = true)
+    (hsat : Satisfiable dm o)
+    {a : IRI} {x : Nat} (hx : x < m.numNodes)
+    (haSig : a = thing ∨ (a ≠ nothing ∧ fs.hasCls a = true))
+    (ha : m.hasCls a x = true) :
+    ¬ Entails dm o [.subClassOf (.named a) (.named nothing)] :=
+  checkCBDisjointPartialModel_counter_sub hcheck hsat hx haSig ha ⟨by simp [thing, nothing], Or.inl rfl⟩
+
+theorem checkCBDisjointPartialModel_workers_eq (o : Ontology) (m : CBCanonicalModel)
+    (fs : FastLocality.FastSig) (w : Nat) :
+    checkCBDisjointPartialModel o m fs w = checkCBDisjointPartialModel o m fs 1 := by
+  apply Bool.eq_iff_iff.mpr
+  simp only [checkCBDisjointPartialModel, Bool.and_eq_true, checkAdjConsistent_workers_eq, allRangePar_iff]
+
+mutual
+  private def planRightZeroExpr (idx : FastLocality.LocalityIndex) (fs : FastLocality.FastSig) :
+      ClassExpr → Option (Nat × List SigSym)
+    | .named c =>
+      if c == nothing then some (0, [])
+      else if c == thing then none
+      else if !fs.hasCls c then some (0, [])
+      else some (symDeg idx (.cls c) + 1, [.cls c])
+    | .complement c => planRightTopExpr idx fs c
+    | .intersection a b => pickCheaper (planRightZeroExpr idx fs a) (planRightZeroExpr idx fs b)
+    | .union a b => combinePlans (planRightZeroExpr idx fs a) (planRightZeroExpr idx fs b)
+    | .oneOf _ => some (0, [])
+    | .objectSome r c => pickCheaper (planBotObj idx fs r) (planRightZeroExpr idx fs c)
+    | .objectAll _ _ => none
+    | .objectValue r _ => if objPropNotTop r then some (0, []) else none
+    | .objectSelf r => planBotObj idx fs r
+    | .objectMin n r c =>
+      if n > 0 then pickCheaper (planBotObj idx fs r) (planRightZeroExpr idx fs c) else none
+    | .objectMax _ _ _ => none
+    | .objectExact n r c =>
+      if n > 0 then pickCheaper (planBotObj idx fs r) (planRightZeroExpr idx fs c) else none
+    | .dataSome p _ | .dataValue p _ => if p != topDataProperty then some (0, []) else none
+    | .dataAll _ _ => none
+    | .dataMin n p _ | .dataExact n p _ =>
+      if n > 0 && p != topDataProperty then some (0, []) else none
+    | .dataMax _ _ _ => none
+
+  private def planRightTopExpr (idx : FastLocality.LocalityIndex) (fs : FastLocality.FastSig) :
+      ClassExpr → Option (Nat × List SigSym)
+    | .named c => if c == thing then some (0, []) else none
+    | .complement c => planRightZeroExpr idx fs c
+    | .intersection a b => combinePlans (planRightTopExpr idx fs a) (planRightTopExpr idx fs b)
+    | .union a b => pickCheaper (planRightTopExpr idx fs a) (planRightTopExpr idx fs b)
+    | .oneOf _ | .objectSome _ _ | .objectValue _ _ | .objectSelf _ | .objectExact _ _ _
+    | .dataSome _ _ | .dataValue _ _ | .dataExact _ _ _ => none
+    | .objectAll r c => pickCheaper (planBotObj idx fs r) (planRightTopExpr idx fs c)
+    | .objectMin n _ _ => if n == 0 then some (0, []) else none
+    | .objectMax _ r c => pickCheaper (planBotObj idx fs r) (planRightZeroExpr idx fs c)
+    | .dataAll p _ | .dataMax _ p _ => if p != topDataProperty then some (0, []) else none
+    | .dataMin n _ _ => if n == 0 then some (0, []) else none
+end
+
+private def planRightLocalAxiom (idx : FastLocality.LocalityIndex) (fs : FastLocality.FastSig) :
+    Axiom → Option (Nat × List SigSym)
+  | .subClassOf a b => pickCheaper (planRightZeroExpr idx fs a) (planRightTopExpr idx fs b)
+  | .equivalentClasses cs =>
+    let allZero := cs.foldl (fun acc c => combinePlans acc (planRightZeroExpr idx fs c)) (some (0, []))
+    let allTop := cs.foldl (fun acc c => combinePlans acc (planRightTopExpr idx fs c)) (some (0, []))
+    pickCheaper allZero allTop
+  | .disjointClasses cs => planAtMostOne (cs.map (planRightZeroExpr idx fs))
+  | .disjointUnion h cs =>
+    cs.foldl (fun acc c => combinePlans acc (planRightZeroExpr idx fs c)) (planRightZeroExpr idx fs (.named h))
+  | .subObjectProperty r _ => planBotObj idx fs r
+  | .subObjectPropertyChain rs _ => rs.foldl (fun acc r => pickCheaper acc (planBotObj idx fs r)) none
+  | .equivalentObjectProperties rs =>
+    rs.foldl (fun acc r => combinePlans acc (planBotObj idx fs r)) (some (0, []))
+  | .disjointObjectProperties rs => planAtMostOne (rs.map (planBotObj idx fs))
+  | .inverseObjectProperties r s => combinePlans (planBotObj idx fs r) (planBotObj idx fs s)
+  | .objectPropertyDomain r c | .objectPropertyRange r c =>
+    pickCheaper (planBotObj idx fs r) (planRightTopExpr idx fs c)
+  | .functionalObjectProperty r | .inverseFunctionalObjectProperty r
+  | .irreflexiveObjectProperty r | .symmetricObjectProperty r
+  | .asymmetricObjectProperty r | .transitiveObjectProperty r => planBotObj idx fs r
+  | .reflexiveObjectProperty _ => none
+  | .subDataProperty _ _ | .equivalentDataProperties _ | .disjointDataProperties _
+  | .dataPropertyDomain _ _ | .dataPropertyRange _ _ | .functionalDataProperty _
+  | .datatypeDefinition _ _ | .hasKey _ _ _ | .sameIndividuals _ | .differentIndividuals _
+  | .classAssertion _ _ | .objectAssertion _ _ _ | .negativeObjectAssertion _ _ _
+  | .dataAssertion _ _ _ | .negativeDataAssertion _ _ _ => some (0, [])
+
+/-- Compute a maximal clean sub-signature `fs` for `checkCBDisjointPartialModel` in $O(|O|)$ time:
+    ABox assertions, `HasKey`, datatype axioms, and `ObjectOneOf`/`ObjectHasValue` on the right
+    component incur zero symbol drops! Independently verified by `checkCBDisjointPartialModel`. -/
+def buildCBDisjointPartialSig (idx : FastLocality.LocalityIndex) (axOk : Array Bool) :
+    Option FastLocality.FastSig := Id.run do
+  let n := idx.axioms.size
+  if axOk.size != n then return none
+  let mut clsSet : Std.HashSet IRI := {}
+  for (c, _) in idx.clsIdx do
+    clsSet := clsSet.insert c
+  let mut objSet : Std.HashSet IRI := {}
+  for (r, _) in idx.objIdx do
+    objSet := objSet.insert r
+  let mut dataSet : Std.HashSet IRI := {}
+  for (p, _) in idx.dataIdx do
+    dataSet := dataSet.insert p
+  let mut fs : FastLocality.FastSig := ⟨clsSet, objSet, dataSet⟩
+  let mut dropped : Array Bool := Array.replicate n false
+  let mut queue : Array Nat := #[]
+  for i in [0:n] do
+    if !axOk[i]! then
+      dropped := dropped.set! i true
+      if let some ax := idx.axioms[i]? then
+        if !isRightLocalAxiomFast fs ax then
+          queue := queue.push i
+  let mut head : Nat := 0
+  while head < queue.size do
+    let i := queue[head]!
+    head := head + 1
+    let some ax := idx.axioms[i]? | continue
+    if isRightLocalAxiomFast fs ax then continue
+    match planRightLocalAxiom idx fs ax with
+    | none => return none
+    | some (_, syms) =>
+      for sym in syms do
+        let mut hits : Array Nat := #[]
+        match sym with
+        | .cls c =>
+          if fs.hasCls c then
+            fs := { fs with cls := fs.cls.erase c }
+            hits := idx.clsIdx.getD c #[]
+        | .obj r =>
+          if fs.hasObj r then
+            fs := { fs with obj := fs.obj.erase r }
+            hits := idx.objIdx.getD r #[]
+        | .data p =>
+          if fs.hasData p then
+            fs := { fs with data := fs.data.erase p }
+            hits := idx.dataIdx.getD p #[]
+        for j in hits do
+          if j < n && !dropped[j]! then
+            dropped := dropped.set! j true
+            if let some axj := idx.axioms[j]? then
+              if !isRightLocalAxiomFast fs axj then
+                queue := queue.push j
+      if !isRightLocalAxiomFast fs ax then
+        return none
+  if fs.cls.isEmpty then return none
+  return some fs
+
 private def runPar2 {α β : Type} (workers : Nat) (f : Unit → α) (g : Unit → β) : α × β :=
   if workers ≤ 1 then (f (), g ())
   else
@@ -2899,10 +4554,454 @@ private def strengthenOnt (pickFirst : Bool) (o : Ontology) : Ontology :=
       [.subClassOf c0 (strengthenPos pickFirst c1), .subClassOf c1 (strengthenPos pickFirst c0)]
     | ax => [ax]
 
+private def flattenUnionExpr : ClassExpr → List ClassExpr
+  | .union a b => flattenUnionExpr a ++ flattenUnionExpr b
+  | .named c => if c == nothing then [] else [.named c]
+  | e => [e]
+
+private def flattenConjExpr : ClassExpr → List ClassExpr
+  | .intersection a b => flattenConjExpr a ++ flattenConjExpr b
+  | .named c => if c == thing then [] else [.named c]
+  | e => [e]
+
+/-- Untrusted post-pass repair on a `CBCanonicalModel` for nearly-Horn ontologies with
+    multi-way positive unions (`owl:unionOf`), qualified cardinality restrictions
+    (`ObjectMinCardinality n` / `ObjectExactCardinality n`), and complex `EquivalentClasses`
+    definitions. All resulting models are independently kernel-verified by `checkCBCanonicalModel`,
+    `checkCBDisjointPartialModel`, or `checkCBPartialModel`. -/
+private def repairCBCanonicalModel (o : Ontology)
+    (subs : List (IRI × IRI)) (m0 : CBCanonicalModel) (wmap : Std.HashMap IRI Nat)
+    (preferAlt : Bool := false) : CBCanonicalModel × Std.HashMap IRI Nat := Id.run do
+  if m0.numNodes == 0 then return (m0, wmap)
+  let mut supMap : Std.HashMap IRI (Array IRI) := {}
+  for (a, b) in subs do
+    supMap := supMap.insert a ((supMap.getD a #[]).push b)
+
+  let mut disjMap : Std.HashMap IRI (Std.HashSet IRI) := {}
+  for ax in o do
+    match ax with
+    | .disjointClasses cs =>
+      let names := cs.filterMap fun | .named c => some c | _ => none
+      for a in names do
+        for b in names do
+          if a != b then
+            disjMap := disjMap.insert a ((disjMap.getD a {}).insert b)
+    | .subClassOf (.intersection (.named a) (.named b)) (.named c) =>
+      if c == nothing then
+        disjMap := disjMap.insert a ((disjMap.getD a {}).insert b)
+        disjMap := disjMap.insert b ((disjMap.getD b {}).insert a)
+    | _ => pure ()
+
+  let mut disjObls : Array (IRI × List IRI) := #[]
+  let mut cardObls : Array (IRI × Nat × ObjectProperty × IRI × Bool) := #[]
+  let mut eqDefs : Array (IRI × ClassExpr) := #[]
+  let mut selfPairs : Array (IRI × IRI) := #[]
+  let mut rSub : List (ObjectProperty × ObjectProperty) := []
+  let mut rChains : List (List ObjectProperty × ObjectProperty) := []
+
+  for ax in o do
+    match ax with
+    | .subClassOf (.named a) (.objectSelf r) =>
+      selfPairs := selfPairs.push (a, Profile.objPropIRI r)
+    | .subClassOf (.named a) rhs =>
+      let ds := flattenUnionExpr rhs
+      if ds.length ≥ 2 then
+        let names := ds.filterMap fun | .named d => some d | _ => none
+        if !names.isEmpty then disjObls := disjObls.push (a, names)
+      for part in flattenConjExpr rhs do
+        match part with
+        | .objectMin n r (.named c) => if n ≥ 2 then cardObls := cardObls.push (a, n, r, c, false)
+        | .objectExact n r (.named c) => if n ≥ 1 then cardObls := cardObls.push (a, n, r, c, true)
+        | _ => pure ()
+    | .equivalentClasses [.named a, .objectSelf r] | .equivalentClasses [.objectSelf r, .named a] =>
+      selfPairs := selfPairs.push (a, Profile.objPropIRI r)
+    | .equivalentClasses [.named a, rhs] | .equivalentClasses [rhs, .named a] =>
+      eqDefs := eqDefs.push (a, rhs)
+      let ds := flattenUnionExpr rhs
+      if ds.length ≥ 2 then
+        let names := ds.filterMap fun | .named d => some d | _ => none
+        if !names.isEmpty then disjObls := disjObls.push (a, names)
+      for part in flattenConjExpr rhs do
+        match part with
+        | .objectMin n r (.named c) => if n ≥ 2 then cardObls := cardObls.push (a, n, r, c, false)
+        | .objectExact n r (.named c) => if n ≥ 1 then cardObls := cardObls.push (a, n, r, c, true)
+        | _ => pure ()
+    | .subObjectProperty r s => rSub := (r, s) :: rSub
+    | .equivalentObjectProperties rs =>
+      match rs with
+      | [] | [_] => pure ()
+      | r0 :: rest => for r in rest do rSub := (r0, r) :: (r, r0) :: rSub
+    | .inverseObjectProperties r s => rSub := (r, s.converse) :: (s, r.converse) :: rSub
+    | .symmetricObjectProperty r => rSub := (r, r.converse) :: rSub
+    | .transitiveObjectProperty r => rChains := ([r, r], r) :: rChains
+    | .subObjectPropertyChain rs s =>
+      match rs with
+      | [] => pure ()
+      | [r] => rSub := (r, s) :: rSub
+      | _ => rChains := (rs, s) :: rChains
+    | _ => pure ()
+
+  if disjObls.isEmpty && cardObls.isEmpty && eqDefs.isEmpty then return (m0, wmap)
+
+  -- Specific fillers first so subclass `exact n` obligations populate before superclass `exact n`
+  cardObls := cardObls.qsort fun a b =>
+    (supMap.getD a.2.2.2.1 #[]).size > (supMap.getD b.2.2.2.1 #[]).size
+
+  let mut nodeClasses := m0.nodeClasses
+  let mut outAdj := m0.outAdj
+  let mut inAdj := m0.inAdj
+  let mut edgeSet : Std.HashSet (IRI × Nat × Nat) := {}
+  let mut roleEdgeCnt : Std.HashMap IRI Nat := {}
+  let mut cappedRoles : Std.HashSet IRI := {}
+  let mut activeOut : Std.HashMap IRI (Array Nat) := {}
+  let mut activeIn : Std.HashMap IRI (Array Nat) := {}
+  for u in [0:m0.numNodes] do
+    for (p, ys) in (outAdj[u]!).toList do
+      if !ys.isEmpty then activeOut := activeOut.insert p ((activeOut.getD p #[]).push u)
+      for v in ys do
+        edgeSet := edgeSet.insert (p, u, v)
+        roleEdgeCnt := roleEdgeCnt.insert p (roleEdgeCnt.getD p 0 + 1)
+    for (p, xs) in (inAdj[u]!).toList do
+      if !xs.isEmpty then activeIn := activeIn.insert p ((activeIn.getD p #[]).push u)
+
+  let maxEdgesPerRole : Nat := 250000
+  let maxTotalEdges : Nat := 1500000
+  let addEdge := fun (p : IRI) (u v : Nat)
+      (edgeSet : Std.HashSet (IRI × Nat × Nat))
+      (roleEdgeCnt : Std.HashMap IRI Nat) (cappedRoles : Std.HashSet IRI)
+      (outAdj inAdj : Array (Std.HashMap IRI (Array Nat)))
+      (activeOut activeIn : Std.HashMap IRI (Array Nat)) =>
+    if edgeSet.size >= maxTotalEdges || cappedRoles.contains p ||
+        p == topObjectProperty || p == bottomObjectProperty || edgeSet.contains (p, u, v) then
+      (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn)
+    else
+      let cnt := roleEdgeCnt.getD p 0 + 1
+      if cnt > maxEdgesPerRole then
+        (edgeSet, roleEdgeCnt, cappedRoles.insert p, outAdj, inAdj, activeOut, activeIn)
+      else
+        let es1 := edgeSet.insert (p, u, v)
+        let hadOut := (outAdj[u]!).contains p
+        let hadIn := (inAdj[v]!).contains p
+        let oa1 := outAdj.modify u fun m => m.insert p ((m.getD p #[]).push v)
+        let ia1 := inAdj.modify v fun m => m.insert p ((m.getD p #[]).push u)
+        let ao1 := if hadOut then activeOut else activeOut.insert p ((activeOut.getD p #[]).push u)
+        let ai1 := if hadIn then activeIn else activeIn.insert p ((activeIn.getD p #[]).push v)
+        (es1, roleEdgeCnt.insert p cnt, cappedRoles, oa1, ia1, ao1, ai1)
+
+  let removeEdge := fun (p : IRI) (u v : Nat)
+      (edgeSet : Std.HashSet (IRI × Nat × Nat))
+      (outAdj inAdj : Array (Std.HashMap IRI (Array Nat))) =>
+    if !edgeSet.contains (p, u, v) then (edgeSet, outAdj, inAdj)
+    else
+      let es1 := edgeSet.erase (p, u, v)
+      let oa1 := outAdj.modify u fun m => m.insert p ((m.getD p #[]).filter (· != v))
+      let ia1 := inAdj.modify v fun m => m.insert p ((m.getD p #[]).filter (· != u))
+      (es1, oa1, ia1)
+
+  let mut subRolesOf : Std.HashMap IRI (Std.HashSet IRI) := {}
+  for (r, s) in rSub do
+    let pr := Profile.objPropIRI r; let ps := Profile.objPropIRI s
+    subRolesOf := subRolesOf.insert ps ((subRolesOf.getD ps {}).insert pr)
+
+  let closeRBox := fun
+      (edgeSet : Std.HashSet (IRI × Nat × Nat))
+      (roleEdgeCnt : Std.HashMap IRI Nat) (cappedRoles : Std.HashSet IRI)
+      (outAdj inAdj : Array (Std.HashMap IRI (Array Nat)))
+      (activeOut activeIn : Std.HashMap IRI (Array Nat)) => Id.run do
+    let mut edgeSet := edgeSet; let mut roleEdgeCnt := roleEdgeCnt; let mut cappedRoles := cappedRoles
+    let mut outAdj := outAdj; let mut inAdj := inAdj
+    let mut activeOut := activeOut; let mut activeIn := activeIn
+    for _round in [0:6] do
+      if edgeSet.size >= maxTotalEdges then break
+      let beforeSz := edgeSet.size
+      for (r, s) in rSub do
+        let sp := Profile.objPropIRI s
+        if cappedRoles.contains sp || edgeSet.size >= maxTotalEdges then continue
+        match r with
+        | .named pr =>
+          for u in activeOut.getD pr #[] do
+            if cappedRoles.contains sp || edgeSet.size >= maxTotalEdges then break
+            for v in (outAdj[u]!).getD pr #[] do
+              match s with
+              | .named ps =>
+                (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                  addEdge ps u v edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
+              | .inverse ps =>
+                (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                  addEdge ps v u edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
+        | .inverse pr =>
+          for u in activeIn.getD pr #[] do
+            if cappedRoles.contains sp || edgeSet.size >= maxTotalEdges then break
+            for v in (inAdj[u]!).getD pr #[] do
+              match s with
+              | .named ps =>
+                (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                  addEdge ps u v edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
+              | .inverse ps =>
+                (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                  addEdge ps v u edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
+      for (rs, s) in rChains do
+        let sp := Profile.objPropIRI s
+        if cappedRoles.contains sp || edgeSet.size >= maxTotalEdges then continue
+        match rs with
+        | [] => pure ()
+        | r0 :: _ =>
+          let startNodes : Array Nat := match r0 with
+            | .named p0 => activeOut.getD p0 #[]
+            | .inverse p0 => activeIn.getD p0 #[]
+          for u in startNodes do
+            if cappedRoles.contains sp || edgeSet.size >= maxTotalEdges then break
+            let mut frontier : Array Nat := #[u]
+            for step in rs do
+              let mut nextF : Array Nat := #[]
+              let mut seenF : Std.HashSet Nat := {}
+              for cur in frontier do
+                let nbrs : Array Nat := match step with
+                  | .named p => (outAdj[cur]!).getD p #[]
+                  | .inverse p => (inAdj[cur]!).getD p #[]
+                for nxt in nbrs do
+                  if !seenF.contains nxt then
+                    seenF := seenF.insert nxt
+                    nextF := nextF.push nxt
+              frontier := nextF
+              if frontier.isEmpty then break
+            for v in frontier do
+              match s with
+              | .named ps =>
+                (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                  addEdge ps u v edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
+              | .inverse ps =>
+                (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                  addEdge ps v u edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
+      if edgeSet.size == beforeSz then break
+    return (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn)
+
+  let buildSortedModel (nc : Array (Std.HashSet IRI))
+      (oa ia : Array (Std.HashMap IRI (Array Nat))) : CBCanonicalModel := Id.run do
+    let numNodes := nc.size
+    let mut clsNodes : Std.HashMap IRI (Array Nat) := {}
+    let mut roleOutNodes : Std.HashMap IRI (Array Nat) := {}
+    let mut roleInNodes : Std.HashMap IRI (Array Nat) := {}
+    let mut oaS := oa
+    let mut iaS := ia
+    for u in [0:numNodes] do
+      for c in nc[u]! do
+        clsNodes := clsNodes.insert c ((clsNodes.getD c #[]).push u)
+      let mut om : Std.HashMap IRI (Array Nat) := {}
+      for (r, ys) in (oaS[u]!).toList do
+        let ds := dedupSortNat ys
+        if !ds.isEmpty then
+          om := om.insert r ds
+          roleOutNodes := roleOutNodes.insert r ((roleOutNodes.getD r #[]).push u)
+      oaS := oaS.set! u om
+      let mut im : Std.HashMap IRI (Array Nat) := {}
+      for (r, ys) in (iaS[u]!).toList do
+        let ds := dedupSortNat ys
+        if !ds.isEmpty then
+          im := im.insert r ds
+          roleInNodes := roleInNodes.insert r ((roleInNodes.getD r #[]).push u)
+      iaS := iaS.set! u im
+    return { numNodes := numNodes, nodeClasses := nc, outAdj := oaS, inAdj := iaS,
+             clsNodes := clsNodes, roleOutNodes := roleOutNodes, roleInNodes := roleInNodes }
+
+  let setsCompat (s1 s2 : Std.HashSet IRI) : Bool :=
+    s1.all fun c => !(disjMap.getD c {}).any fun d => s2.contains d
+
+  let maxNodes := m0.numNodes + 8000
+  let mut m := m0
+  let mut edgesDirty := false
+  for outer in [0:12] do
+    let mut anyChanged := false
+    let beforeEdgeSz := edgeSet.size
+    -- (A) Qualified cardinality witness cloning (< n) & load-balanced compatible merging (exact > n)
+    for (a, n, r, c, isExact) in cardObls do
+      if let some wC := wmap[c]? then
+        let curNum := nodeClasses.size
+        for u in [0:curNum] do
+          if (nodeClasses[u]!).contains a then
+            let nbrs : Array Nat := match r with
+              | .named p => dedupSortNat ((outAdj[u]!).getD p #[])
+              | .inverse p => dedupSortNat ((inAdj[u]!).getD p #[])
+            let hits := nbrs.filter fun y => (nodeClasses[y]!).contains c
+            let mut cnt := hits.size
+            if cnt < n then
+              while cnt < n && nodeClasses.size < maxNodes do
+                let fresh := nodeClasses.size
+                nodeClasses := nodeClasses.push nodeClasses[wC]!
+                outAdj := outAdj.push {}
+                inAdj := inAdj.push {}
+                for (p, ys) in (m0.outAdj[wC]!).toList do
+                  for y in ys do
+                    (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                      addEdge p fresh y edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
+                match r with
+                | .named p =>
+                  (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                    addEdge p u fresh edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
+                | .inverse p =>
+                  (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                    addEdge p fresh u edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
+                cnt := cnt + 1
+                anyChanged := true
+            else if isExact && cnt > n && outer >= 1 && nodeClasses.size < maxNodes then
+              let p := Profile.objPropIRI r
+              let mut buckets : Array (Array Nat) := Array.replicate n #[]
+              let mut bucketCls : Array (Std.HashSet IRI) := Array.replicate n {}
+              let mut okMerge := true
+              let hitsSorted := hits.qsort fun x y => (nodeClasses[x]!).size > (nodeClasses[y]!).size
+              for y in hitsSorted do
+                let yCls := nodeClasses[y]!
+                let mut placed := false
+                for bi in [0:n] do
+                  if buckets[bi]!.isEmpty then
+                    buckets := buckets.set! bi #[y]
+                    bucketCls := bucketCls.set! bi yCls
+                    placed := true
+                    break
+                if !placed then
+                  let mut bestBi? : Option Nat := none
+                  let mut bestScore : Nat := 9999999
+                  for bi in [0:n] do
+                    if setsCompat bucketCls[bi]! yCls then
+                      let mut overlap := 0
+                      for cc in yCls do
+                        if (bucketCls[bi]!).contains cc then overlap := overlap + 1
+                      let score := buckets[bi]!.size * 10000 + overlap
+                      if score < bestScore then
+                        bestScore := score
+                        bestBi? := some bi
+                  if let some bi := bestBi? then
+                    buckets := buckets.modify bi (·.push y)
+                    let mut merged := bucketCls[bi]!
+                    for cc in yCls do merged := merged.insert cc
+                    bucketCls := bucketCls.set! bi merged
+                    placed := true
+                if !placed then okMerge := false
+              if okMerge then
+                let mut relRoles : Array IRI := #[p]
+                for sr in subRolesOf.getD p {} do relRoles := relRoles.push sr
+                for bi in [0:n] do
+                  let fresh := nodeClasses.size
+                  nodeClasses := nodeClasses.push bucketCls[bi]!
+                  outAdj := outAdj.push {}
+                  inAdj := inAdj.push {}
+                  for y in buckets[bi]! do
+                    for (qp, qys) in (outAdj[y]!).toList do
+                      for qy in qys do
+                        if !(qy == u && relRoles.contains qp) then
+                          (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                            addEdge qp fresh qy edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
+                    for sr in subRolesOf.getD p {} do
+                      if edgeSet.contains (sr, y, u) then
+                        (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                          addEdge sr fresh u edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
+                      if edgeSet.contains (sr, u, y) then
+                        (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                          addEdge sr u fresh edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
+                  match r with
+                  | .named rp =>
+                    (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                      addEdge rp u fresh edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
+                  | .inverse rp =>
+                    (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                      addEdge rp fresh u edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
+                for y in hits do
+                  for rp in relRoles do
+                    (edgeSet, outAdj, inAdj) := removeEdge rp u y edgeSet outAdj inAdj
+                    (edgeSet, outAdj, inAdj) := removeEdge rp y u edgeSet outAdj inAdj
+                anyChanged := true
+                edgesDirty := true
+
+    -- (B) Self-loops + RBox closure (only when edges changed)
+    for (c, p) in selfPairs do
+      for u in [0:nodeClasses.size] do
+        if (nodeClasses[u]!).contains c then
+          (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+            addEdge p u u edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
+    if edgesDirty || edgeSet.size != beforeEdgeSz then
+      (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+        closeRBox edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
+      edgesDirty := false
+    m := buildSortedModel nodeClasses outAdj inAdj
+
+    -- (C) Forward EquivalentClasses closure (copying witness outgoing edges for newly inferred classes)
+    let mut eqChanged := false
+    for (a, rhs) in eqDefs do
+      match candidateNodes? m rhs with
+      | some cands =>
+        for u in cands do
+          if !(nodeClasses[u]!).contains a then
+            if evalClassExpr m u rhs == some true then
+              let mut nc1 := (nodeClasses[u]!).insert a
+              for s in supMap.getD a #[] do
+                if s != thing && s != nothing then nc1 := nc1.insert s
+              nodeClasses := nodeClasses.set! u nc1
+              if let some w := wmap[a]? then
+                for (p, ys) in (m0.outAdj[w]!).toList do
+                  for y in ys do
+                    (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                      addEdge p u y edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
+              eqChanged := true
+              anyChanged := true
+              edgesDirty := true
+      | none => pure ()
+
+    -- (D) Compatible-disjunct repair (preferring minimum out-degree compatible disjunct)
+    if !eqChanged then
+      for (a, names) in disjObls do
+        for u in [0:nodeClasses.size] do
+          let nc := nodeClasses[u]!
+          if nc.contains a && !(names.any fun d => nc.contains d) then
+            let isCompat (d : IRI) : Bool :=
+              let sups := (supMap.getD d #[]).push d
+              sups.all fun s =>
+                let ds := disjMap.getD s {}
+                !(ds.any fun x => nc.contains x)
+            let outDegOf (d : IRI) : Nat :=
+              match wmap[d]? with
+              | some w => (m0.outAdj[w]!).size
+              | none => 999999
+            let mut compatCands : Array (Nat × IRI) := #[]
+            for d in names do
+              if isCompat d then
+                compatCands := compatCands.push (outDegOf d, d)
+            let sortedCands := compatCands.qsort fun a b => a.1 < b.1
+            let bestD? : Option IRI :=
+              if preferAlt && sortedCands.size ≥ 2 then some sortedCands[1]!.2
+              else sortedCands[0]?.map Prod.snd
+            if let some d := bestD? then
+              let mut nc1 := nc.insert d
+              for s in supMap.getD d #[] do
+                if s != thing && s != nothing then nc1 := nc1.insert s
+              nodeClasses := nodeClasses.set! u nc1
+              if let some w := wmap[d]? then
+                for (p, ys) in (m0.outAdj[w]!).toList do
+                  for y in ys do
+                    (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+                      addEdge p u y edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
+              anyChanged := true
+              edgesDirty := true
+
+    if !anyChanged && outer > 0 then break
+
+  let beforeFinalSelf := edgeSet.size
+  for (c, p) in selfPairs do
+    for u in [0:nodeClasses.size] do
+      if (nodeClasses[u]!).contains c then
+        (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+          addEdge p u u edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
+  if edgesDirty || edgeSet.size != beforeFinalSelf then
+    (edgeSet, roleEdgeCnt, cappedRoles, outAdj, inAdj, activeOut, activeIn) :=
+      closeRBox edgeSet roleEdgeCnt cappedRoles outAdj inAdj activeOut activeIn
+  return (buildSortedModel nodeClasses outAdj inAdj, wmap)
+
 /-- Extract a kernel-verified countermodel summary from `m` against the ORIGINAL ontology `o`:
-    first attempts full-ontology verification (`checkCBCanonicalModel`), and if any axioms
-    fail, shrinks to the maximal ⊥-local clean sub-signature `fs` verified by
-    `checkCBPartialModel`. -/
+    1. When every axiom holds on `m`, verifies the full model via `checkCBCanonicalModel`.
+    2. Otherwise, when `o` avoids `owl:topObjectProperty`/`owl:topDataProperty`, shrinks to the
+       maximal clean sub-signature `fs` for the disjoint union `I_base ⊕ restrictToSig(m, fs)`
+       (verified by `checkCBDisjointPartialModel`, keeping ABox assertions, `ObjectOneOf`,
+       `ObjectHasValue`, `HasKey`, and datatype axioms intact at zero cost!).
+    3. Otherwise, falls back to standalone ⊥-locality `checkCBPartialModel`. -/
 private def harvestVerifiedCBModel (o : Ontology) (idx : FastLocality.LocalityIndex)
     (namedClasses : List IRI) (namedClassSet : Std.HashSet IRI)
     (m : CBCanonicalModel) (witnessNode : Std.HashMap IRI Nat) (numWorkers : Nat) :
@@ -2926,34 +5025,41 @@ private def harvestVerifiedCBModel (o : Ontology) (idx : FastLocality.LocalityIn
                 | none => (m.clsNodes.getD c #[])[0]?
               if let some x := x? then
                 if x < m.numNodes && m.hasCls c x then
+                  let witnesses := m.clsNodes.getD c #[]
                   let cand := (m.nodeClasses.getD x {}).toList.filter fun b =>
-                    b != thing && b != nothing && namedClassSet.contains b
+                    b != c && b != thing && b != nothing && namedClassSet.contains b &&
+                      witnesses.all (m.hasCls b)
                   out := out.push (c, cand)
           return out.toList
       else []
     else
-      match buildCBPartialSig idx axOk with
-      | none => []
-      | some fs =>
-        if checkCBPartialModel o m fs numWorkers then
-          Id.run do
-            let mut out : Array (IRI × List IRI) := #[]
-            for c in namedClasses do
-              if c == thing then
-                let cand := (m.nodeClasses.getD 0 {}).toList.filter fun b =>
+      let extractForSig (fs : FastLocality.FastSig) : List (IRI × List IRI) := Id.run do
+        let mut out : Array (IRI × List IRI) := #[]
+        for c in namedClasses do
+          if c == thing then
+            let cand := (m.nodeClasses.getD 0 {}).toList.filter fun b =>
+              b != thing && b != nothing && namedClassSet.contains b && fs.hasCls b
+            out := out.push (thing, cand)
+          else if c != nothing && fs.hasCls c then
+            let x? := match witnessNode[c]? with
+              | some x => some x
+              | none => (m.clsNodes.getD c #[])[0]?
+            if let some x := x? then
+              if x < m.numNodes && m.hasCls c x then
+                let cand := (m.nodeClasses.getD x {}).toList.filter fun b =>
                   b != thing && b != nothing && namedClassSet.contains b && fs.hasCls b
-                out := out.push (thing, cand)
-              else if c != nothing && fs.hasCls c then
-                let x? := match witnessNode[c]? with
-                  | some x => some x
-                  | none => (m.clsNodes.getD c #[])[0]?
-                if let some x := x? then
-                  if x < m.numNodes && m.hasCls c x then
-                    let cand := (m.nodeClasses.getD x {}).toList.filter fun b =>
-                      b != thing && b != nothing && namedClassSet.contains b && fs.hasCls b
-                    out := out.push (c, cand)
-            return out.toList
-        else []
+                out := out.push (c, cand)
+        return out.toList
+      if o.all axiomNoTopProp then
+        match buildCBDisjointPartialSig idx axOk with
+        | some fs =>
+          if checkCBDisjointPartialModel o m fs numWorkers then extractForSig fs else []
+        | none => []
+      else
+        match buildCBPartialSig idx axOk with
+        | some fs =>
+          if checkCBPartialModel o m fs numWorkers then extractForSig fs else []
+        | none => []
 
 private theorem harvestVerifiedCBModel_workers_eq (o : Ontology) (idx : FastLocality.LocalityIndex)
     (namedClasses : List IRI) (namedClassSet : Std.HashSet IRI)
@@ -2961,12 +5067,14 @@ private theorem harvestVerifiedCBModel_workers_eq (o : Ontology) (idx : FastLoca
     harvestVerifiedCBModel o idx namedClasses namedClassSet m witnessNode w =
       harvestVerifiedCBModel o idx namedClasses namedClassSet m witnessNode 1 := by
   simp only [harvestVerifiedCBModel, checkAdjConsistent_workers_eq, mapListPar_eq,
-    checkCBCanonicalModel_workers_eq, checkCBPartialModel_workers_eq]
+    checkCBCanonicalModel_workers_eq, checkCBDisjointPartialModel_workers_eq,
+    checkCBPartialModel_workers_eq]
 
 /-- Run Horn-$\mathcal{SHIQ}$ saturation, returning both:
     1. the kernel-verified positive subsumptions & unsatisfiable classes (`FastCBResult`), and
     2. kernel-verified countermodel summaries `List (IRI × List IRI)` verified against the
-       ORIGINAL ontology `o` via `checkCBCanonicalModel` / `checkCBPartialModel`.
+       ORIGINAL ontology `o` via `checkCBCanonicalModel` / `checkCBDisjointPartialModel` /
+       `checkCBPartialModel`.
     On nearly-Horn ontologies with positive disjunctions (`owl:unionOf`), also builds two
     Horn-strengthened countermodels (picking left vs. right disjuncts) in parallel and
     verifies them directly against the original unmodified ontology `o`. -/
@@ -2975,24 +5083,10 @@ def runFastCBWithPartialModel (o : Ontology) (idx : FastLocality.LocalityIndex)
     (maxContexts : Nat := 4096) (maxCtxSize : Nat := 10) (maxLinks : Nat := 32768) :
     FastCBResult × List (IRI × List IRI) :=
   let norm := extractHornSHIQ o
-  let canPartial := !hasUnsupportedAlwaysNonLocal idx
-  let useStrengthen := !norm.isPureHornSHIQ && canPartial && o.any axiomHasPosUnion
-  let runMain := fun () =>
-    let effMaxContexts := max maxContexts (norm.table.classes.size * 2)
-    let effMaxLinks := max maxLinks (norm.table.classes.size * 16)
-    saturateHornSHI norm effMaxContexts maxCtxSize effMaxLinks
-  let runStr := fun (pickFirst : Bool) () =>
-    let normS := extractHornSHIQ (strengthenOnt pickFirst o)
-    let effC := max maxContexts (normS.table.classes.size * 2)
-    let effL := max maxLinks (normS.table.classes.size * 16)
-    let certS := saturateHornSHI normS effC maxCtxSize effL
-    buildCBCanonicalModel o normS certS
-  let (cert, strModels?) :=
-    if useStrengthen then
-      let (c, (ms1, ms2)) := runPar2 numWorkers runMain (fun () =>
-        runPar2 (if numWorkers ≥ 3 then 2 else 1) (runStr true) (runStr false))
-      (c, some (ms1, ms2))
-    else (runMain (), none)
+  let canPartial := o.all axiomNoTopProp || !hasUnsupportedAlwaysNonLocal idx
+  let effMaxContexts := max maxContexts (norm.table.classes.size * 2)
+  let effMaxLinks := max maxLinks (norm.table.classes.size * 16)
+  let cert := saturateHornSHI norm effMaxContexts maxCtxSize effMaxLinks
   if checkCBSound norm cert numWorkers then
     let res : FastCBResult := {
       subs := extractNamedSubs norm cert
@@ -3003,18 +5097,51 @@ def runFastCBWithPartialModel (o : Ontology) (idx : FastLocality.LocalityIndex)
     if res.unsats.contains thing || !canPartial then
       (res, [])
     else
-      match strModels? with
-      | some ((m1, w1), (m2, w2)) =>
-        let s1 := harvestVerifiedCBModel o idx namedClasses namedClassSet m1 w1 numWorkers
-        let s2 := harvestVerifiedCBModel o idx namedClasses namedClassSet m2 w2 numWorkers
-        if !s1.isEmpty || !s2.isEmpty then
-          (res, s1 ++ s2)
+      let (mBase, wBase) := buildCBCanonicalModel o norm cert
+      let sBase := harvestVerifiedCBModel o idx namedClasses namedClassSet mBase wBase numWorkers
+      let hasPosUnion := !norm.isPureHornSHIQ && o.any axiomHasPosUnion
+      let baseCov := (sBase.foldl (fun s (c, _) => s.insert c) ({} : Std.HashSet IRI)).size
+      if baseCov * 2 ≥ namedClasses.length then
+        if !hasPosUnion then
+          (res, sBase)
         else
-          let (m, wmap) := buildCBCanonicalModel o norm cert
-          (res, harvestVerifiedCBModel o idx namedClasses namedClassSet m wmap numWorkers)
-      | none =>
-        let (m, wmap) := buildCBCanonicalModel o norm cert
-        (res, harvestVerifiedCBModel o idx namedClasses namedClassSet m wmap numWorkers)
+          -- Raw model already covers most classes: use fast dual Horn-strengthening for unions
+          let runStr := fun (pickFirst : Bool) () =>
+            let normS := extractHornSHIQ (strengthenOnt pickFirst o)
+            let effC := max maxContexts (normS.table.classes.size * 2)
+            let effL := max maxLinks (normS.table.classes.size * 16)
+            let certS := saturateHornSHI normS effC maxCtxSize effL
+            let (mS, wS) := buildCBCanonicalModel o normS certS
+            harvestVerifiedCBModel o idx namedClasses namedClassSet mS wS (max 1 (numWorkers / 2))
+          let (s1, s2) := runPar2 numWorkers (runStr true) (runStr false)
+          (res, sBase ++ s1 ++ s2)
+      else
+        -- Raw model had low coverage (e.g. multi-way unions or qualified `min`/`exact` ≥ 2):
+        -- run dual parallel post-pass repair.
+        let (sRep1, sRep2) :=
+          if o.length ≤ 80000 then
+            runPar2 numWorkers
+              (fun () =>
+                let (m1, w1) := repairCBCanonicalModel o res.subs mBase wBase false
+                harvestVerifiedCBModel o idx namedClasses namedClassSet m1 w1 (max 1 (numWorkers / 2)))
+              (fun () =>
+                let (m2, w2) := repairCBCanonicalModel o res.subs mBase wBase true
+                harvestVerifiedCBModel o idx namedClasses namedClassSet m2 w2 (max 1 (numWorkers / 2)))
+          else ([], [])
+        let combined := sBase ++ sRep1 ++ sRep2
+        let repCov := (combined.foldl (fun s (c, _) => s.insert c) ({} : Std.HashSet IRI)).size
+        if repCov * 2 ≥ namedClasses.length || !hasPosUnion then
+          (res, combined)
+        else
+          let runStr := fun (pickFirst : Bool) () =>
+            let normS := extractHornSHIQ (strengthenOnt pickFirst o)
+            let effC := max maxContexts (normS.table.classes.size * 2)
+            let effL := max maxLinks (normS.table.classes.size * 16)
+            let certS := saturateHornSHI normS effC maxCtxSize effL
+            let (mS, wS) := buildCBCanonicalModel o normS certS
+            harvestVerifiedCBModel o idx namedClasses namedClassSet mS wS (max 1 (numWorkers / 2))
+          let (s1, s2) := runPar2 numWorkers (runStr true) (runStr false)
+          (res, combined ++ s1 ++ s2)
   else
     ({ subs := [], unsats := [], isPureHornSHIQ := false, verified := false }, [])
 

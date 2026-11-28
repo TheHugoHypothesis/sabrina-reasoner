@@ -21,8 +21,8 @@ example : checkRegular (inferRank [] regular) [] regular = true := by decide
 private def cyclic : List Chain := [Sabrina.RoleChains.Chain.named ["r","s"] "t", Sabrina.RoleChains.Chain.named ["t","s"] "r"]
 
 example : checkRegular (inferRank [] cyclic) [] cyclic = false := by decide
-example : (findRank [] regular).isSome = true := by decide
-example : (findRank [] cyclic).isSome = false := by decide
+#guard (findRank [] regular).isSome == true
+#guard (findRank [] cyclic).isSome == false
 
 private def inverseBody : List Chain := [⟨[("r", true), ("s", false)], "t"⟩]
 
@@ -34,8 +34,8 @@ private def inverseBody : List Chain := [⟨[("r", true), ("s", false)], "t"⟩]
   (RankedPaths.normalize inverseBody) ("t", false)).accepts [("r", false), ("s", false)]
 
 -- An inverse occurrence of the head does not qualify as the recursive head.
-example : (findRank [] [⟨[("r", true), ("s", false)], "r"⟩]).isSome = false := by decide
-example : (findRank [] [⟨[("r", false), ("s", true)], "r"⟩]).isSome = true := by decide
+#guard (findRank [] [⟨[("r", true), ("s", false)], "r"⟩]).isSome == false
+#guard (findRank [] [⟨[("r", false), ("s", true)], "r"⟩]).isSome == true
 
 open Sabrina.RoleChains.TransitivePaths
 
@@ -96,7 +96,7 @@ private def mixedRules : RoleTheory :=
 private def mixedChains : List Chain :=
   [Sabrina.RoleChains.Chain.named ["l","t"] "t", Sabrina.RoleChains.Chain.named ["r","s"] "r", Sabrina.RoleChains.Chain.named ["r","r"] "r", Sabrina.RoleChains.Chain.named ["a","b","c"] "t"]
 
-example : checkRegular (inferRank mixedRules mixedChains) mixedRules mixedChains = true := by decide
+#guard checkRegular (inferRank mixedRules mixedChains) mixedRules mixedChains == true
 #guard ((RankedPaths.compile (inferRank mixedRules mixedChains) mixedRules
     (RankedPaths.normalize mixedChains) ("t",false)).simplify).accepts
       [("l",false),("a",false),("b",false),("c",false),("s",false),

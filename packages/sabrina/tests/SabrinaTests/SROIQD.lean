@@ -147,7 +147,7 @@ private def manyInputWorlds : Problem := {
     [(.anonymous "urn:ex:doc" "a", .some ("urn:ex:r", false) .top)]
 }
 
-#guard (Limits.forProblem manyInputWorlds).worlds == 50
+#guard (Limits.forProblem manyInputWorlds).worlds == 166
 #guard (propose manyInputWorlds { worlds := 16 }).isNone
 #guard
   let limits := Limits.forProblem manyInputWorlds
