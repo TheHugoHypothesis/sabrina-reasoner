@@ -28,6 +28,9 @@ private structure MapIndex where
   annotProps : Std.HashSet IRI := {}
   namedInds : Std.HashSet IRI := {}
   declKeys : Std.HashSet (Nat × IRI) := {}
+  bnodeClassCache : Std.HashMap String ClassExpr := {}
+  bnodeDataRangeCache : Std.HashMap String DataRange := {}
+  bnodeObjPropCache : Std.HashMap String ObjectProperty := {}
 
 private structure MapState where
   docId : String
@@ -41,6 +44,9 @@ private structure MapState where
   dataProps : List IRI := []
   annotProps : List IRI := []
   namedInds : List IRI := []
+  bnodeClassList : List (String × ClassExpr) := []
+  bnodeDataRangeList : List (String × DataRange) := []
+  bnodeObjPropList : List (String × ObjectProperty) := []
   -- Output structural items
   ontologyHeaderTerm : Option RDFTerm := none
   ontologyIRI : Option IRI := none
@@ -212,13 +218,25 @@ private def consumeRDFList (head : RDFTerm) : MapM (List RDFTerm) := do
 private def consumeObjPropExpr (term : RDFTerm) : MapM ObjectProperty := do
   match term with
   | .iri iri => return .named iri
-  | .bnode _ =>
+  | .bnode bid =>
+    let st0 ← get
+    match st0.index with
+    | some ix =>
+      if let some cached := ix.bnodeObjPropCache[bid]? then
+        return cached
+    | none =>
+      if let some cached := st0.bnodeObjPropList.lookup bid then
+        return cached
     let invs ← findActiveBySP term owlInverseOf
     match invs with
     | [(i, .iri r)] =>
       markConsumed i
       if let some iTy ← hasType term owlObjectProperty then markConsumed iTy
-      return .inverse r
+      let res := ObjectProperty.inverse r
+      modify fun st => match st.index with
+        | some ix => { st with index := some { ix with bnodeObjPropCache := ix.bnodeObjPropCache.insert bid res } }
+        | none => { st with bnodeObjPropList := (bid, res) :: st.bnodeObjPropList }
+      return res
     | _ => throw s!"malformed anonymous object property expression {repr term}"
   | .literal _ _ _ => throw "expected object property expression, got literal"
 
@@ -240,24 +258,37 @@ private def consumeDataRange (fuel : Nat) (term : RDFTerm) : MapM DataRange := d
     match term with
     | .iri iri => return .datatype iri
     | .literal _ _ _ => throw "expected data range, got literal"
-    | .bnode _ =>
+    | .bnode bid =>
+      let st0 ← get
+      match st0.index with
+      | some ix =>
+        if let some cached := ix.bnodeDataRangeCache[bid]? then
+          return cached
+      | none =>
+        if let some cached := st0.bnodeDataRangeList.lookup bid then
+          return cached
+      let cacheAndReturn (dr : DataRange) : MapM DataRange := do
+        modify fun st => match st.index with
+          | some ix => { st with index := some { ix with bnodeDataRangeCache := ix.bnodeDataRangeCache.insert bid dr } }
+          | none => { st with bnodeDataRangeList := (bid, dr) :: st.bnodeDataRangeList }
+        return dr
       if let some iTy ← hasType term rdfsDatatype then markConsumed iTy
       let comp ← findActiveBySP term owlDatatypeComplementOf
       if let [(i, inner)] := comp then
         markConsumed i
-        return .complement (← consumeDataRange fuel inner)
+        return ← cacheAndReturn (.complement (← consumeDataRange fuel inner))
       let inters ← findActiveBySP term owlIntersectionOf
       if let [(i, listHead)] := inters then
         markConsumed i
         let items ← consumeRDFList listHead
         let drs ← items.mapM (consumeDataRange fuel)
-        return DataRange.intersect drs
+        return ← cacheAndReturn (DataRange.intersect drs)
       let unions ← findActiveBySP term owlUnionOf
       if let [(i, listHead)] := unions then
         markConsumed i
         let items ← consumeRDFList listHead
         let drs ← items.mapM (consumeDataRange fuel)
-        return DataRange.unite drs
+        return ← cacheAndReturn (DataRange.unite drs)
       let ones ← findActiveBySP term owlOneOf
       if let [(i, listHead)] := ones then
         markConsumed i
@@ -266,7 +297,7 @@ private def consumeDataRange (fuel : Nat) (term : RDFTerm) : MapM DataRange := d
           match x.toOwlLiteral with
           | some l => pure l
           | none => throw "expected literal in DataOneOf"
-        return .oneOf lits
+        return ← cacheAndReturn (.oneOf lits)
       let onDts ← findActiveBySP term owlOnDatatype
       let withRs ← findActiveBySP term owlWithRestrictions
       match onDts, withRs with
@@ -275,7 +306,7 @@ private def consumeDataRange (fuel : Nat) (term : RDFTerm) : MapM DataRange := d
         markConsumed i2
         let cells ← consumeRDFList listHead
         let facets ← cells.mapM parseFacetCell
-        return .restriction dtIRI facets
+        return ← cacheAndReturn (.restriction dtIRI facets)
       | _, _ => throw s!"unrecognized blank-node data range {repr term}"
 
 /-- Heuristic + declared check for whether an RDF term represents a DataRange rather than a ClassExpr. -/
@@ -284,7 +315,14 @@ private def looksLikeDataRange (term : RDFTerm) : MapM Bool := do
   match term with
   | .iri iri => return isDatatypeIRI st iri && !isClassIRI st iri
   | .literal _ _ _ => return false
-  | .bnode _ =>
+  | .bnode bid =>
+    match st.index with
+    | some ix =>
+      if ix.bnodeDataRangeCache.contains bid then return true
+      if ix.bnodeClassCache.contains bid then return false
+    | none =>
+      if (st.bnodeDataRangeList.lookup bid).isSome then return true
+      if (st.bnodeClassList.lookup bid).isSome then return false
     if (← hasType term rdfsDatatype).isSome then return true
     if !(← findActiveBySP term owlDatatypeComplementOf).isEmpty then return true
     if !(← findActiveBySP term owlOnDatatype).isEmpty then return true
@@ -301,7 +339,20 @@ private def consumeClassExpr (fuel : Nat) (term : RDFTerm) : MapM ClassExpr := d
     match term with
     | .iri iri => return .named iri
     | .literal _ _ _ => throw "expected class expression, got literal"
-    | .bnode _ =>
+    | .bnode bid =>
+      let st0 ← get
+      match st0.index with
+      | some ix =>
+        if let some cached := ix.bnodeClassCache[bid]? then
+          return cached
+      | none =>
+        if let some cached := st0.bnodeClassList.lookup bid then
+          return cached
+      let cacheAndReturn (ce : ClassExpr) : MapM ClassExpr := do
+        modify fun st => match st.index with
+          | some ix => { st with index := some { ix with bnodeClassCache := ix.bnodeClassCache.insert bid ce } }
+          | none => { st with bnodeClassList := (bid, ce) :: st.bnodeClassList }
+        return ce
       let docId := (← get).docId
       if let some iTy ← hasType term owlClass then markConsumed iTy
       -- Check owl:Restriction
@@ -323,18 +374,18 @@ private def consumeClassExpr (fuel : Nat) (term : RDFTerm) : MapM ClassExpr := d
           let fillerIsData ← looksLikeDataRange filler
           if isDataProp || (!isObjProp && fillerIsData) then
             let .iri dp := propTerm | throw "data restriction requires named data property"
-            return .dataSome dp (← consumeDataRange fuel filler)
+            return ← cacheAndReturn (.dataSome dp (← consumeDataRange fuel filler))
           else
-            return .objectSome (← consumeObjPropExpr propTerm) (← consumeClassExpr fuel filler)
+            return ← cacheAndReturn (.objectSome (← consumeObjPropExpr propTerm) (← consumeClassExpr fuel filler))
         -- 2. owl:allValuesFrom
         if let [(i, filler)] := ← findActiveBySP term owlAllValuesFrom then
           markConsumed i
           let fillerIsData ← looksLikeDataRange filler
           if isDataProp || (!isObjProp && fillerIsData) then
             let .iri dp := propTerm | throw "data restriction requires named data property"
-            return .dataAll dp (← consumeDataRange fuel filler)
+            return ← cacheAndReturn (.dataAll dp (← consumeDataRange fuel filler))
           else
-            return .objectAll (← consumeObjPropExpr propTerm) (← consumeClassExpr fuel filler)
+            return ← cacheAndReturn (.objectAll (← consumeObjPropExpr propTerm) (← consumeClassExpr fuel filler))
         -- 3. owl:hasValue
         if let [(i, val)] := ← findActiveBySP term owlHasValue then
           markConsumed i
@@ -342,15 +393,15 @@ private def consumeClassExpr (fuel : Nat) (term : RDFTerm) : MapM ClassExpr := d
           | .literal _ _ _ =>
             let .iri dp := propTerm | throw "DataHasValue requires named data property"
             match val.toOwlLiteral with
-            | some lit => return .dataValue dp lit
+            | some lit => return ← cacheAndReturn (.dataValue dp lit)
             | none => throw "invalid literal in DataHasValue"
           | _ =>
-            return .objectValue (← consumeObjPropExpr propTerm) (← match termToIndividual docId val with | .ok x => pure x | .error e => throw e)
+            return ← cacheAndReturn (.objectValue (← consumeObjPropExpr propTerm) (← match termToIndividual docId val with | .ok x => pure x | .error e => throw e))
         -- 4. owl:hasSelf
         if let [(i, val)] := ← findActiveBySP term owlHasSelf then
           markConsumed i
           match val with
-          | .literal "true" _ _ => return .objectSelf (← consumeObjPropExpr propTerm)
+          | .literal "true" _ _ => return ← cacheAndReturn (.objectSelf (← consumeObjPropExpr propTerm))
           | _ => throw "owl:hasSelf requires literal \"true\"^^xsd:boolean"
         -- 5. Qualified cardinalities (with owl:onClass or owl:onDataRange)
         for (cardPred, mkObj, mkData) in [
@@ -363,11 +414,11 @@ private def consumeClassExpr (fuel : Nat) (term : RDFTerm) : MapM ClassExpr := d
             let n ← match parseNonNegInt numTerm with | .ok k => pure k | .error e => throw e
             if let [(iOnC, cTerm)] := ← findActiveBySP term owlOnClass then
               markConsumed iOnC
-              return mkObj n (← consumeObjPropExpr propTerm) (← consumeClassExpr fuel cTerm)
+              return ← cacheAndReturn (mkObj n (← consumeObjPropExpr propTerm) (← consumeClassExpr fuel cTerm))
             else if let [(iOnD, dTerm)] := ← findActiveBySP term owlOnDataRange then
               markConsumed iOnD
               let .iri dp := propTerm | throw "qualified data cardinality requires named data property"
-              return mkData n dp (← consumeDataRange fuel dTerm)
+              return ← cacheAndReturn (mkData n dp (← consumeDataRange fuel dTerm))
             else
               throw s!"qualified cardinality {cardPred} missing owl:onClass or owl:onDataRange"
         -- 6. Unqualified cardinalities
@@ -381,30 +432,30 @@ private def consumeClassExpr (fuel : Nat) (term : RDFTerm) : MapM ClassExpr := d
             let n ← match parseNonNegInt numTerm with | .ok k => pure k | .error e => throw e
             if isDataProp then
               let .iri dp := propTerm | throw "data cardinality requires named data property"
-              return mkData n dp (.datatype literalDatatype)
+              return ← cacheAndReturn (mkData n dp (.datatype literalDatatype))
             else
-              return mkObj n (← consumeObjPropExpr propTerm) (.named thing)
+              return ← cacheAndReturn (mkObj n (← consumeObjPropExpr propTerm) (.named thing))
         throw s!"unrecognized owl:Restriction on {repr propTerm}"
       -- Boolean / enumeration class expressions
       if let [(i, inner)] := ← findActiveBySP term owlComplementOf then
         markConsumed i
-        return .complement (← consumeClassExpr fuel inner)
+        return ← cacheAndReturn (.complement (← consumeClassExpr fuel inner))
       if let [(i, listHead)] := ← findActiveBySP term owlIntersectionOf then
         markConsumed i
         let items ← consumeRDFList listHead
         let cs ← items.mapM (consumeClassExpr fuel)
-        return ClassExpr.intersect cs
+        return ← cacheAndReturn (ClassExpr.intersect cs)
       if let [(i, listHead)] := ← findActiveBySP term owlUnionOf then
         markConsumed i
         let items ← consumeRDFList listHead
         let cs ← items.mapM (consumeClassExpr fuel)
-        return ClassExpr.unite cs
+        return ← cacheAndReturn (ClassExpr.unite cs)
       if let [(i, listHead)] := ← findActiveBySP term owlOneOf then
         markConsumed i
         let items ← consumeRDFList listHead
         let inds ← items.mapM fun x =>
           match termToIndividual docId x with | .ok a => pure a | .error e => throw e
-        return .oneOf inds
+        return ← cacheAndReturn (.oneOf inds)
       throw s!"unrecognized blank-node class expression {repr term}"
 
 /-! ### 3. Multi-Pass W3C OWL 2 RDF-to-Structural Mapper (Tables 3–18) -/

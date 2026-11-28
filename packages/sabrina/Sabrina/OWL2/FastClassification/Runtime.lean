@@ -786,6 +786,8 @@ private def orderLeavesFirst (namedClasses : List IRI) (st : KPState) : List IRI
 private def seedKPFromBatchModels (o : Ontology) (namedClasses : List IRI)
     (namedClassSet : Std.HashSet IRI) (numWorkers : Nat) (order : List IRI)
     (baseModel? : Option SROIQDModel) (st : KPState) : KPState :=
+  if o.length > 10000 && baseModel?.isNone then st
+  else
   let gaps := (order.filter fun c => !st.satSet.contains c && !st.unsatSet.contains c).toArray
   let batchSize := 64
   if gaps.size < batchSize then st
@@ -854,8 +856,9 @@ private def classifyEnhancedRuntimeCore (o : Ontology) (namedClasses : List IRI)
       }
     else
       let namedClassSet : Std.HashSet IRI := namedClasses.foldl (fun s c => s.insert c) {}
-      let cb := FastCB.runFastCB o numWorkers
-      let st0 := KPState.init o namedClasses namedClassSet cb.subs cb.unsats
+      let (cb, cbPartialSummary) :=
+        FastCB.runFastCBWithPartialModel o idx namedClasses namedClassSet numWorkers
+      let st0 := (KPState.init o namedClasses namedClassSet cb.subs cb.unsats).mergeSummary cbPartialSummary
       let stInit := match initModel? with
         | some m0 => st0.mergeSummary (summarizeModel m0 namedClasses namedClassSet)
         | none => st0
@@ -897,7 +900,9 @@ def classifyOntologyFastWithModelRuntime (o : Ontology)
   let enhanced := fun () =>
     let m0? := match initModel? with
       | some m => some m
-      | none => (proposeVerifiedModel o).map Prod.fst
+      | none =>
+        if o.length > 10000 && !o.any isABoxAxiomFast then none
+        else (proposeVerifiedModel o).map Prod.fst
     classifyEnhancedRuntimeCore o namedClasses numWorkers m0?
   if fp.leastFragment == .el then
     match normalizeEL o with
@@ -932,7 +937,7 @@ theorem classifyOntologyFastRuntime_nonEL_workers_eq (o : Ontology)
   simp only [classifyOntologyFastRuntime, classifyOntologyFastWithModelRuntime,
     classifyEnhancedRuntimeCore, beq_iff_eq, h, ↓reduceIte,
     FastCB.classifyFastCB_workers_eq,
-    FastCB.runFastCB_workers_eq,
+    FastCB.runFastCBWithPartialModel_workers_eq,
     seedKPFromBatchModels, checkComponentBatches, mapIndependent_eq,
     sweepKPSatParallel_eq, verifyKPPairsParallel_eq]
 

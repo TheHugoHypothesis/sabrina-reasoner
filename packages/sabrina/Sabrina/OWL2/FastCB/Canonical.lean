@@ -2,6 +2,7 @@ import Std.Data.HashMap
 import Std.Data.HashSet
 import Sabrina.OWL2.Classification
 import Sabrina.OWL2.FastEL
+import Sabrina.OWL2.FastLocality
 import Sabrina.OWL2.FastCB.Saturate
 
 /-! # H.4: Verified Horn-$\mathcal{SHIQ}$ Canonical Model & Zero-Tableau Classification
@@ -1287,7 +1288,111 @@ private theorem roleSourceNodes?_complete {dm : DatatypeMap} {m : CBCanonicalMod
           (adjConsistent_in_iff hadj p x.isLt y.isLt).mpr hout
         exact adjConsistent_roleIn_mem hadj x.isLt hin
 
-/-- Candidate nodes where `ClassExpr` can hold in `m` (`none` = all nodes). -/
+/-- Predecessor nodes of `ys` along `r` (nodes `x` with `r(x, y)` for some `y ∈ ys`),
+    aborting and returning `none` if the total size would exceed `limit`. -/
+def rolePredecessors? (m : CBCanonicalModel) (r : ObjectProperty) (ys : Array Nat) (limit : Nat) :
+    Option (Array Nat) :=
+  match r with
+  | .named p =>
+    if p == topObjectProperty then none
+    else if p == bottomObjectProperty then some #[]
+    else
+      ys.foldl (fun acc? y =>
+        match acc? with
+        | none => none
+        | some acc =>
+          let xs := m.inNeighbors p y
+          if acc.size + xs.size > limit then none
+          else some (acc ++ xs)) (some #[])
+  | .inverse p =>
+    if p == topObjectProperty then none
+    else if p == bottomObjectProperty then some #[]
+    else
+      ys.foldl (fun acc? y =>
+        match acc? with
+        | none => none
+        | some acc =>
+          let xs := m.outNeighbors p y
+          if acc.size + xs.size > limit then none
+          else some (acc ++ xs)) (some #[])
+
+private theorem foldl_append_limit_mem {ys : List Nat} {f : Nat → Array Nat} {limit : Nat}
+    {acc0 res : Array Nat}
+    (h : ys.foldl (fun acc? y =>
+      match acc? with
+      | none => none
+      | some acc =>
+        let xs := f y
+        if acc.size + xs.size > limit then none
+        else some (acc ++ xs)) (some acc0) = some res) :
+    (∀ z ∈ acc0.toList, z ∈ res.toList) ∧
+    (∀ y ∈ ys, ∀ z ∈ (f y).toList, z ∈ res.toList) := by
+  induction ys generalizing acc0 with
+  | nil =>
+    simp only [List.foldl_nil, Option.some.injEq] at h
+    subst h
+    exact ⟨fun _ hz => hz, fun _ hy => nomatch hy⟩
+  | cons y tl ih =>
+    simp only [List.foldl_cons] at h
+    split at h
+    · have hnone : tl.foldl (fun acc? y =>
+        match acc? with
+        | none => none
+        | some acc =>
+          let xs := f y
+          if acc.size + xs.size > limit then none
+          else some (acc ++ xs)) none = none := by
+        clear h ih
+        induction tl with
+        | nil => rfl
+        | cons _ _ ih' => exact ih'
+      rw [hnone] at h; cases h
+    · obtain ⟨hacc, htl⟩ := ih h
+      refine ⟨fun z hz => hacc z (by simpa using Or.inl hz), fun y' hy' z hz => ?_⟩
+      rcases List.mem_cons.mp hy' with rfl | hmem
+      · exact hacc z (by simpa using Or.inr hz)
+      · exact htl y' hmem z hz
+
+private theorem rolePredecessors?_complete {dm : DatatypeMap} {m : CBCanonicalModel} {w : Nat}
+    (hadj : checkAdjConsistent m w = true) (hne : 0 < m.numNodes)
+    (r : ObjectProperty) {ys res : Array Nat} {limit : Nat}
+    (h : rolePredecessors? m r ys limit = some res)
+    (x y : Fin m.numNodes) (hxy : objectHolds (m.toInterpretation dm hne) r x y)
+    (hy : y.val ∈ ys.toList) :
+    x.val ∈ res.toList := by
+  cases r with
+  | named p =>
+    unfold rolePredecessors? at h
+    by_cases ht : p = topObjectProperty
+    · subst ht; simp at h
+    · by_cases hb : p = bottomObjectProperty
+      · subst hb; exact ((m.toInterpretation dm hne).bottomObjectExt x y hxy).elim
+      · have hnt : (p == topObjectProperty) = false := beq_false_of_ne ht
+        have hnb : (p == bottomObjectProperty) = false := beq_false_of_ne hb
+        simp only [hnt, hnb, Bool.false_eq_true, ↓reduceIte, ← Array.foldl_toList] at h
+        have ⟨_, hmem⟩ := foldl_append_limit_mem h
+        have hout : (m.outNeighbors p x.val).contains y.val = true := by
+          simpa [objectHolds, CBCanonicalModel.toInterpretation, CBCanonicalModel.hasNamedEdge, hnt, hnb] using hxy
+        have hin := (adjConsistent_in_iff hadj p y.isLt x.isLt).mpr hout
+        exact hmem y.val hy x.val (by simpa [Array.contains_iff_mem] using hin)
+  | inverse p =>
+    unfold rolePredecessors? at h
+    by_cases ht : p = topObjectProperty
+    · subst ht; simp at h
+    · by_cases hb : p = bottomObjectProperty
+      · subst hb; exact ((m.toInterpretation dm hne).bottomObjectExt y x hxy).elim
+      · have hnt : (p == topObjectProperty) = false := beq_false_of_ne ht
+        have hnb : (p == bottomObjectProperty) = false := beq_false_of_ne hb
+        simp only [hnt, hnb, Bool.false_eq_true, ↓reduceIte, ← Array.foldl_toList] at h
+        have ⟨_, hmem⟩ := foldl_append_limit_mem h
+        have hout : (m.outNeighbors p y.val).contains x.val = true := by
+          simpa [objectHolds, CBCanonicalModel.toInterpretation, CBCanonicalModel.hasNamedEdge, hnt, hnb] using hxy
+        exact hmem y.val hy x.val (by simpa [Array.contains_iff_mem] using hout)
+
+/-- Candidate nodes where `ClassExpr` can hold in `m` (`none` = all nodes).
+    Intersects/unions support sets and projects existential fillers backward along
+    `inAdj`/`outAdj` so nested expressions like `∃has_part.(PATO_1 ⊓ ∃inheres_in.UBERON_2)`
+    evaluate in $O(\text{filler-support})$ instead of scanning every `has_part` source. -/
 def candidateNodes? (m : CBCanonicalModel) : ClassExpr → Option (Array Nat)
   | .named c =>
     if c == thing then none
@@ -1299,11 +1404,68 @@ def candidateNodes? (m : CBCanonicalModel) : ClassExpr → Option (Array Nat)
     | some xa, none => some xa
     | none, some xb => some xb
     | none, none => none
-  | .objectSome r _ => roleSourceNodes? m r
+  | .union a b =>
+    match candidateNodes? m a, candidateNodes? m b with
+    | some xa, some xb => some (xa ++ xb)
+    | _, _ => none
+  | .objectSome r f | .objectMin (_ + 1) r f | .objectExact (_ + 1) r f =>
+    match roleSourceNodes? m r with
+    | none => none
+    | some srcs =>
+      match candidateNodes? m f with
+      | some ys =>
+        if ys.size ≤ srcs.size then
+          match rolePredecessors? m r ys srcs.size with
+          | some preds => some preds
+          | none => some srcs
+        else some srcs
+      | none => some srcs
   | .objectSelf r => roleSourceNodes? m r
-  | .objectMin (_ + 1) r _ => roleSourceNodes? m r
-  | .objectExact (_ + 1) r _ => roleSourceNodes? m r
   | _ => none
+
+private theorem candidateNodes?_exist_complete {dm : DatatypeMap} {m : CBCanonicalModel} {w : Nat}
+    (hadj : checkAdjConsistent m w = true) (hne : 0 < m.numNodes)
+    (r : ObjectProperty) (f : ClassExpr) {xs : Array Nat}
+    (ihf : ∀ {ys : Array Nat}, candidateNodes? m f = some ys →
+      ∀ (y : Fin m.numNodes), classHolds (m.toInterpretation dm hne) y f → y.val ∈ ys.toList)
+    (h : (match roleSourceNodes? m r with
+      | none => none
+      | some srcs =>
+        match candidateNodes? m f with
+        | some ys =>
+          if ys.size ≤ srcs.size then
+            match rolePredecessors? m r ys srcs.size with
+            | some preds => some preds
+            | none => some srcs
+          else some srcs
+        | none => some srcs) = some xs)
+    (x y : Fin m.numNodes) (hxy : objectHolds (m.toInterpretation dm hne) r x y)
+    (hyf : classHolds (m.toInterpretation dm hne) y f) :
+    x.val ∈ xs.toList := by
+  cases hsrc : roleSourceNodes? m r with
+  | none => simp [hsrc] at h
+  | some srcs =>
+    simp only [hsrc] at h
+    cases hf : candidateNodes? m f with
+    | none =>
+      simp only [hf, Option.some.injEq] at h
+      subst h
+      exact roleSourceNodes?_complete hadj hne r hsrc x y hxy
+    | some ys =>
+      simp only [hf] at h
+      split at h
+      · cases hpred : rolePredecessors? m r ys srcs.size with
+        | none =>
+          simp only [hpred, Option.some.injEq] at h
+          subst h
+          exact roleSourceNodes?_complete hadj hne r hsrc x y hxy
+        | some preds =>
+          simp only [hpred, Option.some.injEq] at h
+          subst h
+          exact rolePredecessors?_complete hadj hne r hpred x y hxy (ihf hf y hyf)
+      · simp only [Option.some.injEq] at h
+        subst h
+        exact roleSourceNodes?_complete hadj hne r hsrc x y hxy
 
 private theorem candidateNodes?_complete {dm : DatatypeMap} {m : CBCanonicalModel} {w : Nat}
     (hadj : checkAdjConsistent m w = true) (hne : 0 < m.numNodes) :
@@ -1335,24 +1497,36 @@ private theorem candidateNodes?_complete {dm : DatatypeMap} {m : CBCanonicalMode
     · split at h <;> cases h
       · exact candidateNodes?_complete hadj hne a ha x hxa
       · exact candidateNodes?_complete hadj hne b hb x hxb
-  | .objectSome r _, xs, h, x, ⟨y, hxy, _⟩ =>
-    roleSourceNodes?_complete hadj hne r h x y hxy
+  | .union a b, xs, h, x, hx => by
+    unfold candidateNodes? at h
+    cases ha : candidateNodes? m a <;> cases hb : candidateNodes? m b <;>
+      simp only [ha, hb] at h
+    · cases h
+    · cases h
+    · cases h
+    · cases h
+      rcases hx with hxa | hxb
+      · exact by simpa using Or.inl (candidateNodes?_complete hadj hne a ha x hxa)
+      · exact by simpa using Or.inr (candidateNodes?_complete hadj hne b hb x hxb)
+  | .objectSome r f, xs, h, x, ⟨y, hxy, hyf⟩ =>
+    candidateNodes?_exist_complete hadj hne r f (candidateNodes?_complete hadj hne f) h x y hxy hyf
   | .objectSelf r, xs, h, x, hxx =>
     roleSourceNodes?_complete hadj hne r h x x hxx
-  | .objectMin (_ + 1) r _, xs, h, x, ⟨ys, hlen, _, hpy⟩ => by
+  | .objectMin (_ + 1) r f, xs, h, x, ⟨ys, hlen, _, hpy⟩ => by
     cases ys with
     | nil => simp at hlen
     | cons y _ =>
-      exact roleSourceNodes?_complete hadj hne r h x y (hpy y (List.mem_cons_self ..)).1
-  | .objectExact (_ + 1) r _, xs, h, x, ⟨⟨ys, hlen, _, hpy⟩, _⟩ => by
+      have ⟨hxy, hyf⟩ := hpy y (List.mem_cons_self ..)
+      exact candidateNodes?_exist_complete hadj hne r f (candidateNodes?_complete hadj hne f) h x y hxy hyf
+  | .objectExact (_ + 1) r f, xs, h, x, ⟨⟨ys, hlen, _, hpy⟩, _⟩ => by
     cases ys with
     | nil => simp at hlen
     | cons y _ =>
-      exact roleSourceNodes?_complete hadj hne r h x y (hpy y (List.mem_cons_self ..)).1
+      have ⟨hxy, hyf⟩ := hpy y (List.mem_cons_self ..)
+      exact candidateNodes?_exist_complete hadj hne r f (candidateNodes?_complete hadj hne f) h x y hxy hyf
   | .objectMin 0 _ _, _, h, _, _ => by cases h
   | .objectExact 0 _ _, _, h, _, _ => by cases h
   | .complement _, _, h, _, _ => by cases h
-  | .union _ _, _, h, _, _ => by cases h
   | .oneOf _, _, h, _, _ => by cases h
   | .objectAll _ _, _, h, _, _ => by cases h
   | .objectValue _ _, _, h, _, _ => by cases h
@@ -2314,5 +2488,542 @@ theorem classifyFastCB_workers_eq (o : Ontology) (namedClasses : List IRI)
     apply Bool.eq_iff_iff.mpr
     simp only [allRangePar_iff]
   simp only [hall]
+
+/-! ### 7. Nearly-Horn Partial-Model ⊥-Locality Refutation (`checkCBPartialModel`) -/
+
+/-- Parallel kernel-verified partial-model checker for `o` on `CBCanonicalModel`
+    restricted to signature `fs`:
+    every axiom of `o` must either be syntactically ⊥-local w.r.t. `fs` (hence holds
+    vacuously on `restrictToSig m fs.toSig`) or have its entire signature inside `fs`
+    and hold on `m` (`checkCBAxiom m ax = true`). -/
+def checkCBPartialModel (o : Ontology) (m : CBCanonicalModel) (fs : FastLocality.FastSig)
+    (numWorkers : Nat := 8) : Bool :=
+  let axArr := o.toArray
+  checkAdjConsistent m numWorkers &&
+  allRangePar axArr.size (fun idx =>
+    match axArr[idx]? with
+    | some ax =>
+      FastLocality.isBotLocalAxiomFast fs ax ||
+      (fs.coversSig (Profile.axiomSig ax) && checkCBAxiom m ax)
+    | none => false) numWorkers
+
+/-- Headline soundness theorem for `checkCBPartialModel`:
+    if `checkCBPartialModel o m fs w = true`, then restricting `m` to `fs.toSig`
+    defines a valid OWL 2 Direct Semantics model of the ENTIRE ontology `o`
+    for arbitrary `DatatypeMap`. -/
+theorem checkCBPartialModel_sound {dm : DatatypeMap} {o : Ontology} {m : CBCanonicalModel}
+    {fs : FastLocality.FastSig} {numWorkers : Nat}
+    (hcheck : checkCBPartialModel o m fs numWorkers = true) :
+    ∃ hne : 0 < m.numNodes,
+      satisfies (Profile.restrictToSig (m.toInterpretation dm hne) fs.toSig) o := by
+  unfold checkCBPartialModel at hcheck
+  simp only [Bool.and_eq_true, allRangePar_iff] at hcheck
+  obtain ⟨hadj, haxs⟩ := hcheck
+  have hne : 0 < m.numNodes := by
+    unfold checkAdjConsistent at hadj
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hadj
+    exact hadj.1.1.1
+  refine ⟨hne, fun ax hax => ?_⟩
+  obtain ⟨idx, hidx, rfl⟩ := List.getElem_of_mem hax
+  have hidx' : idx < o.toArray.size := by simpa using hidx
+  have hchk := haxs idx hidx'
+  have hget : o.toArray[idx]? = some o[idx] := by
+    rw [Array.getElem?_eq_getElem hidx']; rfl
+  rw [hget] at hchk
+  simp only [Bool.or_eq_true, Bool.and_eq_true] at hchk
+  rcases hchk with hloc | ⟨hcov, haxm⟩
+  · rw [FastLocality.isBotLocalAxiomFast_eq] at hloc
+    exact Profile.isBotLocalAxiom_sound (m.toInterpretation dm hne) fs.toSig hloc
+  · have hsub := (FastLocality.FastSig.coversSig_iff fs (Profile.axiomSig o[idx])).mp hcov
+    exact (Profile.restrictToSig_axiomHolds (m.toInterpretation dm hne) hsub).mpr
+      (checkCBAxiom_sound hadj hne haxm)
+
+/-- Counterexample refutation theorem for partial CB models:
+    any witness node `x < m.numNodes` where `a` holds in `restrictToSig m fs.toSig`
+    and `b` does not hold (either `b = nothing`, `b ∉ fs`, or `m.hasCls b x = false`)
+    soundly refutes `o ⊨ a ⊑ b`. -/
+theorem checkCBPartialModel_counter_sub {dm : DatatypeMap} {o : Ontology} {m : CBCanonicalModel}
+    {fs : FastLocality.FastSig} {numWorkers : Nat}
+    (hcheck : checkCBPartialModel o m fs numWorkers = true)
+    {a b : IRI} {x : Nat} (hx : x < m.numNodes)
+    (haSig : a = thing ∨ (a ≠ nothing ∧ fs.hasCls a = true))
+    (ha : m.hasCls a x = true)
+    (hb : b ≠ thing ∧ (b = nothing ∨ fs.hasCls b = false ∨ m.hasCls b x = false)) :
+    ¬ Entails dm o [.subClassOf (.named a) (.named b)] := by
+  obtain ⟨hne, hsat⟩ := checkCBPartialModel_sound (dm := dm) hcheck
+  intro hent
+  obtain ⟨assign, hq⟩ := hent (Profile.restrictToSig (m.toInterpretation dm hne) fs.toSig)
+    (satisfies_models hsat)
+  have haHolds : classHolds ((Profile.restrictToSig (m.toInterpretation dm hne) fs.toSig).withAnonymous assign)
+      ⟨x, hx⟩ (.named a) := by
+    simp only [classHolds, Interpretation.withAnonymous, Profile.restrictToSig]
+    rcases haSig with rfl | ⟨han, has⟩
+    · simp
+    · by_cases hat : a = thing
+      · simp [hat]
+      · rw [FastLocality.FastSig.hasCls_eq] at has
+        simp [hat, han, has]
+        exact ha
+  have hbHolds := hq _ (List.mem_singleton.mpr rfl) ⟨x, hx⟩ haHolds
+  simp only [classHolds, Interpretation.withAnonymous, Profile.restrictToSig] at hbHolds
+  obtain ⟨hbt, hbRest⟩ := hb
+  simp only [hbt, ↓reduceIte] at hbRest hbHolds
+  rcases hbRest with rfl | hbf | hbm
+  · simp at hbHolds
+  · rw [FastLocality.FastSig.hasCls_eq] at hbf
+    by_cases hbn : b = nothing
+    · simp [hbn] at hbHolds
+    · simp [hbn, hbf] at hbHolds
+  · by_cases hbn : b = nothing
+    · simp [hbn] at hbHolds
+    · simp only [hbn, ↓reduceIte] at hbHolds
+      split at hbHolds
+      · change m.hasCls b x = true at hbHolds
+        rw [hbm] at hbHolds
+        cases hbHolds
+      · exact hbHolds
+
+/-- Satisfiability witness theorem for partial CB models:
+    any class `a` in `fs` (or `owl:Thing`) holding at `x < m.numNodes` in `m`
+    is proved satisfiable in `o` (`o ⊭ a ⊑ owl:Nothing`). -/
+theorem checkCBPartialModel_witness_sat {dm : DatatypeMap} {o : Ontology} {m : CBCanonicalModel}
+    {fs : FastLocality.FastSig} {numWorkers : Nat}
+    (hcheck : checkCBPartialModel o m fs numWorkers = true)
+    {a : IRI} {x : Nat} (hx : x < m.numNodes)
+    (haSig : a = thing ∨ (a ≠ nothing ∧ fs.hasCls a = true))
+    (ha : m.hasCls a x = true) :
+    ¬ Entails dm o [.subClassOf (.named a) (.named nothing)] :=
+  checkCBPartialModel_counter_sub hcheck hx haSig ha ⟨by simp [thing, nothing], Or.inl rfl⟩
+
+theorem checkCBPartialModel_workers_eq (o : Ontology) (m : CBCanonicalModel)
+    (fs : FastLocality.FastSig) (w : Nat) :
+    checkCBPartialModel o m fs w = checkCBPartialModel o m fs 1 := by
+  apply Bool.eq_iff_iff.mpr
+  simp only [checkCBPartialModel, Bool.and_eq_true, checkAdjConsistent_workers_eq, allRangePar_iff]
+
+private def mapListChunks {α β : Type} (chunk : Nat) (f : α → β) :
+    Nat → List α → List (Task (List β))
+  | 0, xs => [Task.pure (xs.map f)]
+  | _ + 1, [] => []
+  | workers + 1, x :: xs =>
+    let (front, rest) := (x :: xs).splitAt chunk
+    Task.spawn (fun () => front.map f) :: mapListChunks chunk f workers rest
+
+private theorem mapListChunks_get {α β : Type} (chunk : Nat) (f : α → β)
+    (workers : Nat) (xs : List α) :
+    (mapListChunks chunk f workers xs).flatMap Task.get = xs.map f := by
+  induction workers generalizing xs with
+  | zero => simp [mapListChunks]
+  | succ workers ih =>
+    cases xs with
+    | nil => rfl
+    | cons x xs =>
+      simp only [mapListChunks, List.splitAt_eq, List.flatMap_cons, Task.spawn, ih]
+      rw [← List.map_append, List.take_append_drop]
+
+private def mapListPar {α β : Type} (workers : Nat) (f : α → β) (xs : List α) : List β :=
+  if workers ≤ 1 || xs.length ≤ 1 then xs.map f
+  else
+    let count := min workers xs.length
+    let chunk := (xs.length + count - 1) / count
+    (mapListChunks chunk f count xs).flatMap Task.get
+
+private theorem mapListPar_eq {α β : Type} (workers : Nat) (f : α → β) (xs : List α) :
+    mapListPar workers f xs = xs.map f := by
+  unfold mapListPar
+  split
+  · rfl
+  · exact mapListChunks_get ..
+
+private inductive SigSym where
+  | cls (iri : IRI)
+  | obj (iri : IRI)
+  | data (iri : IRI)
+  deriving BEq, Hashable
+
+private def symDeg (idx : FastLocality.LocalityIndex) : SigSym → Nat
+  | .cls c => (idx.clsIdx.getD c #[]).size
+  | .obj r => (idx.objIdx.getD r #[]).size
+  | .data p => (idx.dataIdx.getD p #[]).size
+
+private def pickCheaper (a b : Option (Nat × List SigSym)) : Option (Nat × List SigSym) :=
+  match a, b with
+  | some (ca, sa), some (cb, sb) => if ca ≤ cb then some (ca, sa) else some (cb, sb)
+  | some x, none => some x
+  | none, some y => some y
+  | none, none => none
+
+private def combinePlans (a b : Option (Nat × List SigSym)) : Option (Nat × List SigSym) :=
+  match a, b with
+  | some (ca, sa), some (cb, sb) => some (ca + cb, sa ++ sb)
+  | _, _ => none
+
+private def planBotObj (idx : FastLocality.LocalityIndex) (fs : FastLocality.FastSig)
+    (r : ObjectProperty) : Option (Nat × List SigSym) :=
+  let iri := Profile.objPropIRI r
+  if iri == bottomObjectProperty then some (0, [])
+  else if iri == topObjectProperty then none
+  else if !fs.hasObj iri then some (0, [])
+  else some (symDeg idx (.obj iri) + 1, [.obj iri])
+
+private def planBotData (idx : FastLocality.LocalityIndex) (fs : FastLocality.FastSig)
+    (p : IRI) : Option (Nat × List SigSym) :=
+  if p == bottomDataProperty then some (0, [])
+  else if p == topDataProperty then none
+  else if !fs.hasData p then some (0, [])
+  else some (symDeg idx (.data p) + 1, [.data p])
+
+mutual
+  private def planBotExpr (idx : FastLocality.LocalityIndex) (fs : FastLocality.FastSig) :
+      ClassExpr → Option (Nat × List SigSym)
+    | .named c =>
+      if c == nothing then some (0, [])
+      else if c == thing then none
+      else if !fs.hasCls c then some (0, [])
+      else some (symDeg idx (.cls c) + 1, [.cls c])
+    | .complement c => planTopExpr idx fs c
+    | .intersection a b => pickCheaper (planBotExpr idx fs a) (planBotExpr idx fs b)
+    | .union a b => combinePlans (planBotExpr idx fs a) (planBotExpr idx fs b)
+    | .oneOf inds => if inds.isEmpty then some (0, []) else none
+    | .objectSome r c => pickCheaper (planBotObj idx fs r) (planBotExpr idx fs c)
+    | .objectAll _ _ => none
+    | .objectValue r _ => planBotObj idx fs r
+    | .objectSelf r => planBotObj idx fs r
+    | .objectMin n r c =>
+      if n > 0 then pickCheaper (planBotObj idx fs r) (planBotExpr idx fs c) else none
+    | .objectMax _ _ _ => none
+    | .objectExact n r c =>
+      if n > 0 then pickCheaper (planBotObj idx fs r) (planBotExpr idx fs c) else none
+    | .dataSome p _ | .dataValue p _ => planBotData idx fs p
+    | .dataAll _ _ => none
+    | .dataMin n p _ | .dataExact n p _ => if n > 0 then planBotData idx fs p else none
+    | .dataMax _ _ _ => none
+
+  private def planTopExpr (idx : FastLocality.LocalityIndex) (fs : FastLocality.FastSig) :
+      ClassExpr → Option (Nat × List SigSym)
+    | .named c => if c == thing then some (0, []) else none
+    | .complement c => planBotExpr idx fs c
+    | .intersection a b => combinePlans (planTopExpr idx fs a) (planTopExpr idx fs b)
+    | .union a b => pickCheaper (planTopExpr idx fs a) (planTopExpr idx fs b)
+    | .oneOf _ | .objectSome _ _ | .objectValue _ _ | .objectSelf _ | .objectExact _ _ _
+    | .dataSome _ _ | .dataValue _ _ | .dataExact _ _ _ => none
+    | .objectAll r c => pickCheaper (planBotObj idx fs r) (planTopExpr idx fs c)
+    | .objectMin n _ _ => if n == 0 then some (0, []) else none
+    | .objectMax _ r c => pickCheaper (planBotObj idx fs r) (planBotExpr idx fs c)
+    | .dataAll p _ | .dataMax _ p _ => planBotData idx fs p
+    | .dataMin n _ _ => if n == 0 then some (0, []) else none
+end
+
+private def planAtMostOne (plans : List (Option (Nat × List SigSym))) : Option (Nat × List SigSym) := Id.run do
+  let mut noneCount : Nat := 0
+  let mut maxCost : Nat := 0
+  let mut maxIdx : Nat := 0
+  let mut idxPos : Nat := 0
+  let arr := plans.toArray
+  for p in arr do
+    match p with
+    | none => noneCount := noneCount + 1
+    | some (c, _) =>
+      if c ≥ maxCost then
+        maxCost := c
+        maxIdx := idxPos
+    idxPos := idxPos + 1
+  if noneCount ≥ 2 then return none
+  let mut totalCost : Nat := 0
+  let mut syms : List SigSym := []
+  for i in [0:arr.size] do
+    let skip := if noneCount == 1 then arr[i]!.isNone else i == maxIdx
+    if !skip then
+      match arr[i]! with
+      | none => return none
+      | some (c, s) =>
+        totalCost := totalCost + c
+        syms := s ++ syms
+  return some (totalCost, syms)
+
+private def planBotLocalAxiom (idx : FastLocality.LocalityIndex) (fs : FastLocality.FastSig) :
+    Axiom → Option (Nat × List SigSym)
+  | .subClassOf a b => pickCheaper (planBotExpr idx fs a) (planTopExpr idx fs b)
+  | .equivalentClasses cs =>
+    let allBot := cs.foldl (fun acc c => combinePlans acc (planBotExpr idx fs c)) (some (0, []))
+    let allTop := cs.foldl (fun acc c => combinePlans acc (planTopExpr idx fs c)) (some (0, []))
+    pickCheaper allBot allTop
+  | .disjointClasses cs => planAtMostOne (cs.map (planBotExpr idx fs))
+  | .disjointUnion h cs =>
+    cs.foldl (fun acc c => combinePlans acc (planBotExpr idx fs c)) (planBotExpr idx fs (.named h))
+  | .subObjectProperty r s =>
+    if Profile.isTopObjProp s then some (0, []) else planBotObj idx fs r
+  | .subObjectPropertyChain rs s =>
+    if Profile.isTopObjProp s then some (0, [])
+    else rs.foldl (fun acc r => pickCheaper acc (planBotObj idx fs r)) none
+  | .equivalentObjectProperties rs =>
+    if rs.all Profile.isTopObjProp then some (0, [])
+    else rs.foldl (fun acc r => combinePlans acc (planBotObj idx fs r)) (some (0, []))
+  | .disjointObjectProperties rs => planAtMostOne (rs.map (planBotObj idx fs))
+  | .inverseObjectProperties r s =>
+    if Profile.isTopObjProp r && Profile.isTopObjProp s then some (0, [])
+    else combinePlans (planBotObj idx fs r) (planBotObj idx fs s)
+  | .objectPropertyDomain r c | .objectPropertyRange r c =>
+    pickCheaper (planBotObj idx fs r) (planTopExpr idx fs c)
+  | .functionalObjectProperty r | .inverseFunctionalObjectProperty r
+  | .irreflexiveObjectProperty r | .symmetricObjectProperty r
+  | .asymmetricObjectProperty r | .transitiveObjectProperty r =>
+    planBotObj idx fs r
+  | .reflexiveObjectProperty r =>
+    if Profile.isTopObjProp r then some (0, []) else none
+  | .subDataProperty r s =>
+    if s == topDataProperty then some (0, []) else planBotData idx fs r
+  | .equivalentDataProperties rs =>
+    if rs.all (· == topDataProperty) then some (0, [])
+    else rs.foldl (fun acc p => combinePlans acc (planBotData idx fs p)) (some (0, []))
+  | .disjointDataProperties rs => planAtMostOne (rs.map (planBotData idx fs))
+  | .dataPropertyDomain r c =>
+    pickCheaper (planBotData idx fs r) (planTopExpr idx fs c)
+  | .dataPropertyRange r _ | .functionalDataProperty r => planBotData idx fs r
+  | .hasKey c rs ds =>
+    let p0 := planBotExpr idx fs c
+    let p1 := rs.foldl (fun acc r => pickCheaper acc (planBotObj idx fs r)) p0
+    ds.foldl (fun acc p => pickCheaper acc (planBotData idx fs p)) p1
+  | .classAssertion c _ => planTopExpr idx fs c
+  | .objectAssertion r _ _ => if Profile.isTopObjProp r then some (0, []) else none
+  | .negativeObjectAssertion r _ _ => planBotObj idx fs r
+  | .dataAssertion p _ _ => if p == topDataProperty then some (0, []) else none
+  | .negativeDataAssertion p _ _ => planBotData idx fs p
+  | .datatypeDefinition _ _ | .sameIndividuals _ | .differentIndividuals _ => none
+
+/-- Compute a maximal clean sub-signature `fs` of `idx` in $O(|O|)$ time such that
+    every axiom failing `axOk` (and every axiom losing a symbol from `fs`) becomes
+    syntactically ⊥-local w.r.t. `fs`. Untrusted heuristic — independently verified
+    by `checkCBPartialModel`. -/
+def buildCBPartialSig (idx : FastLocality.LocalityIndex) (axOk : Array Bool) :
+    Option FastLocality.FastSig := Id.run do
+  let n := idx.axioms.size
+  if axOk.size != n then return none
+  let mut clsSet : Std.HashSet IRI := {}
+  for (c, _) in idx.clsIdx do
+    clsSet := clsSet.insert c
+  let mut objSet : Std.HashSet IRI := {}
+  for (r, _) in idx.objIdx do
+    objSet := objSet.insert r
+  let mut dataSet : Std.HashSet IRI := {}
+  for (p, _) in idx.dataIdx do
+    dataSet := dataSet.insert p
+  let mut fs : FastLocality.FastSig := ⟨clsSet, objSet, dataSet⟩
+  let mut dropped : Array Bool := Array.replicate n false
+  let mut queue : Array Nat := #[]
+  for i in [0:n] do
+    if !axOk[i]! then
+      dropped := dropped.set! i true
+      queue := queue.push i
+  let mut head : Nat := 0
+  while head < queue.size do
+    let i := queue[head]!
+    head := head + 1
+    let some ax := idx.axioms[i]? | continue
+    if FastLocality.isBotLocalAxiomFast fs ax then continue
+    match planBotLocalAxiom idx fs ax with
+    | none => return none
+    | some (_, syms) =>
+      for sym in syms do
+        let mut hits : Array Nat := #[]
+        match sym with
+        | .cls c =>
+          if fs.hasCls c then
+            fs := { fs with cls := fs.cls.erase c }
+            hits := idx.clsIdx.getD c #[]
+        | .obj r =>
+          if fs.hasObj r then
+            fs := { fs with obj := fs.obj.erase r }
+            hits := idx.objIdx.getD r #[]
+        | .data p =>
+          if fs.hasData p then
+            fs := { fs with data := fs.data.erase p }
+            hits := idx.dataIdx.getD p #[]
+        for j in hits do
+          if j < n && !dropped[j]! then
+            dropped := dropped.set! j true
+            if let some axj := idx.axioms[j]? then
+              if !FastLocality.isBotLocalAxiomFast fs axj then
+                queue := queue.push j
+      if !FastLocality.isBotLocalAxiomFast fs ax then
+        return none
+  if fs.cls.isEmpty then return none
+  return some fs
+
+private def hasUnsupportedAlwaysNonLocal (idx : FastLocality.LocalityIndex) : Bool :=
+  idx.alwaysNonLocal.any fun i =>
+    match idx.axioms[i]? with
+    | some (.classAssertion ..) | some (.objectAssertion ..) | some (.dataAssertion ..)
+    | some (.sameIndividuals ..) | some (.differentIndividuals ..)
+    | some (.datatypeDefinition ..) => true
+    | _ => false
+
+private def runPar2 {α β : Type} (workers : Nat) (f : Unit → α) (g : Unit → β) : α × β :=
+  if workers ≤ 1 then (f (), g ())
+  else
+    let t := Task.spawn g
+    let a := f ()
+    (a, t.get)
+
+private theorem runPar2_eq {α β : Type} (workers : Nat) (f : Unit → α) (g : Unit → β) :
+    runPar2 workers f g = (f (), g ()) := by
+  unfold runPar2
+  split <;> rfl
+
+private def exprHasPosUnion : ClassExpr → Bool
+  | .union a b => a != .named nothing && b != .named nothing
+  | .intersection a b => exprHasPosUnion a || exprHasPosUnion b
+  | .objectSome _ c | .objectAll _ c | .objectMin _ _ c => exprHasPosUnion c
+  | _ => false
+
+private def axiomHasPosUnion : Axiom → Bool
+  | .subClassOf _ b => exprHasPosUnion b
+  | .equivalentClasses cs => cs.any exprHasPosUnion
+  | _ => false
+
+private def strengthenPos (pickFirst : Bool) : ClassExpr → ClassExpr
+  | .intersection a b => .intersection (strengthenPos pickFirst a) (strengthenPos pickFirst b)
+  | .union a b =>
+    if a == .named nothing then strengthenPos pickFirst b
+    else if b == .named nothing then strengthenPos pickFirst a
+    else if pickFirst then strengthenPos pickFirst a else strengthenPos pickFirst b
+  | .objectSome r c => .objectSome r (strengthenPos pickFirst c)
+  | .objectAll r c => .objectAll r (strengthenPos pickFirst c)
+  | .objectMin n r c => .objectMin n r (strengthenPos pickFirst c)
+  | c => c
+
+private def strengthenOnt (pickFirst : Bool) (o : Ontology) : Ontology :=
+  o.flatMap fun
+    | .subClassOf a b => [.subClassOf a (strengthenPos pickFirst b)]
+    | .equivalentClasses [c0, c1] =>
+      [.subClassOf c0 (strengthenPos pickFirst c1), .subClassOf c1 (strengthenPos pickFirst c0)]
+    | ax => [ax]
+
+/-- Extract a kernel-verified countermodel summary from `m` against the ORIGINAL ontology `o`:
+    first attempts full-ontology verification (`checkCBCanonicalModel`), and if any axioms
+    fail, shrinks to the maximal ⊥-local clean sub-signature `fs` verified by
+    `checkCBPartialModel`. -/
+private def harvestVerifiedCBModel (o : Ontology) (idx : FastLocality.LocalityIndex)
+    (namedClasses : List IRI) (namedClassSet : Std.HashSet IRI)
+    (m : CBCanonicalModel) (witnessNode : Std.HashMap IRI Nat) (numWorkers : Nat) :
+    List (IRI × List IRI) :=
+  if m.numNodes == 0 || !checkAdjConsistent m numWorkers then []
+  else
+    let axOk := (mapListPar numWorkers (checkCBAxiom m) o).toArray
+    if axOk.all id then
+      -- Every axiom of `o` holds on `m`: verify full model via `checkCBCanonicalModel`
+      if checkCBCanonicalModel o m numWorkers then
+        Id.run do
+          let mut out : Array (IRI × List IRI) := #[]
+          for c in namedClasses do
+            if c == thing then
+              let cand := (m.nodeClasses.getD 0 {}).toList.filter fun b =>
+                b != thing && b != nothing && namedClassSet.contains b
+              out := out.push (thing, cand)
+            else if c != nothing then
+              let x? := match witnessNode[c]? with
+                | some x => some x
+                | none => (m.clsNodes.getD c #[])[0]?
+              if let some x := x? then
+                if x < m.numNodes && m.hasCls c x then
+                  let cand := (m.nodeClasses.getD x {}).toList.filter fun b =>
+                    b != thing && b != nothing && namedClassSet.contains b
+                  out := out.push (c, cand)
+          return out.toList
+      else []
+    else
+      match buildCBPartialSig idx axOk with
+      | none => []
+      | some fs =>
+        if checkCBPartialModel o m fs numWorkers then
+          Id.run do
+            let mut out : Array (IRI × List IRI) := #[]
+            for c in namedClasses do
+              if c == thing then
+                let cand := (m.nodeClasses.getD 0 {}).toList.filter fun b =>
+                  b != thing && b != nothing && namedClassSet.contains b && fs.hasCls b
+                out := out.push (thing, cand)
+              else if c != nothing && fs.hasCls c then
+                let x? := match witnessNode[c]? with
+                  | some x => some x
+                  | none => (m.clsNodes.getD c #[])[0]?
+                if let some x := x? then
+                  if x < m.numNodes && m.hasCls c x then
+                    let cand := (m.nodeClasses.getD x {}).toList.filter fun b =>
+                      b != thing && b != nothing && namedClassSet.contains b && fs.hasCls b
+                    out := out.push (c, cand)
+            return out.toList
+        else []
+
+private theorem harvestVerifiedCBModel_workers_eq (o : Ontology) (idx : FastLocality.LocalityIndex)
+    (namedClasses : List IRI) (namedClassSet : Std.HashSet IRI)
+    (m : CBCanonicalModel) (witnessNode : Std.HashMap IRI Nat) (w : Nat) :
+    harvestVerifiedCBModel o idx namedClasses namedClassSet m witnessNode w =
+      harvestVerifiedCBModel o idx namedClasses namedClassSet m witnessNode 1 := by
+  simp only [harvestVerifiedCBModel, checkAdjConsistent_workers_eq, mapListPar_eq,
+    checkCBCanonicalModel_workers_eq, checkCBPartialModel_workers_eq]
+
+/-- Run Horn-$\mathcal{SHIQ}$ saturation, returning both:
+    1. the kernel-verified positive subsumptions & unsatisfiable classes (`FastCBResult`), and
+    2. kernel-verified countermodel summaries `List (IRI × List IRI)` verified against the
+       ORIGINAL ontology `o` via `checkCBCanonicalModel` / `checkCBPartialModel`.
+    On nearly-Horn ontologies with positive disjunctions (`owl:unionOf`), also builds two
+    Horn-strengthened countermodels (picking left vs. right disjuncts) in parallel and
+    verifies them directly against the original unmodified ontology `o`. -/
+def runFastCBWithPartialModel (o : Ontology) (idx : FastLocality.LocalityIndex)
+    (namedClasses : List IRI) (namedClassSet : Std.HashSet IRI) (numWorkers : Nat := 8)
+    (maxContexts : Nat := 4096) (maxCtxSize : Nat := 10) (maxLinks : Nat := 32768) :
+    FastCBResult × List (IRI × List IRI) :=
+  let norm := extractHornSHIQ o
+  let canPartial := !hasUnsupportedAlwaysNonLocal idx
+  let useStrengthen := !norm.isPureHornSHIQ && canPartial && o.any axiomHasPosUnion
+  let runMain := fun () =>
+    let effMaxContexts := max maxContexts (norm.table.classes.size * 2)
+    let effMaxLinks := max maxLinks (norm.table.classes.size * 16)
+    saturateHornSHI norm effMaxContexts maxCtxSize effMaxLinks
+  let runStr := fun (pickFirst : Bool) () =>
+    let normS := extractHornSHIQ (strengthenOnt pickFirst o)
+    let effC := max maxContexts (normS.table.classes.size * 2)
+    let effL := max maxLinks (normS.table.classes.size * 16)
+    let certS := saturateHornSHI normS effC maxCtxSize effL
+    buildCBCanonicalModel o normS certS
+  let (cert, strModels?) :=
+    if useStrengthen then
+      let (c, (ms1, ms2)) := runPar2 numWorkers runMain (fun () =>
+        runPar2 (if numWorkers ≥ 3 then 2 else 1) (runStr true) (runStr false))
+      (c, some (ms1, ms2))
+    else (runMain (), none)
+  if checkCBSound norm cert numWorkers then
+    let res : FastCBResult := {
+      subs := extractNamedSubs norm cert
+      unsats := extractNamedUnsats norm cert
+      isPureHornSHIQ := norm.isPureHornSHIQ
+      verified := true
+    }
+    if res.unsats.contains thing || !canPartial then
+      (res, [])
+    else
+      match strModels? with
+      | some ((m1, w1), (m2, w2)) =>
+        let s1 := harvestVerifiedCBModel o idx namedClasses namedClassSet m1 w1 numWorkers
+        let s2 := harvestVerifiedCBModel o idx namedClasses namedClassSet m2 w2 numWorkers
+        if !s1.isEmpty || !s2.isEmpty then
+          (res, s1 ++ s2)
+        else
+          let (m, wmap) := buildCBCanonicalModel o norm cert
+          (res, harvestVerifiedCBModel o idx namedClasses namedClassSet m wmap numWorkers)
+      | none =>
+        let (m, wmap) := buildCBCanonicalModel o norm cert
+        (res, harvestVerifiedCBModel o idx namedClasses namedClassSet m wmap numWorkers)
+  else
+    ({ subs := [], unsats := [], isPureHornSHIQ := false, verified := false }, [])
+
+theorem runFastCBWithPartialModel_workers_eq (o : Ontology) (idx : FastLocality.LocalityIndex)
+    (namedClasses : List IRI) (namedClassSet : Std.HashSet IRI)
+    (w maxContexts maxCtxSize maxLinks : Nat) :
+    runFastCBWithPartialModel o idx namedClasses namedClassSet w maxContexts maxCtxSize maxLinks =
+      runFastCBWithPartialModel o idx namedClasses namedClassSet 1 maxContexts maxCtxSize maxLinks := by
+  simp only [runFastCBWithPartialModel, runPar2_eq, checkCBSound_workers_eq,
+    harvestVerifiedCBModel_workers_eq]
 
 end Sabrina.OWL2.FastCB

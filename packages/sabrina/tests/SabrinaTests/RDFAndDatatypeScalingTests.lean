@@ -130,4 +130,39 @@ private def disjoint25Intervals : List DataRange :=
   | some sr => (sr.finiteValues?.map List.length) == some 256
   | none => false
 
+-- Shared blank-node class expression referenced by multiple axioms + owl:Axiom annotation
+private def sharedBNodeTTL : String :=
+"@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix ex: <http://example.org/> .
+
+<http://example.org/shared> a owl:Ontology .
+ex:r a owl:ObjectProperty .
+ex:A a owl:Class ;
+    owl:equivalentClass _:r1 ;
+    rdfs:subClassOf _:r1 .
+ex:B a owl:Class ;
+    rdfs:subClassOf _:r1 .
+ex:C a owl:Class .
+_:r1 a owl:Restriction ;
+    owl:onProperty ex:r ;
+    owl:someValuesFrom ex:C .
+[] a owl:Axiom ;
+    owl:annotatedSource ex:B ;
+    owl:annotatedProperty rdfs:subClassOf ;
+    owl:annotatedTarget _:r1 ;
+    rdfs:comment \"annotated shared restriction\" .
+"
+
+#guard match resolveImportClosureAuto sharedBNodeTTL [] false with
+  | .ok cl =>
+    let hasSubB := cl.ontology.any fun
+      | .subClassOf (.named "http://example.org/B") (.objectSome (.named "http://example.org/r") (.named "http://example.org/C")) => true
+      | _ => false
+    let hasEqA := cl.ontology.any fun
+      | .equivalentClasses [.named "http://example.org/A", .objectSome (.named "http://example.org/r") (.named "http://example.org/C")] => true
+      | _ => false
+    hasSubB && hasEqA && decideRealOntology? cl.ontology == some true
+  | .error _ => false
+
 end SabrinaTests.RDFAndDatatypeScalingTests

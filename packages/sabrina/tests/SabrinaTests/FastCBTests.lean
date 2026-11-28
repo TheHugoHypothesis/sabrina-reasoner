@@ -193,4 +193,54 @@ private def checkCBComplete (o : Ontology) (cls : List IRI) (sub : IRI × IRI) (
 -- 18. H.4b Non-Horn ontology returns `none` cleanly (falls back to KP)
 #guard (classifyFastCB ontMixed ["X", "Y", "Z", "A", "B", "C"] 1).isNone
 
+-- 19. Nearly-Horn countermodel harvesting (`runFastCBWithPartialModel`):
+--     (a) On `ontMixed` (`X ⊑ Y ⊔ Z` + Horn-SHI), Horn-strengthened dual models
+--         verify against the original `ontMixed` and cover BOTH `A/B/C` and `X`!
+private def checkPartialMixed : Bool :=
+  let cls := ["X", "Y", "Z", "A", "B", "C"]
+  let clsSet : Std.HashSet IRI := cls.foldl (fun s c => s.insert c) {}
+  let idx := Sabrina.OWL2.FastLocality.LocalityIndex.build ontMixed
+  let (res, summary) := runFastCBWithPartialModel ontMixed idx cls clsSet 1
+  let summaryHas (a : IRI) (sup : IRI) : Bool :=
+    match summary.lookup a with
+    | some cands => cands.contains sup
+    | none => false
+  let xEntries := summary.filterMap fun (k, v) => if k == "X" then some v else none
+  let xInter := match xEntries with
+    | e0 :: rest => e0.filter fun b => rest.all (·.contains b)
+    | [] => []
+  res.verified &&
+  (summary.lookup "A").isSome &&
+  summaryHas "A" "C" &&
+  !summaryHas "A" "B" &&
+  (summary.lookup "B").isSome &&
+  (summary.lookup "C").isSome &&
+  !xEntries.isEmpty &&
+  !xInter.contains "Y" &&
+  !xInter.contains "Z"
+
+#guard checkPartialMixed
+
+--     (b) On a mixed Horn + `ObjectHasValue` ontology (cannot be Horn-strengthened),
+--         `checkCBPartialModel` shrinks to the maximal ⊥-local clean signature `fs`
+--         harvesting `A/B/C` while excluding the nominal class `N`.
+private def ontMixedNom : Ontology := [
+  .subClassOf (.named "N") (.objectValue (.named "p") (.named "ind1")),
+  .subClassOf (.named "A") (.objectSome (.named "r") (.named "B")),
+  .subClassOf (.named "B") (.objectAll (.inverse "r") (.named "C"))
+]
+
+private def checkPartialNom : Bool :=
+  let cls := ["N", "A", "B", "C"]
+  let clsSet : Std.HashSet IRI := cls.foldl (fun s c => s.insert c) {}
+  let idx := Sabrina.OWL2.FastLocality.LocalityIndex.build ontMixedNom
+  let (res, summary) := runFastCBWithPartialModel ontMixedNom idx cls clsSet 1
+  res.verified &&
+  (summary.lookup "A").isSome &&
+  (summary.lookup "B").isSome &&
+  (summary.lookup "C").isSome &&
+  (summary.lookup "N").isNone
+
+#guard checkPartialNom
+
 end SabrinaTests.FastCBTests

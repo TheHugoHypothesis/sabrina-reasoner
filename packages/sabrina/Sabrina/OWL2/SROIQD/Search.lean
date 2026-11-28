@@ -265,6 +265,7 @@ private structure BranchIndex (s : Branch) where
   eidx : EdgeIndex s.edges
   someLabelNodes : Std.HashMap OrientedRole (List Nat)
   classNodes : Std.HashMap IRI (List Nat)
+  negClassNodes : Std.HashMap IRI (List Nat)
   nomNodes : Std.HashMap (String × String) (List Nat)
   nomBinding : Std.HashMap IRI (List Nat)
   anonBinding : Std.HashMap (String × String) (List Nat)
@@ -283,6 +284,7 @@ private def buildBranchIndexWith (s : Branch) (edgeIdx? : Option (EdgeIndex s.ed
   let mut seenLabel : Std.HashSet (Nat × Concept) := {}
   let mut expandedSet : Std.HashSet (Nat × Concept) := {}
   let mut classNodes : Std.HashMap IRI (List Nat) := {}
+  let mut negClassNodes : Std.HashMap IRI (List Nat) := {}
   let mut nomNodes : Std.HashMap (String × String) (List Nat) := {}
   let mut someLabelNodes : Std.HashMap OrientedRole (List Nat) := {}
   let mut dataTouchNodes : Std.HashMap IRI (List Nat) := {}
@@ -298,6 +300,7 @@ private def buildBranchIndexWith (s : Branch) (edgeIdx? : Option (EdgeIndex s.ed
       seenLabel := seenLabel.insert (x, c)
       match c with
       | .lit cls true => classNodes := classNodes.insert cls (x :: classNodes.getD cls [])
+      | .lit cls false => negClassNodes := negClassNodes.insert cls (x :: negClassNodes.getD cls [])
       | .nom ind true =>
         let k := indKey ind
         nomNodes := nomNodes.insert k (x :: nomNodes.getD k [])
@@ -345,7 +348,7 @@ private def buildBranchIndexWith (s : Branch) (edgeIdx? : Option (EdgeIndex s.ed
   return {
     nodes := nodeArr.toList
     labels, expandedSet, eidx,
-    someLabelNodes, classNodes, nomNodes,
+    someLabelNodes, classNodes, negClassNodes, nomNodes,
     nomBinding, anonBinding, dataSources, dataTouchNodes, dataByPropNode, dataEdgesByPropNode,
     dataConstraintByNodeProp, dataCardLabels, hasSelfLabel
   }
@@ -1343,6 +1346,19 @@ private def deterministicGCI (p : Problem) (st : StaticIndex p) (s : Branch) (id
           if let some ⟨ht⟩ := isTriggeredProof idx x q.sub then
             added := added.insert (x, q.sup)
             items := ⟨(x, q.sup), fun i env hm hs => hm.tbox q hq (env x) (ht i env hs)⟩ :: items
+    -- Deterministic contrapositive (modus tollens) on complex-LHS GCIs: `x ⊢ ¬C` & `sub ⊑ C` ⇒ `x ⊢ sub.dual`
+    for (cls, cands) in idx.negClassNodes do
+      for ⟨q, hq⟩ in st.tboxBySup.getD (.lit cls true) [] do
+        match q.sub with
+        | .lit _ true => continue
+        | _ =>
+          for x in cands do
+            if !idx.fastKnown x q.sub.dual && !added.contains (x, q.sub.dual) then
+              if let some ⟨hneg⟩ := idx.knownProof x q.sup.dual then
+                added := added.insert (x, q.sub.dual)
+                items := ⟨(x, q.sub.dual), fun i env hm hs =>
+                  (holds_dual i (env x) q.sub).mpr fun hsub =>
+                    (holds_dual i (env x) q.sup).mp (hneg i env hs) (hm.tbox q hq (env x) hsub)⟩ :: items
   else
     for ⟨q, hq⟩ in p.tbox.attach do
       for x in idx.nodes do
@@ -1355,11 +1371,11 @@ private def deterministicGCI (p : Problem) (st : StaticIndex p) (s : Branch) (id
   if items.isEmpty then return none else return some (addManySame items)
 
 private def disjAlreadyKnown {s : Branch} (idx : BranchIndex s) (x : Nat) : Concept → Bool
-  | .disj a b => disjAlreadyKnown idx x a || disjAlreadyKnown idx x b
+  | .disj a b => idx.fastKnown x (.disj a b) || disjAlreadyKnown idx x a || disjAlreadyKnown idx x b
   | c => idx.fastKnown x c
 
 private def disjAlreadyKnownSmall (s : Branch) (x : Nat) : Concept → Bool
-  | .disj a b => disjAlreadyKnownSmall s x a || disjAlreadyKnownSmall s x b
+  | .disj a b => s.known x (.disj a b) || disjAlreadyKnownSmall s x a || disjAlreadyKnownSmall s x b
   | c => s.known x c
 
 private def disjunctions (p : Problem) (st : StaticIndex p) (s : Branch) (idx : BranchIndex s) :
@@ -1762,7 +1778,7 @@ private def isSpecialConcept : Concept → Bool
 
 private def disjAlreadyKnownStore {labels : List (Nat × Concept)} (st : LabelStore labels) (x : Nat) :
     Concept → Bool
-  | .disj a b => disjAlreadyKnownStore st x a || disjAlreadyKnownStore st x b
+  | .disj a b => st.fastKnown x (.disj a b) || disjAlreadyKnownStore st x a || disjAlreadyKnownStore st x b
   | c => st.fastKnown x c
 
 private structure DeltaCache (s : Branch) where
@@ -1936,6 +1952,18 @@ private def nextDelta (p : Problem) (st : StaticIndex p) (s : Branch) (cache : D
           if let some ⟨ht⟩ := isTriggeredDelta cache.labels cache.eidx x q.sub then
             gciAdded := gciAdded.insert (x, q.sup)
             gciItems := ⟨(x, q.sup), fun i env hm hs => hm.tbox q hq (env x) (ht i env hs)⟩ :: gciItems
+    | .lit cls false =>
+      if let some ⟨hneg⟩ := cache.labels.knownProof x (.lit cls false) then
+        for ⟨q, hq⟩ in st.tboxBySup.getD (.lit cls true) [] do
+          match q.sub with
+          | .lit _ true => continue
+          | _ =>
+            if hsup : q.sup = .lit cls true then
+              if !cache.labels.fastKnown x q.sub.dual && !gciAdded.contains (x, q.sub.dual) then
+                gciAdded := gciAdded.insert (x, q.sub.dual)
+                gciItems := ⟨(x, q.sub.dual), fun i env hm hs =>
+                  (holds_dual i (env x) q.sub).mpr fun hsub =>
+                    (holds_dual i (env x) q.sup).mp (hsup ▸ hneg i env hs) (hm.tbox q hq (env x) hsub)⟩ :: gciItems
     | .some r _ =>
       for ⟨q, hq⟩ in st.roleGCIs.getD r [] do
         if !cache.labels.fastKnown x q.sup && !gciAdded.contains (x, q.sup) then
@@ -2656,7 +2684,11 @@ private def isTriggeredCanon (labelSet : Std.HashSet (Nat × Concept))
   | .self r true =>
     labelSet.contains (x, .self r true) ||
     (if r.2 then edgeSet.contains (r.1, x, x) else edgeSet.contains (r.1, x, x))
-  | .dataValue dp l true => labelSet.contains (x, .dataValue dp l true)
+  | .dataValue dp l true =>
+    labelSet.contains (x, .dataValue dp l true) ||
+    match decodeLiteral l with
+    | some v => (dataByPropNode.getD (dp, x) []).contains v
+    | none => false
   | .conj a b =>
     isTriggeredCanon labelSet outAdj inAdj edgeSet dataByPropNode x a &&
     isTriggeredCanon labelSet outAdj inAdj edgeSet dataByPropNode x b
@@ -2667,11 +2699,22 @@ private def isTriggeredCanon (labelSet : Std.HashSet (Nat × Concept))
     labelSet.contains (x, .some r body) ||
     (if r.2 then inAdj.getD (r.1, x) [] else outAdj.getD (r.1, x) []).any fun y =>
       isTriggeredCanon labelSet outAdj inAdj edgeSet dataByPropNode y body
+  | .min n r body =>
+    n == 0 ||
+    labelSet.contains (x, .min n r body) ||
+    ((if r.2 then inAdj.getD (r.1, x) [] else outAdj.getD (r.1, x) []).filter fun y =>
+      isTriggeredCanon labelSet outAdj inAdj edgeSet dataByPropNode y body).length ≥ n
   | .dataSome dp d =>
     labelSet.contains (x, .dataSome dp d) ||
     (dataByPropNode.getD (dp, x) []).any fun v =>
       d == .datatype literalDatatype ||
       match compile d with | some comp => comp.holds v | none => false
+  | .dataMin n dp d =>
+    n == 0 ||
+    labelSet.contains (x, .dataMin n dp d) ||
+    ((dataByPropNode.getD (dp, x) []).filter fun v =>
+      d == .datatype literalDatatype ||
+      match compile d with | some comp => comp.holds v | none => false).length ≥ n
   | c => labelSet.contains (x, c)
 
 private def walkCanonTargets (outAdj inAdj : Std.HashMap (IRI × Nat) (List Nat))
@@ -2823,6 +2866,7 @@ private def tryCanonicalModelAttempt (p : Problem) (st : StaticIndex p)
   let mut labelSet : Std.HashSet (Nat × Concept) := {}
   let mut labelsByNode : Std.HashMap Nat (List Concept) := {}
   let mut classNodes : Std.HashMap IRI (List Nat) := {}
+  let mut negClassNodes : Std.HashMap IRI (List Nat) := {}
   let mut nomNodes : Std.HashMap (String × String) (List Nat) := {}
   let mut someLabels : Array (Nat × OrientedRole × Concept) := #[]
   let mut minLabels : Array (Nat × Nat × OrientedRole × Concept) := #[]
@@ -2844,7 +2888,9 @@ private def tryCanonicalModelAttempt (p : Problem) (st : StaticIndex p)
     if !nodeSet.contains x then nodeSet := nodeSet.insert x; nodes := nodes.push x; if x > maxNode then maxNode := x
     dataByPropNode := dataByPropNode.insert (dp, x) (v :: dataByPropNode.getD (dp, x) [])
     dataTouchNodes := dataTouchNodes.insert dp (x :: dataTouchNodes.getD dp [])
-  for (_, x) in s.noms do
+  let mut nomNodeMap : Std.HashMap IRI Nat := {}
+  for (ind, x) in s.noms do
+    nomNodeMap := nomNodeMap.insert ind x
     if !nodeSet.contains x then nodeSet := nodeSet.insert x; nodes := nodes.push x; if x > maxNode then maxNode := x
   for (_, x) in s.anons do
     if !nodeSet.contains x then nodeSet := nodeSet.insert x; nodes := nodes.push x; if x > maxNode then maxNode := x
@@ -2873,6 +2919,7 @@ private def tryCanonicalModelAttempt (p : Problem) (st : StaticIndex p)
   let maxNewNodes := max 512 (origNodes * 4)
   let mut canonWit1 : Std.HashMap (OrientedRole × Concept × List Concept) Nat := {}
   let mut canonWit2 : Std.HashMap (OrientedRole × Concept × List Concept) Nat := {}
+  let mut nodeParent : Std.HashMap Nat Nat := {}
   let mut nodeChoices : Std.HashMap Nat (List Concept) := {}
   let mut clashNodes : Std.HashSet Nat := {}
   let mut clashed := false
@@ -2953,18 +3000,33 @@ private def tryCanonicalModelAttempt (p : Problem) (st : StaticIndex p)
           else if refB && !loc.contains a then nextWork := a :: nextWork
       work := nextWork
     return true
-  let failClash (nc : Std.HashMap Nat (List Concept)) (cns : Std.HashSet Nat) : List (Nat × Concept) := Id.run do
+  let failClash (nc : Std.HashMap Nat (List Concept)) (np : Std.HashMap Nat Nat)
+      (cns : Std.HashSet Nat) : List (Nat × Concept) := Id.run do
     let mut out : List (Nat × Concept) := []
     for x in cns do
-      for c in nc.getD x [] do
-        out := (x, c) :: out
+      let localCs := nc.getD x []
+      if !localCs.isEmpty then
+        for c in localCs do
+          out := (x, c) :: out
+      else
+        let mut cur := x
+        for _ in [:4] do
+          match np[cur]? with
+          | some par =>
+            let pCs := nc.getD par []
+            if !pCs.isEmpty then
+              for c in pCs do
+                out := (par, c) :: out
+              break
+            cur := par
+          | none => break
     if out.isEmpty then
       for (x, cs) in nc do
         if let some c := cs.head? then
           out := (x, c) :: out
     return out
   for _round in [:512] do
-    if clashed then return .error (failClash nodeChoices clashNodes)
+    if clashed then return .error (failClash nodeChoices nodeParent clashNodes)
     -- 1. Drain pendingLabels (unpacking conjunctions and indexing)
     let mut pIdx := 0
     while h : pIdx < pendingLabels.size do
@@ -2990,6 +3052,8 @@ private def tryCanonicalModelAttempt (p : Problem) (st : StaticIndex p)
             for ⟨(other, _), _⟩ in st.disjMap.getD cls [] do
               if labelSet.contains (x, .lit other true) then
                 clashed := true; clashNodes := clashNodes.insert x
+          | .lit cls false =>
+            negClassNodes := negClassNodes.insert cls (x :: negClassNodes.getD cls [])
           | .nom ind true =>
             let k := indKey ind
             nomNodes := nomNodes.insert k (x :: nomNodes.getD k [])
@@ -3029,10 +3093,11 @@ private def tryCanonicalModelAttempt (p : Problem) (st : StaticIndex p)
                 negDataEdges := (dp, x, v) :: negDataEdges
           | _ => pure ()
     pendingLabels := #[]
-    if clashed then return .error (failClash nodeChoices clashNodes)
+    if clashed then return .error (failClash nodeChoices nodeParent clashNodes)
     -- 2. Close edges under reflexive, rules, and chains when edges changed
     if edgesChanged then
       edgesChanged := false
+      labelsChanged := true
       let mut eLoop := true
       let mut eIter := 0
       while eLoop && eIter < 16 do
@@ -3117,6 +3182,15 @@ private def tryCanonicalModelAttempt (p : Problem) (st : StaticIndex p)
           if !labelSet.contains (x, q.sup) then
             if isTriggeredCanon labelSet outAdj inAdj edgeSet dataByPropNode x q.sub then
               pendingLabels := pendingLabels.push (x, q.sup)
+      for (cls, cands) in negClassNodes do
+        for ⟨q, _⟩ in st.tboxBySup.getD (.lit cls true) [] do
+          match q.sub with
+          | .lit _ true => continue
+          | _ =>
+            for x in cands do
+              if !labelSet.contains (x, q.sub.dual) &&
+                  holdsInCanonState labelSet outAdj inAdj edgeSet dataByPropNode x q.sub then
+                pendingLabels := pendingLabels.push (x, q.sub.dual)
       if !pendingLabels.isEmpty then continue
     -- 3b. Inject optional soft hints (e.g. negative realization seeds) once deterministic closure settles
     if !softApplied then
@@ -3151,25 +3225,60 @@ private def tryCanonicalModelAttempt (p : Problem) (st : StaticIndex p)
           | _ => pure ()
         if !unitDone && !pickedNodes.contains x then
           let alts := flattenDisj (.disj a b)
-          match alts.find? (localSafe labelSet labelsByNode outAdj inAdj edgeSet dataByPropNode x) with
+          let alreadySat (d : Concept) : Bool :=
+            !banned.contains (x, d) &&
+            match d with
+            | .top => true
+            | .some r body =>
+              (if r.2 then inAdj.getD (r.1, x) [] else outAdj.getD (r.1, x) []).any fun y =>
+                body == .top || disjKnownCanon labelSet y body
+            | .min n r body =>
+              n == 0 || ((if r.2 then inAdj.getD (r.1, x) [] else outAdj.getD (r.1, x) []).filter fun y =>
+                body == .top || disjKnownCanon labelSet y body).length ≥ n
+            | .self r true => edgeSet.contains (r.1, x, x)
+            | c => labelSet.contains (x, c)
+          let chosen? :=
+            match alts.find? (fun d => alreadySat d && localSafe labelSet labelsByNode outAdj inAdj edgeSet dataByPropNode x d) with
+            | some c => some c
+            | none => alts.find? (localSafe labelSet labelsByNode outAdj inAdj edgeSet dataByPropNode x)
+          match chosen? with
           | some chosen =>
             pickedNodes := pickedNodes.insert x
             nodeChoices := nodeChoices.insert x (chosen :: nodeChoices.getD x [])
             pendingLabels := pendingLabels.push (x, chosen); pickedDisj := true
           | none =>
             clashed := true; clashNodes := clashNodes.insert x
-    if clashed then return .error (failClash nodeChoices clashNodes)
+    if clashed then return .error (failClash nodeChoices nodeParent clashNodes)
     if pickedDisj then continue
-    -- 5. Canonical witness allocation (reusing one witness per `(r, body, allLabels(r, x))`!)
+    -- 5. Canonical witness allocation (reusing nominal nodes for `ObjectHasValue`/`OneOf`,
+    --    functional neighbors for `FunctionalObjectProperty`, and one witness per `(r, body, allLabels(r, x))`!)
+    let rec extractNamedNom? : Concept → Option IRI
+      | .nom (.named ind) true => some ind
+      | .conj a b =>
+        match extractNamedNom? a with
+        | some ind => some ind
+        | none => extractNamedNom? b
+      | _ => none
+    let findNominalTarget? (body : Concept) : Option Nat :=
+      match extractNamedNom? body with
+      | some ind => nomNodeMap[ind]?
+      | none =>
+        let alts := flattenDisj body
+        if !alts.isEmpty && alts.all (fun c => (extractNamedNom? c).isSome) then
+          alts.findSome? fun c => (extractNamedNom? c).bind (nomNodeMap[·]?)
+        else none
     let mut addedWit := false
     for (x, r, body) in someLabels do
       let adj := if r.2 then inAdj.getD (r.1, x) [] else outAdj.getD (r.1, x) []
       if adj.any (fun y => body == .top || disjKnownCanon labelSet y body) then continue
       let mut w : Nat := 0
       let mut reuseExisting := false
-      -- If `r` has a functional superproperty `fs` and `x` already has an `fs`-neighbor `y`,
+      -- If `body` names an individual (`ObjectHasValue` / `ObjectOneOf`), link directly to its canonical nominal node.
+      if let some wNom := findNominalTarget? body then
+        w := wNom; reuseExisting := true
+      -- Otherwise if `r` has a functional superproperty `fs` and `x` already has an `fs`-neighbor `y`,
       -- reuse `y` (adding `body` and edge `r`) rather than violating `≤1 fs`.
-      if funcRoles.contains r then
+      if !reuseExisting && funcRoles.contains r then
         for fs in funcSuper.getD r [] do
           let fAdj := if fs.2 then inAdj.getD (fs.1, x) [] else outAdj.getD (fs.1, x) []
           if let some y := fAdj.head? then
@@ -3193,18 +3302,21 @@ private def tryCanonicalModelAttempt (p : Problem) (st : StaticIndex p)
                 if nodes.size ≥ origNodes + maxNewNodes then return .error []
                 w := nextNode; nextNode := nextNode + 1
                 nodes := nodes.push w; nodeSet := nodeSet.insert w
+                nodeParent := nodeParent.insert w x
                 canonWit2 := canonWit2.insert wKey w
                 pendingLabels := pendingLabels.push (w, body)
           | none =>
             if nodes.size ≥ origNodes + maxNewNodes then return .error []
             w := nextNode; nextNode := nextNode + 1
             nodes := nodes.push w; nodeSet := nodeSet.insert w
+            nodeParent := nodeParent.insert w x
             canonWit1 := canonWit1.insert wKey w
             pendingLabels := pendingLabels.push (w, body)
         else
           if nodes.size ≥ origNodes + maxNewNodes then return .error []
           w := nextNode; nextNode := nextNode + 1
           nodes := nodes.push w; nodeSet := nodeSet.insert w
+          nodeParent := nodeParent.insert w x
           pendingLabels := pendingLabels.push (w, body)
       let (rn, a, b) := if r.2 then (r.1, w, x) else (r.1, x, w)
       if !edgeSet.contains (rn, a, b) then
@@ -3227,7 +3339,10 @@ private def tryCanonicalModelAttempt (p : Problem) (st : StaticIndex p)
       for _ in [:need - haveCount] do
         let mut w : Nat := 0
         let mut reuseExisting := false
-        if need == 1 && funcRoles.contains r then
+        if need == 1 then
+          if let some wNom := findNominalTarget? body then
+            w := wNom; reuseExisting := true
+        if !reuseExisting && need == 1 && funcRoles.contains r then
           for fs in funcSuper.getD r [] do
             let fAdj := if fs.2 then inAdj.getD (fs.1, x) [] else outAdj.getD (fs.1, x) []
             if let some y := fAdj.head? then
@@ -3236,6 +3351,7 @@ private def tryCanonicalModelAttempt (p : Problem) (st : StaticIndex p)
           if nodes.size ≥ origNodes + maxNewNodes then return .error []
           w := nextNode; nextNode := nextNode + 1
           nodes := nodes.push w; nodeSet := nodeSet.insert w
+          nodeParent := nodeParent.insert w x
         pendingLabels := pendingLabels.push (w, body)
         let (rn, a, b) := if r.2 then (r.1, w, x) else (r.1, x, w)
         if !edgeSet.contains (rn, a, b) then
@@ -3263,7 +3379,7 @@ private def tryCanonicalModelAttempt (p : Problem) (st : StaticIndex p)
             addedNegGCI := true
       if !addedNegGCI then
         break
-  if clashed || !pendingLabels.isEmpty then return .error (failClash nodeChoices clashNodes)
+  if clashed || !pendingLabels.isEmpty then return .error (failClash nodeChoices nodeParent clashNodes)
   -- Propagate DataPropertyRange constraints to any node touching dp before completeDataEdges
   for (dp, dr) in p.dataRanges do
     for x in dataTouchNodes.getD dp [] do
@@ -3543,7 +3659,8 @@ private def probeLoop (p : Problem) (st : StaticIndex p) (maxNodes : Nat) (searc
 private def probe (p : Problem) (maxNodes : Nat) (searchModels : Bool)
     (depth : Nat) (s : Branch) (fuel : Option Nat) : ProbeVerdict p s × Option Nat :=
   let st := buildStaticIndex p
-  if searchModels && (p.tbox.length > 16 || p.rules.length > 16 || s.labels.length > 16) then
+  if searchModels && s.noms.length + s.anons.length + 1 ≤ maxNodes &&
+      (p.tbox.length > 4 || p.rules.length > 4 || s.labels.length > 4 || !s.noms.isEmpty) then
     match tryCanonicalModel p st s with
     | some m => (.model m.val, fuel)
     | none => probeLoop p st maxNodes searchModels depth s fuel none none
